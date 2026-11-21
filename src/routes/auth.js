@@ -15,6 +15,7 @@ import { forgetKey } from '../vault.js';
 import { generateSecret, verifyTotp, otpauthUrl } from '../services/totp.js';
 import { sendSystemEmail, notifyAdmins } from '../services/notify.js';
 import { oauthAvailability, revokeMailboxGrant } from '../services/oauth.js';
+import { welcome } from '../services/lifecycle.js';
 
 const r = Router();
 const EMAIL_RE = /^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,}$/;
@@ -48,7 +49,19 @@ export function createAccount({ email, name, passwordHash, company, googleId, mi
     return one('SELECT * FROM users WHERE id = ?', uid);
   });
   notifyAdmins('New sign-up', `${email} just signed up${referrer ? ' via a referral' : ''}.`).catch(() => {});
+  welcome(one('SELECT id FROM workspaces WHERE owner_id = ?', user.id).id).catch(() => {});
   return user;
+}
+
+/** Join a workspace from an invitation token. The invite must match the user's email. Returns workspace id or throws. */
+export function acceptInvite(user, token) {
+  const inv = one(`SELECT * FROM invites WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > datetime('now')`, sha256(String(token || '')));
+  if (!inv) throw new Error('This invitation is invalid or has expired');
+  if (inv.email !== user.email) throw new Error(`This invitation was sent to ${inv.email}. Sign in with that email to accept it.`);
+  run('INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?,?,?)', inv.workspace_id, user.id, inv.role);
+  run(`UPDATE invites SET accepted_at = datetime('now') WHERE id = ?`, inv.id);
+  run('UPDATE users SET current_workspace_id = ? WHERE id = ?', inv.workspace_id, user.id);
+  return inv.workspace_id;
 }
 
 export function sendVerification(user) {
@@ -84,7 +97,13 @@ r.post('/signup', async (req, res) => {
   if (problem) return res.status(400).json({ error: problem });
   if (one('SELECT id FROM users WHERE email = ?', email)) return res.status(409).json({ error: 'Email already registered' });
   const user = createAccount({ email, name, company, passwordHash: await bcrypt.hash(password, 12), refCode: req.body.ref || req.cookies?.mp_ref });
-  sendVerification(user).catch(() => {});
+  if (req.body.invite) {
+    try {
+      acceptInvite(user, req.body.invite);
+      run('UPDATE users SET email_verified = 1 WHERE id = ?', user.id); // the invite link proved the address
+    } catch { /* invalid invite: account still created */ }
+  }
+  if (!one('SELECT email_verified FROM users WHERE id = ?', user.id).email_verified) sendVerification(user).catch(() => {});
   finishLogin(req, res, user, 'signup');
   res.json({ ok: true });
 });
@@ -179,7 +198,11 @@ r.get('/me', requireAuth, (req, res) => {
     WHERE wm.user_id = ? ORDER BY w.id`, req.user.id);
   const announcements = all(`SELECT id, message, level FROM announcements WHERE active = 1
     AND (starts_at IS NULL OR starts_at <= datetime('now')) AND (ends_at IS NULL OR ends_at >= datetime('now')) ORDER BY id DESC`);
+  const n = one(`SELECT COUNT(*) AS n FROM activity WHERE workspace_id = ? AND created_at > COALESCE(?, '1970')
+    AND type IN ('sync_error','send_failed','phishing_blocked','sla_breach','payment_failed','followup_drafted','draft_created')`, ws?.id ?? -1,
+  one('SELECT notifications_seen_at FROM users WHERE id = ?', req.user.id).notifications_seen_at).n;
   res.json({
+    unreadNotifications: n,
     user: { ...req.user, suspended: undefined },
     role: req.role, impersonatedBy: req.impersonatedBy, workspaces, announcements,
     adminNeeds2fa: Boolean(req.user.is_admin && config.isProd && getBool('require_admin_2fa') && !req.user.totp_enabled),
@@ -206,11 +229,57 @@ r.post('/change-password', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+r.get('/profile', requireAuth, (req, res) => {
+  res.json(one(`SELECT id, email, name, ui_theme, notify_digest, email_verified, totp_enabled, created_at, last_login_at,
+    google_id IS NOT NULL AS google, microsoft_id IS NOT NULL AS microsoft, password_hash != '!' AS has_password FROM users WHERE id = ?`, req.user.id));
+});
 r.put('/profile', requireAuth, (req, res) => {
   const theme = ['system', 'light', 'dark'].includes(req.body.ui_theme) ? req.body.ui_theme : undefined;
-  run('UPDATE users SET name = COALESCE(?, name), ui_theme = COALESCE(?, ui_theme) WHERE id = ?',
-    req.body.name === undefined ? null : String(req.body.name).slice(0, 120), theme ?? null, req.user.id);
+  run('UPDATE users SET name = COALESCE(?, name), ui_theme = COALESCE(?, ui_theme), notify_digest = COALESCE(?, notify_digest) WHERE id = ?',
+    req.body.name === undefined ? null : String(req.body.name).trim().slice(0, 120), theme ?? null,
+    req.body.notify_digest === undefined ? null : (req.body.notify_digest ? 1 : 0), req.user.id);
   res.json({ ok: true });
+});
+
+// Changing the sign-in email requires the current password and confirmation from the NEW address.
+r.post('/change-email', requireAuth, async (req, res) => {
+  if (req.impersonatedBy) return res.status(403).json({ error: 'Not allowed while impersonating' });
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Valid email required' });
+  if (one('SELECT id FROM users WHERE email = ?', email)) return res.status(409).json({ error: 'That email is already in use' });
+  const u = one('SELECT * FROM users WHERE id = ?', req.user.id);
+  if (u.password_hash !== '!' && !(await bcrypt.compare(String(req.body.password || ''), u.password_hash))) return res.status(400).json({ error: 'Current password is wrong' });
+  const t = randomToken(24);
+  run(`DELETE FROM tokens WHERE user_id = ? AND purpose = 'email_change'`, u.id);
+  run(`INSERT INTO tokens (token_hash, user_id, purpose, expires_at, data) VALUES (?,?,?, datetime('now','+24 hours'), ?)`, sha256(t), u.id, 'email_change', email);
+  await sendSystemEmail(email, `Confirm your new email for ${appName()}`, `Open this link to use ${email} for signing in:\n${appUrl()}/api/auth/confirm-email?token=${t}\n\nIf you didn't request this, ignore this email.`).catch(() => {});
+  sendSystemEmail(u.email, `Email change requested on ${appName()}`, `Someone asked to change your sign-in email to ${email}. If this wasn't you, change your password now.`).catch(() => {});
+  securityEvent(req, 'email_change_requested', { to: email });
+  res.json({ ok: true });
+});
+r.get('/confirm-email', (req, res) => {
+  const row = one(`SELECT * FROM tokens WHERE token_hash = ? AND purpose = 'email_change' AND expires_at > datetime('now')`, sha256(String(req.query.token || '')));
+  if (!row || one('SELECT id FROM users WHERE email = ?', row.data)) return res.redirect('/login?error=failed');
+  run('DELETE FROM tokens WHERE token_hash = ?', row.token_hash);
+  run('UPDATE users SET email = ?, email_verified = 1 WHERE id = ?', row.data, row.user_id);
+  revokeAllSessions(row.user_id);
+  securityEvent(req, 'email_changed', { to: row.data }, { userId: row.user_id });
+  res.redirect('/login?changed=1');
+});
+
+// ----- Invitations -----
+r.get('/invite-info', (req, res) => {
+  const inv = one(`SELECT i.email, i.role, w.name AS workspace FROM invites i JOIN workspaces w ON w.id = i.workspace_id
+    WHERE i.token_hash = ? AND i.accepted_at IS NULL AND i.expires_at > datetime('now')`, sha256(String(req.query.token || '')));
+  if (!inv) return res.status(404).json({ error: 'This invitation is invalid or has expired' });
+  res.json({ ...inv, exists: Boolean(one('SELECT id FROM users WHERE email = ?', inv.email)) });
+});
+r.post('/invites/accept', requireAuth, (req, res) => {
+  try {
+    const wsId = acceptInvite(req.user, req.body.token);
+    securityEvent(req, 'invite_accepted', null, { workspaceId: wsId });
+    res.json({ ok: true, workspace_id: wsId });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // ----- Sessions & devices -----

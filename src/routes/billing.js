@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from '../auth.js';
 import { publicPlans, getPlan, allPlans } from '../plans.js';
 import { getSetting, getBool, getNum, appUrl } from '../settings.js';
 import { notifyAdmins } from '../services/notify.js';
+import { paymentFailed } from '../services/lifecycle.js';
 
 // Pick up Stripe price IDs from env the first time (admins can edit them in Plans afterwards).
 for (const [env, key, col] of [
@@ -151,7 +152,7 @@ webhookRouter.post('/', express.raw({ type: 'application/json' }), async (req, r
     }
     case 'invoice.payment_failed': {
       const ws = one('SELECT id FROM workspaces WHERE stripe_customer_id = ?', obj.customer);
-      if (ws) logActivity(ws.id, 'payment_failed', { invoice: obj.id });
+      if (ws) { logActivity(ws.id, 'payment_failed', { invoice: obj.id }); paymentFailed(ws.id, obj.id).catch(() => {}); }
       break;
     }
     default: break;

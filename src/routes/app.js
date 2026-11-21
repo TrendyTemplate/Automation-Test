@@ -139,6 +139,16 @@ r.patch('/mailboxes/:id', manage, async (req, res) => {
     run(`UPDATE mailboxes SET password_enc=?, auth_type='password', last_error=NULL, revoked_at=NULL WHERE id=?`, seal(mb.workspace_id, 'mailboxes.password', String(req.body.password)), mb.id);
     securityEvent(req, 'mailbox_password_updated', { email: mb.email });
   }
+  const serverKeys = ['imap_host', 'imap_port', 'imap_secure', 'smtp_host', 'smtp_port', 'smtp_secure', 'username'];
+  if (serverKeys.some((k) => req.body[k] !== undefined) && !req.body.password) {
+    if (mb.auth_type !== 'password') return res.status(400).json({ error: 'Server settings are managed by Google/Microsoft for this account' });
+    const next = { ...mb };
+    for (const k of serverKeys) if (req.body[k] !== undefined) next[k] = k.endsWith('_port') ? int(req.body[k]) : k.endsWith('_secure') ? (req.body[k] ? 1 : 0) : str(req.body[k], 254).trim();
+    try { await testConnection(next); } catch (e) { return res.status(400).json({ error: e.message }); }
+    run('UPDATE mailboxes SET imap_host=?, imap_port=?, imap_secure=?, smtp_host=?, smtp_port=?, smtp_secure=?, username=?, last_error=NULL WHERE id=?',
+      next.imap_host, next.imap_port, next.imap_secure, next.smtp_host, next.smtp_port, next.smtp_secure, next.username, mb.id);
+    securityEvent(req, 'mailbox_settings_changed', { email: mb.email });
+  }
   run('UPDATE mailboxes SET mode=?, enabled=?, label=?, signature=?, auto_categories=? WHERE id=?', mode, enabled, label, signature, autoCats, mb.id);
   res.json({ ok: true });
 });
@@ -285,6 +295,40 @@ r.post('/messages/:id/notes', (req, res) => {
   res.json({ ok: true });
 });
 
+// Correct the AI: change category / priority, or mark a false phishing alarm as safe.
+r.post('/messages/:id/classify', (req, res) => {
+  const m = one('SELECT * FROM messages WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!m) return res.status(404).json({ error: 'Not found' });
+  const category = req.body.category ? String(req.body.category) : m.category;
+  const priority = req.body.priority ? String(req.body.priority) : m.priority;
+  if (!CATEGORIES.includes(category) || !['urgent', 'high', 'normal', 'low'].includes(priority)) return res.status(400).json({ error: 'Invalid category or priority' });
+  const safe = req.body.not_phishing === true;
+  run(`UPDATE messages SET category = ?, priority = ?, is_phishing = CASE WHEN ? THEN 0 ELSE is_phishing END,
+    status = CASE WHEN ? AND status = 'ignored' THEN 'triaged' ELSE status END, reasoning = ? WHERE id = ?`,
+  category, priority, safe ? 1 : 0, safe ? 1 : 0, `Corrected by ${req.user.name || req.user.email}`, m.id);
+  logActivity(wsId(req), 'reclassified', { message: m.id, category, priority, not_phishing: safe });
+  res.json({ ok: true });
+});
+r.post('/messages/bulk', (req, res) => {
+  const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(int).filter(Boolean).slice(0, 500);
+  if (!ids.length) return res.status(400).json({ error: 'Select at least one email' });
+  const where = `workspace_id = ? AND id IN (${ids.map(() => '?').join(',')})`;
+  const a = String(req.body.action || '');
+  if (a === 'done') run(`UPDATE messages SET done = 1, sla_due_at = NULL WHERE ${where}`, wsId(req), ...ids);
+  else if (a === 'undone') run(`UPDATE messages SET done = 0 WHERE ${where}`, wsId(req), ...ids);
+  else if (a === 'star') run(`UPDATE messages SET starred = 1 WHERE ${where}`, wsId(req), ...ids);
+  else if (a === 'snooze') {
+    const until = new Date(req.body.until);
+    if (Number.isNaN(until.getTime()) || until < new Date()) return res.status(400).json({ error: 'Choose a time in the future' });
+    run(`UPDATE messages SET snoozed_until = ? WHERE ${where}`, until.toISOString(), wsId(req), ...ids);
+  } else if (a === 'assign') {
+    const uid = req.body.user_id ? int(req.body.user_id) : null;
+    if (uid && !one('SELECT 1 AS x FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), uid)) return res.status(400).json({ error: 'Not a teammate' });
+    run(`UPDATE messages SET assigned_to = ? WHERE ${where}`, uid, wsId(req), ...ids);
+  } else return res.status(400).json({ error: 'Unknown action' });
+  res.json({ ok: true, count: ids.length });
+});
+
 r.post('/messages/:id/translate', async (req, res) => {
   if (!aiEnabled()) return res.status(400).json({ error: 'AI is not configured on this server' });
   const m = loadMessage(req);
@@ -419,6 +463,16 @@ r.put('/rules/:id', manage, (req, res) => {
   int(req.params.id), wsId(req));
   res.json({ ok: true });
 });
+r.patch('/rules/:id', manage, (req, res) => {
+  const x = run('UPDATE rules SET enabled = ? WHERE id = ? AND workspace_id = ?', req.body.enabled ? 1 : 0, int(req.params.id), wsId(req));
+  if (!x.changes) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+r.post('/rules/reorder', manage, (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map(int) : [];
+  ids.forEach((id, i) => run('UPDATE rules SET position = ? WHERE id = ? AND workspace_id = ?', i, id, wsId(req)));
+  res.json({ ok: true });
+});
 r.delete('/rules/:id', manage, (req, res) => {
   run('DELETE FROM rules WHERE id=? AND workspace_id=?', int(req.params.id), wsId(req));
   res.json({ ok: true });
@@ -484,31 +538,126 @@ r.put('/settings', manage, (req, res) => {
 });
 
 // ---------- Team ----------
+const owner = (req, res, next) => (req.role === 'owner' && !req.viaApiKey && !req.impersonatedBy ? next() : res.status(403).json({ error: 'Only the workspace owner can do this' }));
 r.get('/team', (req, res) => {
-  res.json(all(`SELECT u.id, u.email, u.name, wm.role FROM workspace_members wm JOIN users u ON u.id = wm.user_id
-    WHERE wm.workspace_id = ?`, wsId(req)));
+  const members = all(`SELECT u.id, u.email, u.name, u.last_login_at, u.totp_enabled, wm.role FROM workspace_members wm JOIN users u ON u.id = wm.user_id
+    WHERE wm.workspace_id = ? ORDER BY CASE wm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, u.name`, wsId(req));
+  const invites = ['owner', 'admin'].includes(req.role) ? all(`SELECT id, email, role, created_at, expires_at FROM invites
+    WHERE workspace_id = ? AND accepted_at IS NULL AND expires_at > datetime('now') ORDER BY id DESC`, wsId(req)) : [];
+  const plan = effectivePlan(req.workspace);
+  res.json({ members, invites, seats: plan.teamMembers, me: req.user.id, myRole: req.role });
 });
+async function sendInvite(req, email, role) {
+  const token = randomToken(24);
+  run(`INSERT INTO invites (workspace_id, email, role, token_hash, invited_by, expires_at) VALUES (?,?,?,?,?, datetime('now','+7 days'))`,
+    wsId(req), email, role, sha256(token), req.user.id);
+  const { sendSystemEmail } = await import('../services/notify.js');
+  const { appName } = await import('../settings.js');
+  await sendSystemEmail(email, `${req.user.name || req.user.email} invited you to ${req.workspace.name} on ${appName()}`,
+    `You've been invited to join the "${req.workspace.name}" workspace as ${role}.\n\nAccept the invitation (valid for 7 days):\n${appUrl()}/join?token=${token}`).catch(() => {});
+  return token;
+}
+r.post('/team/invite', manage, async (req, res) => {
+  const email = str(req.body.email, 254).trim().toLowerCase();
+  const role = req.body.role === 'admin' ? 'admin' : 'member';
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email' });
+  const plan = effectivePlan(req.workspace);
+  const used = one('SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = ?', wsId(req)).n
+    + one(`SELECT COUNT(*) AS n FROM invites WHERE workspace_id = ? AND accepted_at IS NULL AND expires_at > datetime('now')`, wsId(req)).n;
+  if (used >= plan.teamMembers) return res.status(402).json({ error: `Your ${plan.name} plan includes ${plan.teamMembers} seat(s). Upgrade to add more people.` });
+  const existing = one('SELECT id FROM users WHERE email = ?', email);
+  if (existing && one('SELECT 1 AS x FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), existing.id)) return res.status(409).json({ error: 'Already a member' });
+  if (one(`SELECT 1 AS x FROM invites WHERE workspace_id = ? AND email = ? AND accepted_at IS NULL AND expires_at > datetime('now')`, wsId(req), email)) return res.status(409).json({ error: 'An invitation is already pending for this email' });
+  const token = await sendInvite(req, email, role);
+  securityEvent(req, 'teammate_invited', { email, role });
+  res.json({ ok: true, ...(process.env.NODE_ENV === 'test' ? { token } : {}) });
+});
+r.post('/team/invites/:id/resend', manage, async (req, res) => {
+  const inv = one('SELECT * FROM invites WHERE id = ? AND workspace_id = ? AND accepted_at IS NULL', int(req.params.id), wsId(req));
+  if (!inv) return res.status(404).json({ error: 'Not found' });
+  run('DELETE FROM invites WHERE id = ?', inv.id);
+  await sendInvite(req, inv.email, inv.role);
+  res.json({ ok: true });
+});
+r.delete('/team/invites/:id', manage, (req, res) => {
+  run('DELETE FROM invites WHERE id = ? AND workspace_id = ? AND accepted_at IS NULL', int(req.params.id), wsId(req));
+  res.json({ ok: true });
+});
+// Legacy: add an existing user directly (kept for the API).
 r.post('/team', manage, (req, res) => {
   const plan = effectivePlan(req.workspace);
   if (one('SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = ?', wsId(req)).n >= plan.teamMembers) {
     return res.status(402).json({ error: `Your plan allows ${plan.teamMembers} team member(s)` });
   }
-  const u = one('SELECT id FROM users WHERE email = ?', String(req.body.email || '').toLowerCase());
-  if (!u) return res.status(404).json({ error: 'Ask your teammate to sign up first, then add them by email' });
-  // New sign-ups get a personal workspace. If it's still empty, fold the user into this team instead.
-  const own = one(`SELECT w.id FROM workspaces w WHERE w.owner_id = ?
-      AND NOT EXISTS (SELECT 1 FROM mailboxes WHERE workspace_id = w.id)
-      AND (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = w.id) = 1
-      AND w.plan = 'trial'`, u.id);
-  const memberships = one('SELECT COUNT(*) AS n FROM workspace_members WHERE user_id = ?', u.id).n;
-  if (memberships > (own ? 1 : 0)) return res.status(409).json({ error: 'User already belongs to another active workspace' });
-  if (own) run('DELETE FROM workspaces WHERE id = ?', own.id);
-  run('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?,?,?)', wsId(req), u.id, req.body.role === 'admin' ? 'admin' : 'member');
+  const u = one('SELECT id FROM users WHERE email = ?', str(req.body.email, 254).toLowerCase());
+  if (!u) return res.status(404).json({ error: 'No account with that email — send an invitation instead' });
+  run('INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?,?,?)', wsId(req), u.id, req.body.role === 'admin' ? 'admin' : 'member');
+  res.json({ ok: true });
+});
+r.patch('/team/:userId', manage, (req, res) => {
+  const uid = int(req.params.userId);
+  const m = one('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), uid);
+  if (!m) return res.status(404).json({ error: 'Not a member' });
+  if (m.role === 'owner') return res.status(400).json({ error: "The owner's role can't be changed — transfer ownership instead" });
+  if (!['admin', 'member'].includes(req.body.role)) return res.status(400).json({ error: 'Role must be admin or member' });
+  run('UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?', req.body.role, wsId(req), uid);
+  securityEvent(req, 'teammate_role_changed', { user: uid, role: req.body.role });
   res.json({ ok: true });
 });
 r.delete('/team/:userId', manage, (req, res) => {
-  if (int(req.params.userId) === req.workspace.owner_id) return res.status(400).json({ error: 'Cannot remove the owner' });
-  run('DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?', wsId(req), int(req.params.userId));
+  const uid = int(req.params.userId);
+  if (uid === req.workspace.owner_id) return res.status(400).json({ error: 'Cannot remove the owner' });
+  run('DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?', wsId(req), uid);
+  run('UPDATE messages SET assigned_to = NULL WHERE workspace_id = ? AND assigned_to = ?', wsId(req), uid);
+  securityEvent(req, 'teammate_removed', { user: uid });
+  res.json({ ok: true });
+});
+r.post('/team/transfer', owner, (req, res) => {
+  const uid = int(req.body.user_id);
+  if (!one('SELECT 1 AS x FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), uid) || uid === req.user.id) return res.status(400).json({ error: 'Choose another member of this workspace' });
+  run(`UPDATE workspace_members SET role = 'admin' WHERE workspace_id = ? AND user_id = ?`, wsId(req), req.user.id);
+  run(`UPDATE workspace_members SET role = 'owner' WHERE workspace_id = ? AND user_id = ?`, wsId(req), uid);
+  run('UPDATE workspaces SET owner_id = ? WHERE id = ?', uid, wsId(req));
+  securityEvent(req, 'ownership_transferred', { to: uid });
+  res.json({ ok: true });
+});
+r.post('/team/leave', (req, res) => {
+  if (req.role === 'owner') return res.status(400).json({ error: 'Transfer ownership before leaving, or delete the workspace' });
+  run('DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), req.user.id);
+  run('UPDATE messages SET assigned_to = NULL WHERE workspace_id = ? AND assigned_to = ?', wsId(req), req.user.id);
+  // Never leave someone without a workspace: give them a fresh personal one (on the free trial).
+  if (!one('SELECT 1 AS x FROM workspace_members WHERE user_id = ?', req.user.id)) {
+    const w = run('INSERT INTO workspaces (name, owner_id, business_name, trial_ends_at, webhook_secret) VALUES (?,?,?,?,?)',
+      `${req.user.name || req.user.email.split('@')[0]}'s workspace`, req.user.id, '', new Date(Date.now() + getNum('trial_days') * 86400_000).toISOString(), randomToken(24));
+    run('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?,?,?)', Number(w.lastInsertRowid), req.user.id, 'owner');
+  }
+  run('UPDATE users SET current_workspace_id = NULL WHERE id = ?', req.user.id);
+  res.json({ ok: true });
+});
+r.delete('/workspace', owner, async (req, res) => {
+  if (str(req.body.confirm, 200).trim() !== req.workspace.name) return res.status(400).json({ error: 'Type the workspace name to confirm' });
+  const owned = one('SELECT COUNT(*) AS n FROM workspace_members WHERE user_id = ?', req.user.id).n;
+  if (owned < 2) return res.status(400).json({ error: "This is your only workspace — delete your account instead (Security & privacy)" });
+  for (const mb of all('SELECT * FROM mailboxes WHERE workspace_id = ?', wsId(req))) await revokeMailboxGrant(mb).catch(() => {});
+  run('UPDATE replies SET approved_by = NULL WHERE workspace_id = ?', wsId(req));
+  run('DELETE FROM workspaces WHERE id = ?', wsId(req));
+  run('UPDATE users SET current_workspace_id = NULL WHERE id = ?', req.user.id);
+  const { forgetKey } = await import('../vault.js');
+  forgetKey(wsId(req));
+  audit(req, 'workspace_deleted_by_owner', `workspace:${wsId(req)}`);
+  res.json({ ok: true });
+});
+
+// ---------- Notifications (bell) ----------
+r.get('/notifications', (req, res) => {
+  const seen = one('SELECT notifications_seen_at FROM users WHERE id = ?', req.user.id).notifications_seen_at;
+  const items = all(`SELECT id, type, detail, created_at, created_at > COALESCE(?, '1970') AS unread FROM activity WHERE workspace_id = ?
+    AND type IN ('sync_error','send_failed','phishing_blocked','sla_breach','payment_failed','followup_drafted','draft_created','auto_reply_sent','mailbox_added','subscription_updated','assigned')
+    ORDER BY id DESC LIMIT 30`, seen, wsId(req));
+  res.json(items);
+});
+r.post('/notifications/seen', (req, res) => {
+  run(`UPDATE users SET notifications_seen_at = datetime('now') WHERE id = ?`, req.user.id);
   res.json({ ok: true });
 });
 
@@ -536,6 +685,21 @@ r.put('/contacts/:id', (req, res) => {
   run('UPDATE contacts SET name=?, company=?, phone=?, tags=?, notes=?, vip=?, blocked=?, do_not_contact=? WHERE id=?',
     str(v('name'), 200), str(v('company'), 200), str(v('phone'), 50), str(v('tags'), 500), str(v('notes'), 5000),
     v('vip') ? 1 : 0, v('blocked') ? 1 : 0, v('do_not_contact') ? 1 : 0, c.id);
+  res.json({ ok: true });
+});
+r.post('/contacts', (req, res) => {
+  const email = str(req.body.email, 254).trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email' });
+  if (one('SELECT id FROM contacts WHERE workspace_id = ? AND email = ?', wsId(req), email)) return res.status(409).json({ error: 'Contact already exists' });
+  const x = run('INSERT INTO contacts (workspace_id, email, name, company, phone, tags, notes, vip, emails_in) VALUES (?,?,?,?,?,?,?,?,0)',
+    wsId(req), email, str(req.body.name, 200), str(req.body.company, 200), str(req.body.phone, 50), str(req.body.tags, 500), str(req.body.notes, 5000), req.body.vip ? 1 : 0);
+  res.json({ id: Number(x.lastInsertRowid) });
+});
+r.delete('/contacts/:id', manage, (req, res) => {
+  const c = one('SELECT id FROM contacts WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  run('UPDATE messages SET contact_id = NULL WHERE contact_id = ?', c.id);
+  run('DELETE FROM contacts WHERE id = ?', c.id);
   res.json({ ok: true });
 });
 r.get('/contacts.csv', (req, res) => {

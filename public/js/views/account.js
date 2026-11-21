@@ -1,24 +1,90 @@
 import { $, esc, icon, api, toast, bind, formData, badge, ago, fmtDate, fmtDay, money, num, empty, modal, confirmBox, switchEl, avatar, label } from '../ui.js';
 
-export async function team(ctx) {
-  const list = await api('/team');
+export async function profile(ctx) {
+  const p = await api('/auth/profile');
+  const me = ctx.me;
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Team</h1><p>Work the inbox together: assign emails, leave internal notes and see who's replying.</p></div></div>
-    <div class="card pad-0 mb"><div class="table-wrap"><table><thead><tr><th>Member</th><th>Role</th><th></th></tr></thead><tbody>
-      ${list.map((u) => `<tr><td><div class="row nowrap">${avatar(u.name, u.email, 'sm')}<div><b>${esc(u.name || u.email)}</b><div class="hint">${esc(u.email)}</div></div></div></td><td>${badge(u.role, u.role === 'owner' ? 'info' : '')}</td>
-        <td style="text-align:right">${u.role !== 'owner' ? `<button class="btn sm ghost danger" data-act="del" data-id="${u.id}">Remove</button>` : ''}</td></tr>`).join('')}</tbody></table></div></div>
+    <div class="page-h"><div><h1>Settings</h1><p>Your profile, team, plan and security in one place.</p></div></div>
     <div class="split">
-      <form class="card" data-act="add"><h3>Add a teammate</h3><p class="hint">Ask them to sign up first, then add them by email.</p>
-        <label>Email</label><input name="email" type="email" required placeholder="teammate@company.com">
-        <label>Role</label><select name="role"><option value="member">Member — handles emails</option><option value="admin">Admin — manages settings</option></select>
-        <button class="btn primary mt" type="submit">Add teammate</button></form>
-      <form class="card" data-act="ws"><h3>Agency? Add a client workspace</h3><p class="hint">Each client gets separate inboxes, knowledge base, rules and billing. Switch between them from the sidebar.</p>
-        <label>Client name</label><input name="name" required><button class="btn mt" type="submit">${icon('plus')}Create workspace</button></form>
+      <form class="card" data-act="save"><h3>${icon('users')} Your profile</h3>
+        <div class="row nowrap mb">${avatar(p.name, p.email, 'lg')}<div><b>${esc(p.name || p.email)}</b><div class="hint">${esc(p.email)} · ${esc(label(me.role))} of ${esc(me.workspace.name)}</div></div></div>
+        <label>Full name</label><input name="name" value="${esc(p.name)}" autocomplete="name">
+        <label>Theme</label><select name="ui_theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${p.ui_theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <div class="setting-row mt"><div><div class="t">Morning briefing email</div><div class="d">A daily summary of what needs attention in this workspace.</div></div>${switchEl('notify_digest', p.notify_digest)}</div>
+        <button class="btn primary mt" type="submit">Save profile</button></form>
+      <div class="col" style="gap:16px">
+        <form class="card" data-act="email"><h3>${icon('mail')} Sign-in email</h3>
+          <p class="hint">Currently <b>${esc(p.email)}</b>${p.email_verified ? ' · verified' : ' · <span style="color:var(--warn)">not verified</span>'}. We'll send a confirmation link to the new address.</p>
+          <label>New email</label><input name="email" type="email" required autocomplete="email">
+          ${p.has_password ? '<label>Current password</label><input name="password" type="password" required autocomplete="current-password">' : ''}
+          <button class="btn mt" type="submit">Send confirmation</button></form>
+        <div class="card"><h3>${icon('lock')} Sign-in methods</h3>
+          <dl class="kv"><dt>Password</dt><dd>${p.has_password ? 'Set' : 'Not set'} · <a href="#security">change</a></dd>
+            <dt>Google</dt><dd>${p.google ? 'Connected' : 'Not connected'}</dd><dt>Microsoft</dt><dd>${p.microsoft ? 'Connected' : 'Not connected'}</dd>
+            <dt>Two-factor</dt><dd>${p.totp_enabled ? badge('on', 'ok') : `${badge('off', 'warn')} <a href="#security">Turn on</a>`}</dd>
+            <dt>Member since</dt><dd>${fmtDay(p.created_at)}</dd></dl></div>
+      </div>
     </div>`;
   bind({
-    add: async (f) => { await api('/team', { method: 'POST', body: formData(f) }); toast('Teammate added'); ctx.route(); },
-    del: async (b) => { if (await confirmBox('Remove teammate?', 'They lose access to this workspace immediately.', { danger: true, ok: 'Remove' })) { await api(`/team/${b.dataset.id}`, { method: 'DELETE' }); ctx.route(); } },
+    save: async (f) => {
+      const d = formData(f);
+      await api('/auth/profile', { method: 'PUT', body: d });
+      (await import('../ui.js')).applyTheme(d.ui_theme);
+      toast('Profile saved'); await ctx.loadMe();
+    },
+    email: async (f) => { await api('/auth/change-email', { method: 'POST', body: formData(f) }); toast('Check the new inbox for a confirmation link'); f.reset(); },
+  }, ctx.view);
+}
+
+export async function team(ctx) {
+  const t = await api('/team');
+  const manage = ['owner', 'admin'].includes(t.myRole);
+  const isOwner = t.myRole === 'owner';
+  const used = t.members.length + t.invites.length;
+  ctx.view.innerHTML = `
+    <div class="page-h"><div><h1>Settings</h1><p>Work the inbox together — assign emails, leave notes and see who's replying.</p></div>
+      ${manage ? `<div class="actions"><span class="hint">${used} of ${t.seats} seat${t.seats > 1 ? 's' : ''} used</span><button class="btn primary" data-act="invite">${icon('plus')}Invite teammate</button></div>` : ''}</div>
+    <div class="card pad-0 mb"><div class="table-wrap"><table><thead><tr><th>Member</th><th>Role</th><th>Last active</th><th>2FA</th><th></th></tr></thead><tbody>
+      ${t.members.map((u) => `<tr><td><div class="row nowrap">${avatar(u.name, u.email, 'sm')}<div><b>${esc(u.name || u.email)}</b>${u.id === t.me ? ' <span class="hint">(you)</span>' : ''}<div class="hint">${esc(u.email)}</div></div></div></td>
+        <td>${manage && u.role !== 'owner' && u.id !== t.me ? `<select data-act="role" data-id="${u.id}" style="height:32px;width:auto">${['admin', 'member'].map((r) => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${label(r)}</option>`).join('')}</select>` : badge(u.role, u.role === 'owner' ? 'info' : '')}</td>
+        <td class="hint">${ago(u.last_login_at)}</td><td>${u.totp_enabled ? badge('on', 'ok') : '<span class="hint">off</span>'}</td>
+        <td style="text-align:right">${manage && u.role !== 'owner' && u.id !== t.me ? `<button class="btn sm ghost danger" data-act="del" data-id="${u.id}">Remove</button>` : ''}</td></tr>`).join('')}
+      ${t.invites.map((i) => `<tr><td><div class="row nowrap"><span class="avatar sm" style="background:var(--surface-3);color:var(--muted)">${icon('mail', 'sm')}</span><div><b>${esc(i.email)}</b><div class="hint">Invitation sent ${ago(i.created_at)} · expires ${fmtDay(i.expires_at)}</div></div></div></td>
+        <td>${badge('invited', 'warn')} <span class="hint">${esc(label(i.role))}</span></td><td></td><td></td>
+        <td style="text-align:right"><button class="btn sm ghost" data-act="resend" data-id="${i.id}">Resend</button><button class="btn sm ghost danger" data-act="revoke" data-id="${i.id}">Cancel</button></td></tr>`).join('')}
+    </tbody></table></div></div>
+    <div class="grid g3">
+      <div class="card"><h3>${icon('info')} Roles</h3><dl class="kv"><dt>Owner</dt><dd>Everything, including billing and deleting the workspace</dd><dt>Admin</dt><dd>Accounts, AI training, rules, team and billing</dd><dt>Member</dt><dd>Inbox, approvals, contacts and analytics</dd></dl></div>
+      <form class="card" data-act="ws"><h3>${icon('layers')} Agency? Add a client workspace</h3><p class="hint">Each client gets separate inboxes, AI training, rules and billing. Switch from the sidebar.</p>
+        <label>Client name</label><input name="name" required><button class="btn mt" type="submit">${icon('plus')}Create workspace</button></form>
+      <div class="card"><h3>${icon('settings')} This workspace</h3>
+        ${isOwner ? `<p class="hint">Hand ownership to another member (you become an admin).</p>
+          <div class="row nowrap"><select id="new-owner">${t.members.filter((u) => u.id !== t.me).map((u) => `<option value="${u.id}">${esc(u.name || u.email)}</option>`).join('') || '<option value="">Invite someone first</option>'}</select><button class="btn" data-act="transfer">Transfer</button></div>
+          <hr style="border:0;border-top:1px solid var(--border);margin:16px 0"><button class="btn danger" data-act="delws">${icon('trash')}Delete workspace</button>`
+    : `<p class="hint">Leave "${esc(ctx.me.workspace.name)}". You'll lose access to its inbox.</p><button class="btn danger" data-act="leave">Leave workspace</button>`}</div>
+    </div>`;
+  bind({
+    invite: () => modal(`<h2>Invite a teammate</h2><p class="hint">They'll get an email with a link to join — no need to sign up first.</p>
+      <form data-act="send"><label>Email</label><input name="email" type="email" required placeholder="teammate@company.com">
+      <label>Role</label><select name="role"><option value="member">Member — handles emails</option><option value="admin">Admin — manages setup & billing</option></select>
+      <button class="btn primary mt" type="submit">${icon('send')}Send invitation</button></form>`,
+    (el, close) => bind({ send: async (f) => { await api('/team/invite', { method: 'POST', body: formData(f) }); close(); toast('Invitation sent'); ctx.route(); } }, el)),
+    role: async (s) => { await api(`/team/${s.dataset.id}`, { method: 'PATCH', body: { role: s.value } }); toast('Role updated'); },
+    del: async (b) => { if (await confirmBox('Remove teammate?', 'They lose access to this workspace immediately. Emails assigned to them become unassigned.', { danger: true, ok: 'Remove' })) { await api(`/team/${b.dataset.id}`, { method: 'DELETE' }); ctx.route(); } },
+    resend: async (b) => { await api(`/team/invites/${b.dataset.id}/resend`, { method: 'POST' }); toast('Invitation re-sent'); ctx.route(); },
+    revoke: async (b) => { await api(`/team/invites/${b.dataset.id}`, { method: 'DELETE' }); toast('Invitation cancelled'); ctx.route(); },
     ws: async (f) => { await api('/auth/workspaces', { method: 'POST', body: formData(f) }); location.hash = 'dashboard'; location.reload(); },
+    transfer: async () => {
+      const id = ctx.view.querySelector('#new-owner').value;
+      if (!id) throw new Error('Invite someone first');
+      if (await confirmBox('Transfer ownership?', 'The new owner controls billing and can remove you. You become an admin.', { ok: 'Transfer' })) { await api('/team/transfer', { method: 'POST', body: { user_id: Number(id) } }); toast('Ownership transferred'); await ctx.loadMe(); location.reload(); }
+    },
+    leave: async () => { if (await confirmBox('Leave this workspace?', 'You will need a new invitation to come back.', { danger: true, ok: 'Leave' })) { await api('/team/leave', { method: 'POST' }); location.hash = 'dashboard'; location.reload(); } },
+    delws: async () => {
+      const name = await confirmBox('Delete this workspace?', 'All its email accounts are disconnected and every email, contact and setting is destroyed. This cannot be undone.', { danger: true, ok: 'Delete', input: `Type: ${ctx.me.workspace.name}` });
+      if (!name) return;
+      await api('/workspace', { method: 'DELETE', body: { confirm: name } }); location.hash = 'dashboard'; location.reload();
+    },
   }, ctx.view);
 }
 
@@ -29,7 +95,7 @@ export async function billing(ctx, params) {
   if (params.success) toast('Payment successful — thank you! Your plan updates in a few seconds.');
   const render = () => {
     ctx.view.innerHTML = `
-      <div class="page-h"><div><h1>Plan & billing</h1><p>Simple pricing. Cancel anytime. No hidden usage fees — you always see your limits.</p></div></div>
+      <div class="page-h"><div><h1>Settings</h1><p>Simple pricing. Cancel anytime. No hidden usage fees — you always see your limits.</p></div></div>
       <div class="card mb"><div class="row"><div><div class="hint">Current plan</div><h2 style="margin:2px 0">${esc(me.effectivePlan.name)} ${badge(ws.subscription_status || (ws.plan === 'trial' ? 'trial' : ''))}</h2>
         <div class="hint">${ws.plan === 'trial' ? `Trial ends ${fmtDate(ws.trial_ends_at)}` : ws.billing_interval === 'once' ? 'Lifetime license — no renewals' : ws.current_period_end ? `Renews ${fmtDay(ws.current_period_end)} (${esc(ws.billing_interval)})` : ''}</div></div>
         <span class="spacer"></span>${ws.billing_interval && !['once', 'manual'].includes(ws.billing_interval) ? `<button class="btn" data-act="portal">${icon('card')}Manage subscription & invoices</button>` : ''}</div></div>
@@ -71,7 +137,7 @@ export async function security(ctx) {
   const me = ctx.me;
   const support = me.workspace.support_access_until && new Date(me.workspace.support_access_until) > new Date();
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Security & privacy</h1><p>You're in control of who and what can access your email.</p></div></div>
+    <div class="page-h"><div><h1>Settings</h1><p>You're in control of who and what can access your email.</p></div></div>
     <div class="grid g3 mb">
       <div class="card stat ${me.user.totp_enabled ? 'ok' : 'warn'}"><div class="ic">${icon('lock')}</div><div class="l">Two-factor authentication</div><div class="n" style="font-size:20px">${me.user.totp_enabled ? 'On' : 'Off'}</div><div class="d">${me.user.totp_enabled ? 'Your account is protected' : 'Strongly recommended'}</div></div>
       <div class="card stat ok"><div class="ic">${icon('shieldCheck')}</div><div class="l">Encryption</div><div class="n" style="font-size:20px">AES-256</div><div class="d">Emails & credentials, per-workspace key</div></div>
@@ -137,7 +203,7 @@ export async function security(ctx) {
 export async function referrals(ctx) {
   const r = await api('/referrals');
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Refer & earn</h1><p>Earn ${r.commissionPct}% of every payment from customers you refer.</p></div></div>
+    <div class="page-h"><div><h1>Settings</h1><p>Earn ${r.commissionPct}% of every payment from customers you refer.</p></div></div>
     <div class="card mb"><h3>Your referral link</h3><div class="row nowrap"><input id="ref" value="${esc(r.link)}" readonly style="flex:1"><button class="btn primary" data-act="copy">${icon('copy')}Copy</button></div></div>
     <div class="grid g4">
       <div class="card stat"><div class="ic">${icon('users')}</div><div class="l">Sign-ups</div><div class="n">${r.signups}</div></div>

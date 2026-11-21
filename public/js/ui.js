@@ -73,6 +73,9 @@ const P = {
 };
 export const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${P[name] || P.info}</svg>`;
 
+// ---------- Brand (set by the server from Admin → Settings) ----------
+export const BRAND = document.querySelector('meta[name="app-name"]')?.content || 'MailPilot AI';
+
 // ---------- Formatting ----------
 const toDate = (d) => (d ? new Date(/Z$|T|[+-]\d\d:\d\d$/.test(d) ? d : `${String(d).replace(' ', 'T')}Z`) : null);
 export const fmtDate = (d) => (d ? toDate(d).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '—');
@@ -89,7 +92,7 @@ export const money = (v, cur = 'usd') => {
   try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: String(cur || 'usd').toUpperCase(), maximumFractionDigits: 2 }).format(Number(v || 0)); } catch { return `${cur} ${v}`; }
 };
 export const num = (v) => Number(v || 0).toLocaleString();
-const LABELS = { sales_inquiry: 'Sales', job_application: 'Job application', meeting_request: 'Meeting', awaiting_approval: 'Awaiting approval' };
+const LABELS = { sales_inquiry: 'Sales', job_application: 'Job application', meeting_request: 'Meeting', awaiting_approval: 'Awaiting approval', ai_reply: 'AI reply', template_reply: 'Template reply', mark_read: 'Mark as read', from_email: 'Sender email', from_domain: 'Sender domain', from_name: 'Sender name', to_email: 'To address', mailbox_id: 'Email account', ai_calls: 'AI actions', sla_breach: 'SLA missed', followup_drafted: 'Follow-up drafted', triage_draft: 'Analysis & draft', 'triage+draft': 'Analysis & draft', ask_inbox: 'Ask AI', learn_style: 'Style learning', follow_up: 'Follow-up', daily_briefing: 'Daily briefing' };
 export const label = (v) => { const t = LABELS[v] || String(v ?? '').replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1); };
 export const badge = (v, cls) => (v || v === 0 ? `<span class="badge ${esc(cls || v)}">${esc(label(v))}</span>` : '');
 const COLORS = ['#5145e5', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#6366f1'];
@@ -253,6 +256,7 @@ export function dropdown(anchor, items) {
   m.style.left = `${Math.max(8, left + window.scrollX)}px`;
   m.style.top = `${r.bottom + 6 + window.scrollY}px`;
   $$('button[data-i]', m).forEach((b) => b.addEventListener('click', () => { m.remove(); items[Number(b.dataset.i)].run(); }));
+  $$('a', m).forEach((a) => a.addEventListener('click', () => m.remove()));
   setTimeout(() => document.addEventListener('mousedown', function h(e) { if (!m.contains(e.target)) { m.remove(); document.removeEventListener('mousedown', h); } }), 0);
 }
 

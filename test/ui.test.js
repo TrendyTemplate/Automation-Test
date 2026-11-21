@@ -17,6 +17,7 @@ process.env.ALLOW_PRIVATE_MAIL_HOSTS = 'true';
 process.env.ANTHROPIC_BASE_URL = ai.url;
 process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
 process.env.AUTH_RATE_LIMIT = '500';
+process.env.NODE_ENV = 'test';
 const imap = await imapServer({ port: 3143, user: 'ui@test.local' });
 const smtp = await smtpServer({ port: 3025, user: 'ui@test.local' });
 const { createApp } = await import('../src/server.js');
@@ -96,10 +97,15 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   assert.match(smtp.received[0].parsed.text, /Thanks for asking/);
 
   // Every page renders; no console errors
-  for (const v of ['dashboard', 'approvals', 'ask', 'contacts', 'analytics', 'mailboxes', 'brain', 'autopilot', 'knowledge', 'rules', 'templates', 'simulator', 'declutter', 'integrations', 'team', 'billing', 'security', 'referrals', 'support']) {
+  for (const v of ['dashboard', 'approvals', 'ask', 'contacts', 'analytics', 'mailboxes', 'brain', 'autopilot', 'knowledge', 'rules', 'templates', 'simulator', 'declutter', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('.page-h h1', { timeout: 5000 });
   }
+  // Grouped sections show their tabs
+  await page.goto(`${base}/app#knowledge`);
+  await page.waitForSelector('.tabs a.on:has-text("Knowledge base")');
+  await page.goto(`${base}/app#team`);
+  await page.waitForSelector('.tabs a:has-text("Security & privacy")');
   // Command palette finds the email
   await page.goto(`${base}/app#dashboard`);
   await page.waitForSelector('.page-h');
@@ -119,6 +125,34 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'dark');
 
   assert.equal(await page.evaluate(() => window.__xss), undefined);
+  assert.deepEqual(errors, []);
+});
+
+test('team invitation: invite → /join → sign up → member of the team with limited menu', { skip: !chromium && 'playwright not installed' }, async () => {
+  const owner = await browser.newPage();
+  await owner.goto(`${base}/login`);
+  await owner.fill('#email', 'uma@ui.test'); await owner.fill('#password', PW);
+  await owner.click('#auth-form button[type=submit]'); await owner.waitForURL('**/app');
+  const wsId = await owner.evaluate(async () => (await (await fetch('/api/auth/me')).json()).workspace.id);
+  const { run } = await import('../src/db.js');
+  run(`UPDATE workspaces SET plan='pro', subscription_status='active', billing_interval='monthly' WHERE id = ?`, wsId);
+  const token = await owner.evaluate(async () => (await (await fetch('/api/team/invite', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'nia@ui.test', role: 'member' }) })).json()).token);
+  const guest = await (await browser.newContext()).newPage();
+  const errors = [];
+  guest.on('pageerror', (e) => errors.push(e.message));
+  await guest.goto(`${base}/join?token=${token}`);
+  await guest.click('text=Create your account');
+  await guest.waitForFunction(() => document.getElementById('email')?.value === 'nia@ui.test', null, { timeout: 5000 });
+  assert.equal(await guest.evaluate(() => document.getElementById('email').readOnly), true, 'invited email is locked');
+  await guest.fill('#name', 'Nia'); await guest.fill('#password', PW);
+  await guest.click('#auth-form button[type=submit]');
+  await guest.waitForURL('**/app');
+  await guest.waitForSelector('#ws-name:has-text("UI Shop")');
+  const nav = await guest.textContent('#nav');
+  assert.ok(!nav.includes('Email accounts') && !nav.includes('Alerts & API'), 'members do not see setup pages');
+  assert.ok(nav.includes('Inbox') && nav.includes('Settings'));
+  await guest.goto(`${base}/app#mailboxes`);
+  await guest.waitForSelector('text=Owners and admins only');
   assert.deepEqual(errors, []);
 });
 

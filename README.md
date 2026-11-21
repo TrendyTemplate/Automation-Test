@@ -17,6 +17,8 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 - **Trust layer**: deterministic outbound guard (invented prices, unapproved links, third-party addresses, secrets, card numbers, "never say"), prompt-injection detection, BEC/look-alike detection, earned autopilot per category, AI accuracy score, AI transparency log, test lab.
 - **Team inbox**: assignment, internal notes with @mentions, collision warnings, SLA targets & breach alerts, snooze, awaiting-reply view, out-of-office mode.
 - **Global**: translate any email, preview replies in your own language, reads PDF/image attachments, one-click unsubscribe (RFC 8058) declutter.
+- **Organised for teams & agencies**: email invitations (`/join` links), roles (owner/admin/member) with role-aware menus, ownership transfer, leave/delete workspace, multiple client workspaces, bulk inbox actions, AI corrections, notification bell.
+- **Runs itself**: automatic lifecycle emails (welcome, trial ending/ended, 80%/100% usage, disconnected mailbox, failed payment) and white-label branding — product name, company details and support email from Admin → Settings appear on every page and in the legal templates.
 - **Security**: per-workspace envelope encryption (AES-256-GCM + AAD) for credentials *and* email content, server-side revocable sessions, lockout, 2FA (required for admins), consent-based support access, emergency lockdown, SSRF-proof networking — see [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Features
@@ -43,7 +45,7 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 ```bash
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test             # 42 tests: unit, API, security attacks, real IMAP/SMTP end-to-end, browser (Playwright)
+npm test             # 51 tests: unit, API, workflows, security attacks, real IMAP/SMTP end-to-end, browser (Playwright)
 # Optional: explore with demo data (login demo@mailpilot.test / Demo-Pass-2026, platform admin)
 DB_PATH=./data/demo.db node scripts/seed-demo.js && DB_PATH=./data/demo.db npm start
 ```
@@ -101,6 +103,21 @@ public/                landing, auth pages, customer app (/app, js/views/*) and 
 test/                  unit, api, security, e2e-mail (real IMAP+SMTP servers), ui (Playwright), ai-pipeline
 scripts/seed-demo.js   demo data for screenshots and sales demos
 ```
+
+## App map (customer side)
+| Sidebar | Tabs / contents | Who |
+|---|---|---|
+| Home | setup checklist, KPIs, hot leads, activity | everyone |
+| Inbox | two-pane inbox; views: inbox, mine, unassigned, overdue, awaiting reply, flagged, snoozed; bulk actions | everyone |
+| Approvals | AI drafts, follow-ups, scheduled autopilot replies (undo) | everyone |
+| Ask AI · Contacts & leads · Analytics | | everyone |
+| Email accounts | connect (OAuth / IMAP), edit, signature, mode | owner/admin |
+| AI training | Business & voice · Knowledge base · Templates | owner/admin |
+| Autopilot & rules | Autopilot & safety · Rules · Test lab | owner/admin |
+| Alerts & API | Telegram/Slack, signed webhooks, API keys | owner/admin |
+| Declutter | newsletters & robots, one-click unsubscribe | everyone |
+| Settings | Profile · Team · Plan & billing (owner/admin) · Security & privacy · Refer & earn | everyone |
+| Help & support | FAQ, tickets | everyone |
 
 ## REST API
 Create a key in **Alerts & integrations**, then call `/api/v1/...` with `Authorization: Bearer mp_live_…`. Every dashboard endpoint is available (e.g. `GET /api/v1/messages`, `GET /api/v1/contacts`, `POST /api/v1/messages/:id/reply`, `GET /api/v1/analytics`). Admin endpoints are never reachable with API keys.

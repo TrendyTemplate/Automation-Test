@@ -1,4 +1,4 @@
-import { applyTheme } from './ui.js';
+import { applyTheme, localStorageSet } from './ui.js';
 
 applyTheme();
 const form = document.getElementById('auth-form');
@@ -13,6 +13,17 @@ const MESSAGES = {
 };
 if (q.get('error') && err) err.textContent = MESSAGES[q.get('error')] || q.get('error').slice(0, 200);
 if (q.get('verify') === 'failed' && err) err.textContent = MESSAGES.failed;
+if (q.get('changed') && err) { err.style.color = 'var(--ok)'; err.textContent = 'Your email was changed. Sign in with the new address.'; }
+
+// Invitations: show the context, pre-fill the invited email, and accept after sign-in.
+const invite = q.get('invite');
+if (invite) {
+  localStorageSet('invite', invite);
+  const card = document.querySelector('.auth-card h1');
+  if (card) card.insertAdjacentHTML('afterend', '<div class="callout primary">You\'re joining a team workspace — sign in or create an account with the invited email.</div>');
+  const emailInput = document.getElementById('email');
+  if (emailInput && q.get('email')) { emailInput.value = q.get('email'); if (form?.dataset.mode === 'signup') emailInput.readOnly = true; }
+}
 
 // Only allow same-site relative redirects after login (prevents open-redirect phishing).
 function nextUrl() {
@@ -90,6 +101,7 @@ form?.addEventListener('submit', async (e) => {
       return;
     }
     if (mode === 'signup' && q.get('ref')) body.ref = q.get('ref');
+    if (mode === 'signup' && invite) { body.invite = invite; localStorageSet('invite', ''); }
     const data = await post(`/api/auth/${mode}`, body);
     if (data.need2fa) { show2fa(data.pending); return; }
     location.href = nextUrl();

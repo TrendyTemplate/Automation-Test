@@ -11,6 +11,9 @@ export const SETTINGS = [
   ['general', 'signup_enabled', 'Allow new sign-ups', 'bool', null, false, '1'],
   ['general', 'maintenance_mode', 'Maintenance mode (only admins can use the app)', 'bool', null, false, '0'],
   ['general', 'trial_days', 'Free trial length (days)', 'number', 'TRIAL_DAYS', false, '14'],
+  ['general', 'company_legal_name', 'Company legal name (used in Terms, Privacy and emails)', 'text', null, false, ''],
+  ['general', 'company_address', 'Company address', 'text', null, false, ''],
+  ['general', 'lifecycle_emails', 'Send automatic customer emails (welcome, trial ending, limits, disconnected mailbox, failed payment)', 'bool', null, false, '1'],
   ['general', 'require_email_verification', 'Require email verification before connecting mailboxes', 'bool', null, false, '0'],
 
   ['security', 'require_admin_2fa', 'Require 2FA for platform admins (production)', 'bool', null, false, '1'],

@@ -69,5 +69,5 @@ for (const [e, plan, status, interval, amount, method] of [
     run(`INSERT INTO ticket_messages (ticket_id, author_id, body) VALUES (?,?, 'My Outlook mailbox says authentication failed since yesterday. Can you help?')`, t, u);
   }
 }
-run(`INSERT INTO announcements (message, level) VALUES ('New: the AI now learns your writing style. Try it in AI brain → Writing style!', 'success')`);
+run(`INSERT INTO announcements (message, level) VALUES ('New: the AI now learns your writing style. Try it in AI training → Business & voice!', 'success')`);
 console.log('Demo data created. Log in with demo@mailpilot.test / Demo-Pass-2026');

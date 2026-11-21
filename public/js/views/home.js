@@ -18,7 +18,7 @@ export async function dashboard(ctx, params) {
     [Boolean(settings.style_guide), 'Teach the AI your writing style', '#brain', 'wand'],
     [Boolean(settings.telegram_chat_id || settings.slack_webhook), 'Get urgent alerts on your phone', '#integrations', 'bell'],
     [Boolean(me.user.totp_enabled), 'Protect your account with two-factor authentication', '#security', 'lock'],
-  ];
+  ].filter((st) => ['owner', 'admin'].includes(me.role) || st[2] === '#security'); // members only see what they can do
   const done = steps.filter((s) => s[0]).length;
   const usagePct = Math.min(100, Math.round((d.usage.ai_replies / Math.max(1, d.plan.aiRepliesPerMonth)) * 100));
   const hour = new Date().getHours();

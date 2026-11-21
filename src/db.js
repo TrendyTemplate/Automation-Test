@@ -415,3 +415,23 @@ export function securityEvent(req, type, detail, { userId, workspaceId } = {}) {
 }
 addColumn('messages', 'reply_to_email', 'TEXT');
 addColumn('messages', 'guard_flags', 'TEXT');
+
+// ---------------------------------------------------------------------------
+// Migrations (v4): invitations, lifecycle emails, notifications, profile.
+// ---------------------------------------------------------------------------
+addColumn('users', 'notifications_seen_at', 'TEXT');
+addColumn('users', 'notify_digest', 'INTEGER NOT NULL DEFAULT 1');
+addColumn('tokens', 'data', 'TEXT');
+db.exec(`
+CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', token_hash TEXT NOT NULL UNIQUE,
+  invited_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  expires_at TEXT NOT NULL, accepted_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS lifecycle_sent (     -- de-duplicates automatic customer emails
+  workspace_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL DEFAULT '',
+  sent_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (workspace_id, kind, ref)
+);
+`);

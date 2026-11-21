@@ -1,10 +1,10 @@
-import { $, esc, icon, api, toast, bind, formData, badge, lead, avatar, ago, fmtDate, bars, hbars, money, num, empty, csvDownload, label } from '../ui.js';
+import { $, esc, icon, api, toast, bind, formData, badge, lead, avatar, ago, fmtDate, bars, hbars, money, num, empty, csvDownload, label, modal, confirmBox } from '../ui.js';
 
 export async function contacts(ctx, params) {
   const list = await api(`/contacts?${new URLSearchParams(params)}`);
   ctx.view.innerHTML = `
     <div class="page-h"><div><h1>Contacts & leads</h1><p>Built automatically from your email. The AI scores buying intent and extracts company, phone, budget and deadlines.</p></div>
-      <div class="actions"><button class="btn" data-act="csv">${icon('download')}Export CSV</button></div></div>
+      <div class="actions"><button class="btn" data-act="csv">${icon('download')}Export CSV</button><button class="btn primary" data-act="add">${icon('plus')}Add contact</button></div></div>
     <form class="card mb row" data-act="filter" style="padding:12px">
       <div class="input-icon" style="flex:2;min-width:200px">${icon('search')}<input name="q" placeholder="Name, email, company or tag" value="${esc(params.q || '')}"></div>
       <select name="sort" style="width:auto"><option value="">Most recent</option><option value="lead" ${params.sort === 'lead' ? 'selected' : ''}>Highest lead score</option></select>
@@ -18,6 +18,10 @@ export async function contacts(ctx, params) {
   bind({
     filter: (f) => { const d = formData(f); d.vip = d.vip ? '1' : ''; location.hash = `contacts?${new URLSearchParams(Object.entries(d).filter(([, v]) => v))}`; },
     csv: () => csvDownload('/contacts.csv'),
+    add: () => modal(`<h2>Add contact</h2><form data-act="create"><div class="grid g2"><div><label>Email</label><input name="email" type="email" required></div><div><label>Name</label><input name="name"></div>
+      <div><label>Company</label><input name="company"></div><div><label>Phone</label><input name="phone"></div></div><label>Tags</label><input name="tags" placeholder="wholesale, priority">
+      <label class="check"><input type="checkbox" name="vip"> VIP — always reviewed by a human, instant alerts</label><button class="btn primary mt" type="submit">Add contact</button></form>`,
+    (el, close) => bind({ create: async (f) => { const r = await api('/contacts', { method: 'POST', body: formData(f) }); close(); location.hash = `contact?id=${r.id}`; } }, el)),
   }, ctx.view);
   ctx.view.querySelectorAll('tr.click').forEach((tr) => tr.addEventListener('click', () => { location.hash = `contact?id=${tr.dataset.id}`; }));
 }
@@ -36,11 +40,14 @@ export async function contact(ctx, { id }) {
         <label class="check"><input type="checkbox" name="vip" ${c.vip ? 'checked' : ''}><span><b>VIP</b> — always high priority, never auto-sent, instant alert</span></label>
         <label class="check"><input type="checkbox" name="do_not_contact" ${c.do_not_contact ? 'checked' : ''}><span><b>Do not contact</b> — no follow-ups or automatic replies</span></label>
         <label class="check"><input type="checkbox" name="blocked" ${c.blocked ? 'checked' : ''}><span><b>Block</b> — ignore all email from this sender</span></label>
-        <div class="row mt"><button class="btn primary" type="submit">Save</button><span class="hint">First seen ${fmtDate(c.first_seen)} · ${c.emails_in} received · ${c.emails_out} sent</span></div></form>
+        <div class="row mt"><button class="btn primary" type="submit">Save</button><button class="btn ghost danger" type="button" data-act="del">${icon('trash')}Delete</button><span class="hint">First seen ${fmtDate(c.first_seen)} · ${c.emails_in} received · ${c.emails_out} sent</span></div></form>
       <div class="card"><h3>Timeline</h3>
         ${c.messages.map((m) => `<a class="row nowrap" style="padding:10px 0;border-bottom:1px solid var(--border);color:inherit;text-decoration:none" href="#message?id=${m.id}">${icon('mail', 'sm')}<div class="truncate" style="flex:1"><b>${esc(m.subject || '(no subject)')}</b><div class="hint truncate">${esc(m.summary || '')}</div></div>${badge(m.status)}<span class="hint nowrap">${ago(m.received_at)}</span></a>`).join('') || empty('mail', 'No emails')}</div>
     </div>`;
-  bind({ save: async (f) => { await api(`/contacts/${id}`, { method: 'PUT', body: formData(f) }); toast('Saved'); } }, ctx.view);
+  bind({
+    save: async (f) => { await api(`/contacts/${id}`, { method: 'PUT', body: formData(f) }); toast('Saved'); },
+    del: async () => { if (await confirmBox('Delete this contact?', 'Their emails stay in your inbox; only the contact profile is removed.', { danger: true, ok: 'Delete' })) { await api(`/contacts/${id}`, { method: 'DELETE' }); location.hash = 'contacts'; } },
+  }, ctx.view);
 }
 
 export async function analytics(ctx, params) {
@@ -93,7 +100,7 @@ export async function declutter(ctx) {
 
 export async function simulator(ctx) {
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>${icon('flask', 'lg')} Test lab</h1><p>Paste any email and see exactly how the AI would classify and answer it — and whether autopilot would send it. Nothing is sent.</p></div></div>
+    <div class="page-h"><div><h1>Autopilot & rules</h1><p>Test lab — Paste any email and see exactly how the AI would classify and answer it — and whether autopilot would send it. Nothing is sent.</p></div></div>
     <div class="split">
       <form class="card" data-act="sim"><h3>Sample email</h3>
         <div class="grid g2"><div><label>From name</label><input name="from_name" value="Alex Morgan"></div><div><label>From email</label><input name="from_email" value="alex@example.com"></div></div>

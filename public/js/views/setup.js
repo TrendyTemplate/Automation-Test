@@ -27,6 +27,7 @@ export async function mailboxes(ctx, params) {
           <dt>Emails</dt><dd>${m.message_count}</dd><dt>Last checked</dt><dd>${ago(m.last_sync_at)}</dd>
           ${m.mode === 'auto' ? `<dt>Autopilot for</dt><dd>${m.auto_categories ? (m.auto_categories.map((c) => esc(label(c))).join(', ') || 'no categories') : 'all categories'} · <a href="#autopilot">change</a></dd>` : ''}</dl>
         <div class="row mt"><button class="btn sm" data-act="sync" data-id="${m.id}">${icon('refresh')}Check now</button>
+          <button class="btn sm" data-act="edit" data-id="${m.id}">${icon('settings')}Edit</button>
           <button class="btn sm" data-act="sig" data-id="${m.id}">${icon('note')}Signature</button>
           ${m.last_error && m.auth_type !== 'password' ? `<a class="btn sm primary" href="/api/oauth/${m.auth_type.replace('oauth_', '')}/connect">${icon('refresh')}Reconnect</a>` : ''}
           ${m.auth_type === 'password' ? `<button class="btn sm" data-act="pw" data-id="${m.id}">${icon('key')}Update password</button>` : ''}
@@ -71,6 +72,28 @@ export async function mailboxes(ctx, params) {
       if (!(await confirmBox('Remove this account?', 'Its stored emails are deleted and our access to the mailbox is revoked.', { danger: true, ok: 'Remove' }))) return;
       const r = await api(`/mailboxes/${b.dataset.id}`, { method: 'DELETE' }); toast(r.revoked ? 'Removed and access revoked at Google' : 'Removed'); ctx.route();
     },
+    edit: (b) => {
+      const m = list.find((x) => String(x.id) === b.dataset.id);
+      const pw = m.auth_type === 'password';
+      modal(`<h2>Edit ${esc(m.email)}</h2><form data-act="saveEdit">
+        <label>Display name</label><input name="label" value="${esc(m.label || '')}" placeholder="e.g. Support team">
+        ${pw ? `<h4 class="section-title">Server settings</h4><div class="grid g2">
+          <div><label>IMAP server</label><input name="imap_host" value="${esc(m.imap_host)}"></div><div><label>IMAP port</label><input name="imap_port" type="number" value="${m.imap_port}"></div>
+          <div><label>SMTP server</label><input name="smtp_host" value="${esc(m.smtp_host)}"></div><div><label>SMTP port</label><input name="smtp_port" type="number" value="${m.smtp_port}"></div>
+          <div><label>Username</label><input name="username" value="${esc(m.username)}"></div></div>
+          <p class="field-hint">Changing server settings re-tests the connection before saving.</p>` : `<p class="hint mt">Server settings are managed by ${m.auth_type === 'oauth_google' ? 'Google' : 'Microsoft'} for this account.</p>`}
+        <button class="btn primary mt" type="submit">Save</button></form>`, (el, close) => bind({
+        saveEdit: async (f) => {
+          const d = formData(f);
+          const body = { label: d.label };
+          if (pw && ['imap_host', 'imap_port', 'smtp_host', 'smtp_port', 'username'].some((k) => String(d[k]) !== String(m[k]))) {
+            Object.assign(body, { imap_host: d.imap_host, imap_port: Number(d.imap_port), smtp_host: d.smtp_host, smtp_port: Number(d.smtp_port), username: d.username,
+              imap_secure: [993, 1993].includes(Number(d.imap_port)), smtp_secure: Number(d.smtp_port) === 465 });
+          }
+          await api(`/mailboxes/${m.id}`, { method: 'PATCH', body }); close(); toast('Saved'); ctx.route();
+        },
+      }, el));
+    },
     pw: (b) => modal(`<h2>Update app password</h2><form data-act="savepw"><label>New app password</label><input type="password" name="password" required autocomplete="new-password"><button class="btn primary mt" type="submit">Test & save</button></form>`,
       (el, close) => bind({ savepw: async (f) => { await api(`/mailboxes/${b.dataset.id}`, { method: 'PATCH', body: formData(f) }); close(); toast('Saved — connection verified'); ctx.route(); } }, el)),
     sig: (b) => {
@@ -85,7 +108,7 @@ export async function brain(ctx) {
   const [s, mailboxes, corrections] = await Promise.all([api('/settings'), api('/mailboxes'), api('/ai/corrections')]);
   const oooOn = s.ooo_until && new Date(s.ooo_until) > new Date();
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>AI brain</h1><p>Teach the assistant who you are, what you sell and how you write.</p></div></div>
+    <div class="page-h"><div><h1>AI training</h1><p>Teach the assistant who you are, what you sell and how you write.</p></div></div>
     <form data-act="save" class="col" style="gap:16px">
       <div class="card"><h3>Your business</h3>
         <div class="grid g2"><div><label>Workspace name</label><input name="name" value="${esc(s.name)}"></div><div><label>Brand name</label><input name="business_name" value="${esc(s.business_name)}"></div></div>
@@ -138,7 +161,7 @@ export async function autopilot(ctx) {
   let bh = {}; try { bh = s.business_hours ? JSON.parse(s.business_hours) : {}; } catch { /* none */ }
   const alerts = String(s.alert_on || '').split(',');
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Autopilot & safety</h1><p>Decide exactly when the AI may send on its own. Every reply passes deterministic safety checks first — the AI can't talk its way past them.</p></div></div>
+    <div class="page-h"><div><h1>Autopilot & rules</h1><p>Decide exactly when the AI may send on its own. Every reply passes deterministic safety checks first — the AI can't talk its way past them.</p></div></div>
     <div class="callout info">${icon('shieldCheck')}<div><b>Always on, can't be disabled:</b> never replies to newsletters, robots or phishing · never sends to anyone except the original sender · blocks invented prices, unknown links, third-party email addresses, secrets and card numbers · detects hidden "prompt injection" instructions · max one auto-reply per person per day.</div></div>
     <form data-act="save" class="col" style="gap:16px">
       <div class="card"><h3>${icon('target')} Earned autopilot</h3>
@@ -192,11 +215,11 @@ export async function autopilot(ctx) {
   }, ctx.view);
 }
 
-function crudView(path, title, intro, fields, extra = '') {
+function crudView(path, title, intro, fields, extra = '', section = 'AI training') {
   return async (ctx) => {
     const list = await api(`/${path}`);
     ctx.view.innerHTML = `
-      <div class="page-h"><div><h1>${title}</h1><p>${intro}</p></div><div class="actions"><button class="btn primary" data-act="new">${icon('plus')}Add</button></div></div>${extra}
+      <div class="page-h"><div><h1>${section}</h1><p>${intro}</p></div><div class="actions"><button class="btn primary" data-act="new">${icon('plus')}Add ${path === 'knowledge' ? 'knowledge' : 'template'}</button></div></div>${extra}
       ${list.map((x) => `<div class="card mb"><form data-act="save" data-id="${x.id}">
         ${fields.map(([k, l, ta]) => `<label>${l}</label>${ta ? `<textarea name="${k}">${esc(x[k])}</textarea>` : `<input name="${k}" value="${esc(x[k])}">`}`).join('')}
         <div class="row mt"><button class="btn" type="submit">Save</button><span class="spacer"></span><button class="btn ghost danger" type="button" data-act="del" data-id="${x.id}">${icon('trash')}Delete</button></div>
@@ -218,63 +241,88 @@ export const templates = crudView('templates', 'Templates', 'Canned replies for 
   [['name', 'Name'], ['subject', 'Subject (blank = Re: original)'], ['body', 'Body', true]]);
 
 export async function rules(ctx) {
-  const [list, meta, tpls, team] = await Promise.all([api('/rules'), api('/rules/meta'), api('/templates'), api('/team')]);
-  const describe = (r) => `<b>When</b> ${r.conditions.items.map((c) => `${esc(label(c.field))} ${esc(c.op.replace('_', ' '))} “${esc(c.value)}”`).join(r.conditions.match === 'any' ? ' <b>or</b> ' : ' <b>and</b> ') || 'any email arrives'} <b>then</b> ${r.actions.map((a) => esc(label(a.type)) + (a.to ? ` ${esc(a.to)}` : '') + (a.mode ? ` (${esc(a.mode)})` : '') + (a.hours ? ` ${a.hours}h` : '')).join(', ')}`;
+  const [list, meta, tpls, teamRes] = await Promise.all([api('/rules'), api('/rules/meta'), api('/templates'), api('/team')]);
+  const team = teamRes.members;
+  const describe = (r) => `<b>When</b> ${r.conditions.items.map((c) => `${esc(label(c.field))} ${esc(c.op.replace('_', ' '))} “${esc(c.value)}”`).join(r.conditions.match === 'any' ? ' <b>or</b> ' : ' <b>and</b> ') || 'any email arrives'} <b>then</b> ${r.actions.map((a) => esc(label(a.type)) + (a.to ? ` ${esc(a.to)}` : '') + (a.mode ? ` (${esc(a.mode)})` : '') + (a.hours ? ` ${a.hours}h` : '') + (a.user_id ? ` → ${esc(team.find((u) => u.id === a.user_id)?.name || 'teammate')}` : '')).join(', ')}`;
   const recipes = [
-    ['Complaints → careful apology draft', { field: 'category', op: 'equals', value: 'complaint' }, { type: 'ai_reply', mode: 'draft', instructions: 'Apologize sincerely, acknowledge the problem, and say a manager will reply within 24 hours.' }],
-    ['Ignore receipts from your tools', { field: 'subject', op: 'regex', value: '^(receipt|your invoice|payment received)' }, { type: 'ignore' }],
-    ['Job applications → thank-you template', { field: 'category', op: 'equals', value: 'job_application' }, { type: 'template_reply', mode: 'auto' }],
-    ['Sales leads → CRM webhook', { field: 'category', op: 'equals', value: 'sales_inquiry' }, { type: 'webhook', url: 'https://hooks.zapier.com/…' }],
-    ['Billing emails → assign to finance', { field: 'category', op: 'equals', value: 'billing' }, { type: 'assign' }],
+    { name: 'Complaints → careful apology draft', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'complaint' }] }, actions: [{ type: 'ai_reply', mode: 'draft', instructions: 'Apologize sincerely, acknowledge the problem, and say a manager will reply within 24 hours.' }] },
+    { name: 'Ignore receipts from your tools', conditions: { match: 'all', items: [{ field: 'subject', op: 'regex', value: '^(receipt|your invoice|payment received)' }] }, actions: [{ type: 'ignore' }] },
+    { name: 'Job applications → thank-you template', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'job_application' }] }, actions: [{ type: 'template_reply', mode: 'auto' }] },
+    { name: 'Sales leads → CRM webhook', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'sales_inquiry' }] }, actions: [{ type: 'webhook', url: '' }] },
+    { name: 'Billing → assign to finance', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'billing' }] }, actions: [{ type: 'assign' }] },
+    { name: 'VIP domain → urgent alert', conditions: { match: 'any', items: [{ field: 'from_domain', op: 'equals', value: 'bigclient.com' }] }, actions: [{ type: 'ai_reply', mode: 'draft', instructions: 'This is a key client. Be extra attentive.' }] },
   ];
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Rules</h1><p>No-code automations that run on every new email, top to bottom.</p></div></div>
-    <div class="card pad-0 mb">${list.map((r) => `<div class="row nowrap" style="padding:14px 20px;border-bottom:1px solid var(--border)">${icon('zap')}<div style="flex:1;min-width:0"><b>${esc(r.name)}</b><div class="hint">${describe(r)}</div></div>${r.enabled ? badge('active', 'ok') : badge('off')}<button class="btn sm ghost danger" data-act="del" data-id="${r.id}">${icon('trash')}</button></div>`).join('') || `<div style="padding:8px">${empty('zap', 'No rules yet', 'Start from a recipe below.')}</div>`}</div>
-    <div class="card mb"><h3>Recipes</h3><div class="chips">${recipes.map((x, i) => `<button class="chip" data-act="recipe" data-i="${i}">${esc(x[0])}</button>`).join('')}</div></div>
-    <div class="card"><h3>New rule</h3><form data-act="add" id="rule-form">
-      <label>Name</label><input name="name" required placeholder="e.g. Complaints go to manager">
-      <label>When</label><div class="row nowrap"><select name="field">${meta.fields.map((f) => `<option value="${f}">${esc(label(f))}</option>`).join('')}</select>
-        <select name="op">${meta.ops.map((o) => `<option value="${o}">${esc(o.replace('_', ' '))}</option>`).join('')}</select><input name="value" placeholder="value, e.g. complaint or @bigclient.com" style="flex:2"></div>
-      <div class="field-hint">Categories: ${meta.categories.map((c) => esc(c)).join(', ')}</div>
-      <label>Then</label><div class="row nowrap"><select name="action" id="act-type">${meta.actions.map((a) => `<option value="${a}">${esc(label(a))}</option>`).join('')}</select>
-        <select name="mode"><option value="">account's mode</option><option value="draft">draft</option><option value="auto">auto-send</option></select></div>
-      <div id="act-extra" class="mt-s"></div>
-      <button class="btn primary mt" type="submit">Save rule</button></form></div>`;
-  const extra = () => {
-    const t = $('#act-type').value;
-    $('#act-extra').innerHTML = {
-      ai_reply: '<input name="param" placeholder="Extra instructions for the AI (optional)">',
-      forward: '<input name="param" type="email" placeholder="Forward to (email)" required>',
-      webhook: '<input name="param" type="url" placeholder="https://… (signed POST with the email details)" required>',
-      template_reply: `<select name="template_id">${tpls.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('') || '<option value="">Create a template first</option>'}</select>`,
-      assign: `<select name="user_id">${team.map((u) => `<option value="${u.id}">${esc(u.name || u.email)}</option>`).join('')}</select>`,
-      snooze: '<input name="hours" type="number" min="1" value="24" placeholder="Hours">',
-    }[t] || '';
+    <div class="page-h"><div><h1>Autopilot & rules</h1><p>No-code automations that run on every new email, top to bottom. The first matching rule wins unless “continue” is ticked.</p></div>
+      <div class="actions"><button class="btn primary" data-act="new">${icon('plus')}New rule</button></div></div>
+    <div class="card pad-0 mb">${list.map((r, i) => `<div class="row nowrap" style="padding:14px 20px;border-bottom:1px solid var(--border)">
+      <div class="col" style="gap:2px"><button class="btn xs ghost icon-only" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move up" style="transform:rotate(180deg)">${icon('chevron', 'sm')}</button><button class="btn xs ghost icon-only" data-act="down" data-i="${i}" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">${icon('chevron', 'sm')}</button></div>
+      ${icon('zap')}<div style="flex:1;min-width:0"><b>${esc(r.name)}</b><div class="hint">${describe(r)}${r.stop_processing ? '' : ' · <i>continues to next rules</i>'}</div></div>
+      <label class="switch" title="${r.enabled ? 'On' : 'Off'}"><input type="checkbox" data-act="toggle" data-id="${r.id}" ${r.enabled ? 'checked' : ''}><span></span></label>
+      <button class="btn sm" data-act="edit" data-id="${r.id}">Edit</button><button class="btn sm ghost danger" data-act="del" data-id="${r.id}" aria-label="Delete">${icon('trash')}</button></div>`).join('') || `<div style="padding:8px">${empty('zap', 'No rules yet', 'Start from a recipe below or create your own.')}</div>`}</div>
+    <div class="card"><h3>Recipes</h3><p class="hint">One click to pre-fill a common automation.</p><div class="chips">${recipes.map((x, i) => `<button class="chip" data-act="recipe" data-i="${i}">${esc(x.name)}</button>`).join('')}</div></div>`;
+
+  const condRow = (c = { field: 'category', op: 'equals', value: '' }) => `<div class="row nowrap cond" style="margin-bottom:8px"><select data-k="field">${meta.fields.map((f) => `<option value="${f}" ${c.field === f ? 'selected' : ''}>${esc(label(f))}</option>`).join('')}</select>
+    <select data-k="op">${meta.ops.map((o) => `<option value="${o}" ${c.op === o ? 'selected' : ''}>${esc(o.replace('_', ' '))}</option>`).join('')}</select>
+    <input data-k="value" value="${esc(c.value)}" placeholder="value" style="flex:2" list="cat-list"><button type="button" class="btn sm ghost icon-only" data-rm aria-label="Remove">${icon('x', 'sm')}</button></div>`;
+  const actExtra = (a) => ({
+    ai_reply: `<input data-k="instructions" value="${esc(a.instructions || '')}" placeholder="Extra instructions for the AI (optional)" style="flex:2">`,
+    forward: `<input data-k="to" type="email" value="${esc(a.to || '')}" placeholder="Forward to (email)" style="flex:2">`,
+    webhook: `<input data-k="url" type="url" value="${esc(a.url || '')}" placeholder="https://… (signed POST)" style="flex:2">`,
+    template_reply: `<select data-k="template_id" style="flex:2">${tpls.map((x) => `<option value="${x.id}" ${a.template_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('') || '<option value="">Create a template first</option>'}</select>`,
+    assign: `<select data-k="user_id" style="flex:2">${team.map((u) => `<option value="${u.id}" ${a.user_id === u.id ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select>`,
+    snooze: `<input data-k="hours" type="number" min="1" value="${esc(a.hours || 24)}" placeholder="Hours" style="flex:1">`,
+  }[a.type] || '');
+  const actRow = (a = { type: 'ai_reply' }) => `<div class="row nowrap act" style="margin-bottom:8px"><select data-k="type">${meta.actions.map((x) => `<option value="${x}" ${a.type === x ? 'selected' : ''}>${esc(label(x))}</option>`).join('')}</select>
+    ${['ai_reply', 'template_reply'].includes(a.type) ? `<select data-k="mode"><option value="">account's mode</option><option value="draft" ${a.mode === 'draft' ? 'selected' : ''}>draft</option><option value="auto" ${a.mode === 'auto' ? 'selected' : ''}>auto-send</option></select>` : ''}
+    <span class="x" style="display:contents">${actExtra(a)}</span><button type="button" class="btn sm ghost icon-only" data-rm aria-label="Remove">${icon('x', 'sm')}</button></div>`;
+
+  const openBuilder = (rule) => modal(`<h2>${rule?.id ? 'Edit rule' : 'New rule'}</h2>
+    <form data-act="saveRule"><label>Name</label><input name="name" required value="${esc(rule?.name || '')}" placeholder="e.g. Complaints go to manager">
+      <div class="row mt"><b>When</b><select name="match" style="width:auto">${[['all', 'all conditions match'], ['any', 'any condition matches']].map(([v, l]) => `<option value="${v}" ${rule?.conditions?.match === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div id="conds" class="mt-s">${(rule?.conditions?.items || []).map(condRow).join('')}</div>
+      <button type="button" class="btn sm" data-add="cond">${icon('plus', 'sm')}Add condition</button> <span class="hint">No conditions = every email.</span>
+      <datalist id="cat-list">${meta.categories.map((c) => `<option value="${c}">`).join('')}${['urgent', 'high', 'normal', 'low', 'positive', 'neutral', 'negative'].map((c) => `<option value="${c}">`).join('')}</datalist>
+      <div class="mt"><b>Then</b></div><div id="acts" class="mt-s">${(rule?.actions?.length ? rule.actions : [{ type: 'ai_reply' }]).map(actRow).join('')}</div>
+      <button type="button" class="btn sm" data-add="act">${icon('plus', 'sm')}Add action</button>
+      <label class="check mt"><input type="checkbox" name="continue" ${rule && !rule.stop_processing ? 'checked' : ''}> Continue checking the next rules after this one matches</label>
+      <label class="check"><input type="checkbox" name="enabled" ${!rule || rule.enabled ? 'checked' : ''}> Rule is on</label>
+      <button class="btn primary mt" type="submit">Save rule</button></form>`, (el, close) => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-rm]')) e.target.closest('.cond, .act').remove();
+      const add = e.target.closest('[data-add]');
+      if (add) el.querySelector(add.dataset.add === 'cond' ? '#conds' : '#acts').insertAdjacentHTML('beforeend', add.dataset.add === 'cond' ? condRow() : actRow());
+    });
+    el.addEventListener('change', (e) => {
+      if (e.target.matches('.act [data-k="type"]')) { const row = e.target.closest('.act'); row.outerHTML = actRow({ type: e.target.value }); }
+    });
+    bind({
+      saveRule: async (f) => {
+        const read = (row) => Object.fromEntries([...row.querySelectorAll('[data-k]')].map((x) => [x.dataset.k, x.value]).filter(([, v]) => v !== ''));
+        const items = [...el.querySelectorAll('.cond')].map(read).filter((c) => c.value);
+        const actions = [...el.querySelectorAll('.act')].map(read).map((a) => ({ ...a, ...(a.template_id ? { template_id: Number(a.template_id) } : {}), ...(a.user_id ? { user_id: Number(a.user_id) } : {}), ...(a.hours ? { hours: Number(a.hours) } : {}) }));
+        if (!actions.length) throw new Error('Add at least one action');
+        const d = formData(f);
+        const body = { name: d.name, enabled: d.enabled, stop_processing: !d.continue, position: rule?.position ?? list.length, conditions: { match: d.match, items }, actions };
+        await api(rule?.id ? `/rules/${rule.id}` : '/rules', { method: rule?.id ? 'PUT' : 'POST', body });
+        close(); toast('Rule saved'); ctx.route();
+      },
+    }, el);
+  }, { wide: true });
+
+  const move = async (i, dir) => {
+    const ids = list.map((r) => r.id);
+    [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
+    await api('/rules/reorder', { method: 'POST', body: { ids } }); ctx.route();
   };
-  $('#act-type').addEventListener('change', extra); extra();
   bind({
-    add: async (f) => {
-      const d = formData(f);
-      const action = { type: d.action };
-      if (d.mode) action.mode = d.mode;
-      if (d.action === 'ai_reply' && d.param) action.instructions = d.param;
-      if (d.action === 'forward') action.to = d.param;
-      if (d.action === 'webhook') action.url = d.param;
-      if (d.action === 'template_reply') action.template_id = Number(d.template_id);
-      if (d.action === 'assign') action.user_id = Number(d.user_id);
-      if (d.action === 'snooze') action.hours = Number(d.hours);
-      await api('/rules', { method: 'POST', body: { name: d.name, conditions: { match: 'all', items: d.value ? [{ field: d.field, op: d.op, value: d.value }] : [] }, actions: [action] } });
-      toast('Rule saved'); ctx.route();
-    },
+    new: () => openBuilder(null),
+    edit: (b) => openBuilder(list.find((r) => String(r.id) === b.dataset.id)),
+    recipe: (b) => openBuilder({ ...recipes[Number(b.dataset.i)], stop_processing: 1, enabled: 1 }),
+    toggle: async (c) => { await api(`/rules/${c.dataset.id}`, { method: 'PATCH', body: { enabled: c.checked } }); toast(c.checked ? 'Rule on' : 'Rule off'); },
+    up: (b) => move(Number(b.dataset.i), -1),
+    down: (b) => move(Number(b.dataset.i), 1),
     del: async (b) => { if (await confirmBox('Delete this rule?', '', { danger: true, ok: 'Delete' })) { await api(`/rules/${b.dataset.id}`, { method: 'DELETE' }); ctx.route(); } },
-    recipe: (b) => {
-      const [name, cond, act] = recipes[Number(b.dataset.i)];
-      const f = $('#rule-form');
-      f.name.value = name; f.field.value = cond.field; f.op.value = cond.op; f.value.value = cond.value; f.action.value = act.type; f.mode.value = act.mode || '';
-      extra();
-      if (f.param) f.param.value = act.instructions || act.to || act.url || '';
-      f.scrollIntoView({ behavior: 'smooth' });
-    },
   }, ctx.view);
 }
 

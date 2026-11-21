@@ -12,7 +12,8 @@ import appRoutes from './routes/app.js';
 import billingRoutes, { webhookRouter } from './routes/billing.js';
 import adminRoutes from './routes/admin.js';
 import oauthRoutes from './routes/oauth.js';
-import { appUrl, appName } from './settings.js';
+import { appUrl, appName, getSetting } from './settings.js';
+import fs from 'node:fs';
 import { aiEnabled } from './services/ai.js';
 import { stripe } from './routes/billing.js';
 import { startWorker } from './services/worker.js';
@@ -102,9 +103,32 @@ export function createApp() {
   }, appRoutes);
 
   app.get('/health', (req, res) => res.json({ ok: true }));
-  app.use(express.static(publicDir, { extensions: ['html'] }));
-  app.get(['/app', '/app/*splat'], (req, res) => res.sendFile(path.join(publicDir, 'app.html')));
-  app.get(['/admin', '/admin/*splat'], (req, res) => res.sendFile(path.join(publicDir, 'admin.html')));
+
+  // HTML pages are rendered with the brand and company details from Admin → Settings, so renaming the product
+  // or filling in the legal entity updates every page (titles, landing, legal pages) without touching code.
+  const PAGES = new Set(fs.readdirSync(publicDir).filter((f) => f.endsWith('.html')).map((f) => f.slice(0, -5)));
+  const escHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const renderPage = (name) => {
+    const brand = escHtml(appName() || 'MailPilot AI');
+    const company = escHtml(getSetting('company_legal_name') || appName());
+    return fs.readFileSync(path.join(publicDir, `${name}.html`), 'utf8')
+      .replace(/MailPilot( AI)?/g, (m) => (m === 'MailPilot AI' ? brand : brand.replace(/ AI$/, '')))
+      .replaceAll('{{COMPANY}}', company).replaceAll('{{COMPANY_ADDRESS}}', escHtml(getSetting('company_address') || '[company address]'))
+      .replaceAll('{{TEMPLATE_NOTICE}}', getSetting('company_legal_name') ? '' : '<div class="callout warn"><b>Template.</b>&nbsp;Fill in Admin → Settings → Company legal name &amp; address, edit the [bracketed] parts, and have a lawyer review before launch. This notice disappears once the company name is set.</div>')
+      .replaceAll('{{SUPPORT_EMAIL}}', escHtml(getSetting('support_email') || '[support email]')).replaceAll('{{APP_URL}}', escHtml(appUrl()))
+      .replace('<head>', `<head>\n<meta name="app-name" content="${brand}">`);
+  };
+  const sendPage = (res, name, status = 200) => res.status(status).type('html').set('Cache-Control', 'no-cache').send(renderPage(name));
+  app.get(['/app', '/app/*splat'], (req, res) => sendPage(res, 'app'));
+  app.get(['/admin', '/admin/*splat'], (req, res) => sendPage(res, 'admin'));
+  app.get('/', (req, res) => sendPage(res, 'index'));
+  app.get('/:page', (req, res, next) => {
+    const name = req.params.page.replace(/\.html$/, '');
+    if (PAGES.has(name) && !['app', 'admin', 'index', '404'].includes(name)) return sendPage(res, name);
+    next();
+  });
+  app.use(express.static(publicDir, { index: false }));
+  app.use((req, res, next) => (req.method === 'GET' && !req.path.startsWith('/api/') && req.accepts('html') ? sendPage(res, '404', 404) : next()));
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
   app.use((err, req, res, _next) => {

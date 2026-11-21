@@ -334,3 +334,6 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--surface-2); 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 .hbar > span:first-child, .kv dt { text-transform: capitalize; }
 .kv dt::first-letter { text-transform: uppercase; }
+/* Inline form rows (rule builder etc.): let fields share the row instead of each taking 100% */
+.row.nowrap > input, .row.nowrap > select, .row.nowrap > .x > input, .row.nowrap > .x > select { width: auto; flex: 1 1 0; min-width: 0; }
+.row.nowrap > input[data-k="value"], .row.nowrap > .x > input { flex: 2 1 0; }

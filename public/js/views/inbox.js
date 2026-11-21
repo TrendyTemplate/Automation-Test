@@ -4,12 +4,13 @@ const VIEWS = [
   ['inbox', 'Inbox', 'inbox'], ['mine', 'Assigned to me', 'mine'], ['unassigned', 'Unassigned', 'unassigned'], ['overdue', 'Overdue', 'overdue'],
   ['awaiting', 'Awaiting reply', null], ['flagged', 'Flagged', 'flagged'], ['snoozed', 'Snoozed', 'snoozed'], ['all', 'All', null],
 ];
-let state = { view: 'inbox', q: '', filters: {}, list: [], selected: null, poll: null };
+let state = { view: 'inbox', q: '', filters: {}, list: [], selected: null, poll: null, checked: new Set() };
+const CATS = ['sales_inquiry', 'support', 'billing', 'complaint', 'partnership', 'job_application', 'meeting_request', 'personal', 'newsletter', 'notification', 'spam', 'other'];
 
 function rowHtml(m) {
   const overdue = m.sla_due_at && !m.done && new Date(m.sla_due_at) < new Date();
   return `<div class="mrow ${state.selected === m.id ? 'on' : ''} ${m.status === 'triaged' || m.status === 'drafted' ? 'unread' : ''}" data-id="${m.id}" tabindex="0">
-    ${avatar(m.from_name, m.from_email)}
+    <div class="col" style="gap:6px;align-items:center"><input type="checkbox" class="msel" data-id="${m.id}" ${state.checked.has(m.id) ? 'checked' : ''} aria-label="Select">${avatar(m.from_name, m.from_email, 'sm')}</div>
     <div style="min-width:0"><div class="from truncate">${esc(m.from_name || m.from_email)}</div>
       <div class="subj truncate">${m.starred ? `<span style="color:var(--warn)">★</span> ` : ''}${esc(m.subject || '(no subject)')}</div>
       <div class="sum truncate">${esc(m.summary || '')}</div>
@@ -25,7 +26,37 @@ async function loadList(ctx) {
   $('#views').innerHTML = VIEWS.map(([k, l, c]) => `<button class="${state.view === k ? 'on' : ''}" data-v="${k}">${esc(l)}${c && counts[c] ? ` <span class="count">${counts[c]}</span>` : ''}</button>`).join('');
   $$('#views button').forEach((b) => b.addEventListener('click', () => { state.view = b.dataset.v; state.selected = null; location.hash = 'inbox'; loadList(ctx); }));
   $('#mlist').innerHTML = list.map(rowHtml).join('') || empty('inbox', state.view === 'inbox' ? 'Inbox zero' : 'Nothing here', state.view === 'inbox' ? 'New mail is checked every couple of minutes.' : '');
-  $$('#mlist .mrow').forEach((el) => el.addEventListener('click', () => { location.hash = `message?id=${el.dataset.id}`; }));
+  $$('#mlist .mrow').forEach((el) => el.addEventListener('click', (e) => { if (!e.target.closest('.msel')) location.hash = `message?id=${el.dataset.id}`; }));
+  $$('#mlist .msel').forEach((c) => c.addEventListener('change', () => { const id = Number(c.dataset.id); if (c.checked) state.checked.add(id); else state.checked.delete(id); bulkBar(ctx); }));
+  bulkBar(ctx);
+}
+
+function bulkBar(ctx) {
+  const bar = $('#bulkbar');
+  const n = state.checked.size;
+  bar.hidden = !n;
+  if (!n) return;
+  bar.innerHTML = `<b>${n} selected</b><span class="spacer"></span>
+    <button class="btn xs" data-b="done">${icon('check', 'sm')}Done</button><button class="btn xs" data-b="assign">${icon('userCheck', 'sm')}Assign</button>
+    <button class="btn xs" data-b="snooze">${icon('clock', 'sm')}Snooze</button><button class="btn xs" data-b="star">${icon('star', 'sm')}Star</button>
+    <button class="btn xs ghost" data-b="clear" aria-label="Clear selection">${icon('x', 'sm')}</button>`;
+  const run = async (body) => {
+    try { const r = await api('/messages/bulk', { method: 'POST', body: { ids: [...state.checked], ...body } }); toast(`Updated ${r.count} email(s)`); state.checked.clear(); loadList(ctx); } catch (e) { toast(e.message, true); }
+  };
+  $$('[data-b]', bar).forEach((b) => b.addEventListener('click', async (e) => {
+    const a = b.dataset.b;
+    if (a === 'clear') { state.checked.clear(); loadList(ctx); return; }
+    if (a === 'done' || a === 'star') { run({ action: a }); return; }
+    if (a === 'snooze') {
+      dropdown(e.currentTarget, [[3, 'Later today'], [24, 'Tomorrow'], [168, 'Next week']].map(([h, l]) => ({ label: l, icon: 'clock', run: () => run({ action: 'snooze', until: new Date(Date.now() + h * 3600_000).toISOString() }) })));
+      return;
+    }
+    if (a === 'assign') {
+      const anchor = e.currentTarget;
+      const t = await api('/team');
+      dropdown(anchor, [...t.members.map((u) => ({ label: u.name || u.email, icon: 'userCheck', run: () => run({ action: 'assign', user_id: u.id }) })), 'hr', { label: 'Unassign', icon: 'x', run: () => run({ action: 'assign', user_id: null }) }]);
+    }
+  }));
 }
 
 export async function inbox(ctx, params, name) {
@@ -35,11 +66,13 @@ export async function inbox(ctx, params, name) {
       <section class="inbox-list"><div class="inbox-tools">
         <div class="row nowrap"><div class="input-icon" style="flex:1">${icon('search')}<input id="isearch" placeholder="Search mail" value="${esc(state.q)}" autocomplete="off"></div>
           <button class="btn icon-only" id="ifilter" title="Filters">${icon('layers')}</button></div>
-        <div class="views" id="views"></div></div>
+        <div class="views" id="views"></div>
+        <div class="row" id="bulkbar" hidden style="gap:6px;padding:8px 10px;border-radius:10px;background:var(--primary-soft)"></div></div>
         <div class="mlist" id="mlist" role="list"></div></section>
       <section class="reader" id="reader"></section></div>`;
     let t;
     $('#isearch').addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(() => { state.q = e.target.value.trim(); loadList(ctx); }, 250); });
+    state.checked.clear();
     $('#ifilter').addEventListener('click', (e) => dropdown(e.currentTarget, [
       { label: 'All accounts', icon: 'mail', run: () => { delete state.filters.mailbox_id; loadList(ctx); } },
       ...mailboxes.map((m) => ({ label: m.email, icon: 'mail', run: () => { state.filters.mailbox_id = m.id; loadList(ctx); } })), 'hr',
@@ -96,7 +129,7 @@ async function reader(ctx, id) {
       <button class="btn sm ghost icon-only" data-act="more" aria-label="More actions">${icon('menu')}</button>
     </div>
     ${m.viewers.length ? `<div class="callout warn">${icon('eye')}<div><b>${esc(m.viewers.join(', '))}</b> ${m.viewers.length > 1 ? 'are' : 'is'} also viewing this email — coordinate before replying.</div></div>` : ''}
-    ${m.is_phishing ? `<div class="callout bad">${icon('shield')}<div><b>Likely phishing or fraud.</b> Don't click links, open attachments, or send money. The AI will never answer this sender.</div></div>` : ''}
+    ${m.is_phishing ? `<div class="callout bad">${icon('shield')}<div><b>Likely phishing or fraud.</b> Don't click links, open attachments, or send money. The AI will never answer this sender. <a href="#" data-act="safe">This is safe</a></div></div>` : ''}
     ${m.guard_flags.length ? `<div class="callout warn">${icon('alert')}<div><b>Safety checks:</b><ul class="flag-list">${m.guard_flags.map((f) => `<li>${esc(f)}</li>`).join('')}</ul></div></div>` : ''}
     ${overdue ? `<div class="callout bad">${icon('clock')}<div>Past your response-time target (${fmtDate(m.sla_due_at)}).</div></div>` : ''}
     <div class="reader-h"><div style="flex:1;min-width:0"><h2>${esc(m.subject || '(no subject)')}</h2>
@@ -119,6 +152,7 @@ async function reader(ctx, id) {
           <textarea id="reply-body" name="body" placeholder="Write a reply, or ask the AI to draft one below…" aria-label="Reply">${esc(pending?.body || '')}</textarea>
           <div class="rb-f"><button class="btn primary" type="submit">${icon('send')}${pending ? 'Approve & send' : 'Send'}</button>
             ${pending ? '<button class="btn ghost" type="button" data-act="reject">Discard draft</button>' : ''}
+            <button class="btn ghost" type="button" data-act="tpl">${icon('file')}Template</button>
             <button class="btn ghost" type="button" data-act="previewLang" title="Read the reply in your own language before sending">${icon('globe')}Preview in my language</button>
             <span class="spacer"></span><span class="hint">${pending?.ai_original ? 'Edits teach the AI' : ''}</span></div>
         </form>
@@ -165,7 +199,24 @@ async function reader(ctx, id) {
       const r = await api(`/messages/${id}/translate`, { method: 'POST', body: { text } });
       modal(`<h2>${icon('globe')} Reply in your language</h2><p class="hint">This is only a preview — the customer receives the original text.</p><pre class="mail-body mail-card">${esc(r.translation)}</pre>`);
     },
+    safe: async () => { await api(`/messages/${id}/classify`, { method: 'POST', body: { not_phishing: true, category: m.category === 'spam' ? 'other' : m.category } }); toast('Marked as safe'); refresh(); },
+    tpl: async (b) => {
+      const tpls = await api('/templates');
+      if (!tpls.length) { toast('No templates yet — add some in AI training → Templates', true); return; }
+      const first = (m.from_name || '').split(' ')[0] || 'there';
+      const fill = (t) => t.replaceAll('{{first_name}}', first).replaceAll('{{name}}', m.from_name || first).replaceAll('{{email}}', m.from_email).replaceAll('{{subject}}', m.subject || '');
+      dropdown(b, tpls.map((t) => ({ label: t.name, icon: 'file', run: () => {
+        const ta = $('#reply-body');
+        const pos = ta.selectionStart ?? ta.value.length;
+        ta.value = ta.value.slice(0, pos) + fill(t.body) + ta.value.slice(ta.selectionEnd ?? pos);
+        ta.focus();
+      } })));
+    },
     more: (b) => dropdown(b, [
+      { label: 'Correct category / priority', icon: 'layers', run: () => modal(`<h2>Correct the AI</h2><p class="hint">Fixing the category and priority keeps your inbox, rules and analytics accurate.</p><form data-act="cls">
+        <label>Category</label><select name="category">${CATS.map((c) => `<option value="${c}" ${m.category === c ? 'selected' : ''}>${esc(label(c))}</option>`).join('')}</select>
+        <label>Priority</label><select name="priority">${['urgent', 'high', 'normal', 'low'].map((c) => `<option value="${c}" ${m.priority === c ? 'selected' : ''}>${esc(label(c))}</option>`).join('')}</select>
+        <button class="btn primary mt" type="submit">Save</button></form>`, (el, close) => bind({ cls: async (f) => { await api(`/messages/${id}/classify`, { method: 'POST', body: formData(f) }); close(); toast('Updated'); refresh(); } }, el)) },
       { label: 'Re-analyse with AI', icon: 'refresh', run: () => bindRun(async () => { await api(`/messages/${id}/reprocess`, { method: 'POST' }); refresh(); }) },
       { label: 'Copy sender email', icon: 'copy', run: () => navigator.clipboard?.writeText(m.from_email).then(() => toast('Copied')) },
       ...(m.contact ? [{ label: m.contact.blocked ? 'Unblock sender' : 'Block sender', icon: 'ban', run: () => bindRun(async () => { await api(`/contacts/${m.contact.id}`, { method: 'PUT', body: { blocked: !m.contact.blocked } }); refresh(); }) }] : []),

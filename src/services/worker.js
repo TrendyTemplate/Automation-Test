@@ -6,6 +6,7 @@ import { storeMessage, processMessage, sendStoredReply } from './processor.js';
 import { aiEnabled, writeFollowUp, writeBriefing } from './ai.js';
 import { sendSystemEmail, sendTelegram, sendSlack } from './notify.js';
 import { open } from '../vault.js';
+import { checkLifecycle } from './lifecycle.js';
 import { appUrl, appName } from '../settings.js';
 
 const busy = new Set();
@@ -77,7 +78,7 @@ export async function createFollowUps() {
 
 /** Morning briefing email per workspace, at the workspace's local digest hour. */
 export async function sendDigests(now = new Date()) {
-  const list = all(`SELECT w.*, u.email AS owner_email FROM workspaces w JOIN users u ON u.id = w.owner_id WHERE w.digest_enabled = 1`);
+  const list = all(`SELECT w.* FROM workspaces w WHERE w.digest_enabled = 1`);
   for (const ws of list) {
     const tz = ws.timezone || 'UTC';
     let hour; let today;
@@ -99,8 +100,12 @@ export async function sendDigests(now = new Date()) {
       text = aiEnabled() ? await writeBriefing(ws, { counts, important }) : null;
     } catch { text = null; }
     text ||= `Last 24h: ${counts.received} received, ${counts.replied || 0} replied, ${counts.awaiting || 0} waiting for approval, ${counts.urgent || 0} urgent.\n\n${important.map((m) => `• [${m.priority}] ${m.from_name || m.from_email}: ${m.subject}`).join('\n')}`;
-    await sendSystemEmail(ws.owner_email, `Your ${appName()} briefing — ${counts.received} emails, ${counts.awaiting || 0} need you`, `${text}\n\nOpen dashboard: ${appUrl()}/app`)
-      .catch((e) => console.error('[digest]', e.message));
+    const recipients = all(`SELECT u.email FROM workspace_members wm JOIN users u ON u.id = wm.user_id
+      WHERE wm.workspace_id = ? AND u.notify_digest = 1 AND u.suspended = 0`, ws.id);
+    for (const r of recipients) {
+      await sendSystemEmail(r.email, `Your ${appName()} briefing — ${counts.received} emails, ${counts.awaiting || 0} need you`, `${text}\n\nOpen dashboard: ${appUrl()}/app`)
+        .catch((e) => console.error('[digest]', e.message));
+    }
   }
 }
 
@@ -147,6 +152,7 @@ async function tick() {
   }
   await sendDigests().catch((e) => console.error('[digest]', e.message));
   await checkSla().catch((e) => console.error('[sla]', e.message));
+  if (workerState.ticks % 5 === 1) await checkLifecycle().catch((e) => console.error('[lifecycle]', e.message));
   workerState.lastTickAt = new Date().toISOString();
   workerState.lastTickMs = Date.now() - t0;
 }

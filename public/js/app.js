@@ -1,4 +1,4 @@
-import { $, $$, esc, icon, api, toast, applyTheme, commandPalette, dropdown, avatar, localStorageGet } from './ui.js';
+import { $, $$, esc, icon, api, toast, applyTheme, commandPalette, dropdown, avatar, localStorageGet, ago, label, BRAND } from './ui.js';
 import * as home from './views/home.js';
 import * as inbox from './views/inbox.js';
 import * as crm from './views/crm.js';
@@ -6,7 +6,9 @@ import * as setup from './views/setup.js';
 import * as account from './views/account.js';
 
 const ctx = { me: null, view: $('#view'), counts: {} };
+const MANAGERS = ['owner', 'admin'];
 
+// Sidebar: daily work first, then setup (owners/admins), then settings. Related pages share one entry + tabs.
 const NAV = [
   { id: 'dashboard', label: 'Home', icon: 'home' },
   { id: 'inbox', label: 'Inbox', icon: 'inbox', count: 'inbox' },
@@ -14,37 +16,47 @@ const NAV = [
   { id: 'ask', label: 'Ask AI', icon: 'sparkles' },
   { id: 'contacts', label: 'Contacts & leads', icon: 'users' },
   { id: 'analytics', label: 'Analytics', icon: 'chart' },
-  { group: 'Automation' },
-  { id: 'mailboxes', label: 'Email accounts', icon: 'mail' },
-  { id: 'brain', label: 'AI brain', icon: 'brain' },
-  { id: 'autopilot', label: 'Autopilot & safety', icon: 'shieldCheck' },
-  { id: 'knowledge', label: 'Knowledge base', icon: 'book' },
-  { id: 'rules', label: 'Rules', icon: 'zap' },
-  { id: 'templates', label: 'Templates', icon: 'file' },
-  { id: 'simulator', label: 'Test lab', icon: 'flask' },
+  { group: 'Setup', roles: MANAGERS },
+  { id: 'mailboxes', label: 'Email accounts', icon: 'mail', roles: MANAGERS },
+  { id: 'brain', label: 'AI training', icon: 'brain', roles: MANAGERS },
+  { id: 'autopilot', label: 'Autopilot & rules', icon: 'shieldCheck', roles: MANAGERS },
+  { id: 'integrations', label: 'Alerts & API', icon: 'plug', roles: MANAGERS },
+  { group: 'Tools' },
   { id: 'declutter', label: 'Declutter', icon: 'archive' },
-  { id: 'integrations', label: 'Alerts & API', icon: 'plug' },
-  { group: 'Workspace' },
-  { id: 'team', label: 'Team', icon: 'users' },
-  { id: 'billing', label: 'Plan & billing', icon: 'card' },
-  { id: 'security', label: 'Security & privacy', icon: 'lock' },
-  { id: 'referrals', label: 'Refer & earn', icon: 'gift' },
+  { group: 'Account' },
+  { id: 'profile', label: 'Settings', icon: 'settings' },
   { id: 'support', label: 'Help & support', icon: 'lifebuoy' },
 ];
+// Pages grouped under one sidebar entry, shown as tabs.
+const SECTIONS = {
+  brain: [['brain', 'Business & voice', 'wand'], ['knowledge', 'Knowledge base', 'book'], ['templates', 'Templates', 'file']],
+  autopilot: [['autopilot', 'Autopilot & safety', 'shieldCheck'], ['rules', 'Rules', 'zap'], ['simulator', 'Test lab', 'flask']],
+  profile: [['profile', 'Profile', 'users'], ['team', 'Team', 'users'], ['billing', 'Plan & billing', 'card', MANAGERS], ['security', 'Security & privacy', 'lock'], ['referrals', 'Refer & earn', 'gift']],
+};
+const PARENT = { message: 'inbox', contact: 'contacts', ticket: 'support' };
+for (const [parent, tabs] of Object.entries(SECTIONS)) for (const [id] of tabs) PARENT[id] = parent;
+const ROLE_ONLY = { mailboxes: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, templates: MANAGERS, autopilot: MANAGERS, rules: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
+
 const ROUTES = {
   dashboard: home.dashboard, ask: home.ask, approvals: home.approvals,
   inbox: inbox.inbox, message: inbox.inbox,
   contacts: crm.contacts, contact: crm.contact, analytics: crm.analytics, declutter: crm.declutter, simulator: crm.simulator,
   mailboxes: setup.mailboxes, brain: setup.brain, autopilot: setup.autopilot, knowledge: setup.knowledge, templates: setup.templates,
   rules: setup.rules, integrations: setup.integrations,
-  team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
+  profile: account.profile, team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
 };
-const PARENT = { message: 'inbox', contact: 'contacts', ticket: 'support' };
+const allowed = (roles) => !roles || roles.includes(ctx.me?.role);
 
 function renderNav(active) {
-  $('#nav').innerHTML = NAV.map((n) => (n.group ? `<div class="nav-group">${esc(n.group)}</div>`
+  $('#nav').innerHTML = NAV.filter((n) => allowed(n.roles)).map((n) => (n.group ? `<div class="nav-group">${esc(n.group)}</div>`
     : `<a class="nav-link ${active === n.id ? 'on' : ''}" href="#${n.id}">${icon(n.icon)}<span>${esc(n.label)}</span>${n.count && ctx.counts[n.count] ? `<span class="badge ${n.count === 'approvals' ? 'warn' : 'info'}">${ctx.counts[n.count]}</span>` : ''}</a>`)).join('')
     + (ctx.me?.user.is_admin ? `<div class="nav-group">Platform</div><a class="nav-link" href="/admin">${icon('server')}<span>Admin panel</span></a>` : '');
+}
+
+function sectionTabs(name) {
+  const tabs = SECTIONS[PARENT[name] || name];
+  if (!tabs) return '';
+  return `<nav class="tabs" aria-label="Section">${tabs.filter((t) => allowed(t[3])).map(([id, l, ic]) => `<a href="#${id}" class="${id === name ? 'on' : ''}">${icon(ic, 'sm')}${esc(l)}</a>`).join('')}</nav>`;
 }
 
 async function refreshCounts() {
@@ -57,7 +69,8 @@ async function refreshCounts() {
 
 function currentRoute() {
   const [name, qs] = (location.hash.slice(1) || 'dashboard').split('?');
-  return { name: ROUTES[name] ? name : 'dashboard', params: Object.fromEntries(new URLSearchParams(qs || '')), parent: PARENT[name] || name };
+  const n = ROUTES[name] ? name : 'dashboard';
+  return { name: n, params: Object.fromEntries(new URLSearchParams(qs || '')), parent: PARENT[n] || n };
 }
 
 let routeSeq = 0;
@@ -71,9 +84,18 @@ export async function route() {
   $('#banners').hidden = full;
   const keepInbox = full && document.getElementById('inbox-root');
   if (!keepInbox) ctx.view.innerHTML = '<div class="skeleton" style="height:28px;width:220px;margin-bottom:18px"></div><div class="grid g4">' + '<div class="skeleton" style="height:96px"></div>'.repeat(4) + '</div>';
-  document.title = `${NAV.find((n) => n.id === parent)?.label || 'Home'} · MailPilot AI`;
+  const tab = Object.values(SECTIONS).flat().find((t) => t[0] === name);
+  document.title = `${tab?.[1] || NAV.find((n) => n.id === parent)?.label || 'Home'} · ${BRAND}`;
   try {
-    await ROUTES[name](ctx, params, name);
+    if (!allowed(ROLE_ONLY[name])) {
+      ctx.view.innerHTML = `<div class="card">${(await import('./ui.js')).empty('lock', 'Owners and admins only', 'Ask the workspace owner if you need changes here.')}</div>`;
+    } else {
+      await ROUTES[name](ctx, params, name);
+      if (seq === routeSeq && SECTIONS[parent]) {
+        const h = ctx.view.querySelector('.page-h');
+        (h || ctx.view.firstElementChild)?.insertAdjacentHTML(h ? 'afterend' : 'beforebegin', sectionTabs(name));
+      }
+    }
   } catch (e) {
     if (seq === routeSeq) ctx.view.innerHTML = `<div class="callout bad">${icon('alert')}<div>${esc(e.message)}</div></div>`;
   }
@@ -116,6 +138,12 @@ async function init() {
   $('#help-btn').innerHTML = icon('help');
   themeIcon();
   try { await loadMe(); } catch { return; }
+  // An invitation link opened before signing in (or via Google/Microsoft sign-in) is accepted now.
+  const pendingInvite = localStorageGet('invite');
+  if (pendingInvite) {
+    (await import('./ui.js')).localStorageSet('invite', '');
+    try { await api('/auth/invites/accept', { method: 'POST', body: { token: pendingInvite } }); toast('Invitation accepted — welcome to the team!'); await loadMe(); } catch (e) { toast(e.message, true); }
+  }
   const me = ctx.me;
   $('#ws-name').textContent = me.workspace?.name || '';
   if (me.impersonatedBy) $('#imp').innerHTML = `<div class="imp-bar">Support view: you are signed in as ${esc(me.user.email)}. <a href="#" id="stop-imp">End session</a></div>`;
@@ -126,7 +154,7 @@ async function init() {
     sw.addEventListener('change', async () => { await api(`/auth/workspaces/${sw.value}/switch`, { method: 'POST' }); location.hash = 'dashboard'; location.reload(); });
   }
   const plan = me.effectivePlan;
-  $('#side-foot').innerHTML = `<div class="usage-mini"><div class="row" style="justify-content:space-between"><b>${esc(plan.name)} plan</b><a href="#billing">${me.workspace.plan === 'trial' || plan.key === 'expired' ? 'Upgrade' : 'Manage'}</a></div></div>`;
+  $('#side-foot').innerHTML = `<div class="usage-mini"><div class="row" style="justify-content:space-between"><b>${esc(plan.name)} plan</b>${MANAGERS.includes(me.role) ? `<a href="#billing">${me.workspace.plan === 'trial' || plan.key === 'expired' ? 'Upgrade' : 'Manage'}</a>` : `<span class="hint">${esc(label(me.role))}</span>`}</div></div>`;
   $('#user-btn').innerHTML = `${avatar(me.user.name, me.user.email, 'sm')}<span class="truncate" style="max-width:140px">${esc(me.user.name || me.user.email)}</span>${icon('chevron', 'sm')}`;
   renderBanners();
 
@@ -134,12 +162,32 @@ async function init() {
   $('#stop-imp')?.addEventListener('click', logout);
   $('#user-btn').addEventListener('click', (e) => dropdown(e.currentTarget, [
     { html: `<div style="padding:8px 10px"><b>${esc(me.user.name || '')}</b><div class="hint">${esc(me.user.email)}</div></div>` }, 'hr',
+    { label: 'Profile', icon: 'users', run: () => { location.hash = 'profile'; } },
     { label: 'Security & privacy', icon: 'lock', run: () => { location.hash = 'security'; } },
-    { label: 'Plan & billing', icon: 'card', run: () => { location.hash = 'billing'; } },
+    ...(MANAGERS.includes(me.role) ? [{ label: 'Plan & billing', icon: 'card', run: () => { location.hash = 'billing'; } }] : []),
     { label: 'Keyboard shortcuts', icon: 'list', run: showShortcuts },
     ...(me.user.is_admin ? [{ label: 'Admin panel', icon: 'server', run: () => { location.href = '/admin'; } }] : []),
     'hr', { label: 'Sign out', icon: 'logout', run: logout },
   ]));
+  const NOTE_ICON = { sync_error: 'alert', send_failed: 'alert', phishing_blocked: 'shield', sla_breach: 'clock', payment_failed: 'card', followup_drafted: 'reply', draft_created: 'file', auto_reply_sent: 'send', mailbox_added: 'mail', subscription_updated: 'card', assigned: 'userCheck' };
+  const bellBadge = (n) => { $('#bell-btn').innerHTML = icon('bell') + (n ? `<span class="badge bad" style="position:absolute;top:2px;right:0;height:17px;padding:0 5px;font-size:10px">${n > 9 ? '9+' : n}</span>` : ''); };
+  bellBadge(me.unreadNotifications);
+  $('#bell-btn').addEventListener('click', async (e) => {
+    const anchor = e.currentTarget;
+    const items = await api('/notifications');
+    const hrefOf = (n) => {
+      let d = {}; try { d = JSON.parse(n.detail || '{}'); } catch { /* plain text */ }
+      if (d.message) return `#message?id=${Number(d.message)}`;
+      return { sync_error: '#mailboxes', send_failed: '#approvals', payment_failed: '#billing', subscription_updated: '#billing', mailbox_added: '#mailboxes', sla_breach: '#inbox?view=overdue' }[n.type] || '#dashboard';
+    };
+    const summary = (d) => { try { const x = JSON.parse(d); return [x.subject, x.to || x.from || x.email, x.error].filter(Boolean).join(' — '); } catch { return d || ''; } };
+    dropdown(anchor, [
+      { html: '<div style="padding:8px 10px"><b>Notifications</b></div>' }, 'hr',
+      ...(items.length ? items.slice(0, 12).map((n) => ({ html: `<a href="${hrefOf(n)}" style="align-items:flex-start;${n.unread ? 'background:var(--primary-soft)' : ''}">${icon(NOTE_ICON[n.type] || 'activity', 'sm')}<span style="min-width:0"><b>${esc(label(n.type))}</b><span class="hint" style="display:block;max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(summary(n.detail))}</span><span class="hint small">${ago(n.created_at)}</span></span></a>` }))
+        : [{ html: '<div class="hint" style="padding:14px 10px">You\'re all caught up.</div>' }]),
+    ]);
+    api('/notifications/seen', { method: 'POST' }).then(() => bellBadge(0)).catch(() => {});
+  });
   $('#theme-btn').addEventListener('click', (e) => dropdown(e.currentTarget, [
     { label: 'Light', icon: 'sun', run: () => setTheme('light') }, { label: 'Dark', icon: 'moon', run: () => setTheme('dark') }, { label: 'System', icon: 'monitor', run: () => setTheme('system') },
   ]));
