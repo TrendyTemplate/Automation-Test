@@ -1,40 +1,38 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dashboard — MailPilot AI</title><link rel="stylesheet" href="/css/style.css"></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>MailPilot AI</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/js/theme-boot.js"></script>
+</head>
 <body>
   <div id="imp"></div>
   <div class="shell">
-    <nav class="side" id="side">
-      <a class="logo" href="/">Mail<span>Pilot</span> AI</a>
-      <select id="ws-switch" aria-label="Workspace" style="margin:0 0 10px"></select>
-      <a href="#dashboard">Dashboard</a>
-      <a href="#ask">✨ Ask your inbox</a>
-      <a href="#inbox">Unified inbox</a>
-      <a href="#approvals">Approvals <span class="badge" id="pending-count">0</span></a>
-      <a href="#contacts">Contacts & leads</a>
-      <a href="#analytics">Analytics</a>
-      <div class="group">Setup</div>
-      <a href="#mailboxes">Email accounts</a>
-      <a href="#settings">AI brain & autopilot</a>
-      <a href="#knowledge">Knowledge base</a>
-      <a href="#rules">Automation rules</a>
-      <a href="#templates">Templates</a>
-      <a href="#integrations">Alerts & integrations</a>
-      <div class="group">Account</div>
-      <a href="#team">Team</a>
-      <a href="#billing">Billing</a>
-      <a href="#security">Security & privacy</a>
-      <a href="#referrals">Refer & earn</a>
-      <a href="#support">Help & support</a>
-      <a href="/admin" id="admin-link" hidden>⚙ Platform admin</a>
-      <a href="#" id="logout">Log out</a>
+    <nav class="side" id="side" aria-label="Main">
+      <a class="brand" href="#dashboard"><span class="brand-mark" id="brand-mark"></span><span>MailPilot AI<small id="ws-name"></small></span></a>
+      <div class="ws-switch"><select id="ws-switch" aria-label="Switch workspace" hidden></select></div>
+      <div id="nav"></div>
+      <div class="side-foot" id="side-foot"></div>
     </nav>
-    <main class="main">
-      <button class="btn menu-btn" id="menu-btn">☰ Menu</button>
-      <div id="announcements"></div>
-      <div id="plan-banner"></div>
-      <div id="view"></div>
-    </main>
+    <div class="main">
+      <header class="topbar">
+        <button class="btn ghost icon-only menu-btn" id="menu-btn" aria-label="Open menu"></button>
+        <button class="search-trigger" id="search-trigger" type="button"><span id="search-icon"></span><span>Search emails, contacts, pages…</span><span class="k"><kbd>Ctrl</kbd> <kbd>K</kbd></span></button>
+        <span class="spacer"></span>
+        <button class="btn ghost icon-only" id="theme-btn" aria-label="Change theme" title="Theme"></button>
+        <a class="btn ghost icon-only" href="#support" aria-label="Help" title="Help & support" id="help-btn"></a>
+        <button class="btn ghost" id="user-btn" aria-label="Account menu"></button>
+      </header>
+      <div class="content" id="content">
+        <div class="banner-zone" id="banners"></div>
+        <div id="view"></div>
+      </div>
+    </div>
   </div>
   <script src="/js/app.js" type="module"></script>
-</body></html>
+</body>
+</html>

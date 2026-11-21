@@ -1,4 +1,4 @@
-import { $, esc, fmtDate, fmtDay, money, badge, formData, toast, api, bind, bars, modal, csvDownload } from './common.js';
+import { $, $$, esc, icon, fmtDate, fmtDay, money, badge, formData, toast, api, bind, bars, modal, csvDownload, confirmBox, applyTheme } from './ui.js';
 
 const view = $('#view');
 const views = {};
@@ -86,6 +86,8 @@ views.user = async ({ id }) => {
         <h3>Actions</h3>
         <div class="row">
           <button class="btn" data-act="impersonate">Log in as this user</button>
+          <button class="btn" data-act="signout">Sign out everywhere</button>
+          <button class="btn" data-act="unlock">Unlock account</button>
           <button class="btn" data-act="resetpw">Reset password</button>
           ${u.totp_enabled ? '<button class="btn" data-act="no2fa">Disable 2FA</button>' : ''}
           <button class="btn danger" data-act="del">Delete user</button>
@@ -103,10 +105,16 @@ views.user = async ({ id }) => {
     <div class="card" style="margin-top:16px"><h3>Audit trail</h3>${auditTable(u.audit)}</div>`;
   bind({
     save: async (f) => { await api(`/admin/users/${id}`, { method: 'PUT', body: formData(f) }); toast('Saved'); },
-    impersonate: async () => { if (confirm('You will be logged in as this user (for 2 hours). Log out to return.')) { await api(`/admin/users/${id}/impersonate`, { method: 'POST' }); location.href = '/app'; } },
-    resetpw: async () => { if (!confirm('Generate a temporary password?')) return; const r = await api(`/admin/users/${id}/reset-password`, { method: 'POST' }); modal(`<h3>Temporary password</h3><p>Share this securely with the user:</p><pre class="mail">${esc(r.tempPassword)}</pre>`); },
+    impersonate: async () => {
+      const reason = await confirmBox('Log in as this customer?', 'Only possible if the customer granted support access. The session lasts 1 hour, and your reason is shown in the customer\'s security log.', { ok: 'Start support session', input: 'Reason, e.g. ticket #12 — mailbox error' });
+      if (!reason) return;
+      await api(`/admin/users/${id}/impersonate`, { method: 'POST', body: { reason } }); location.href = '/app';
+    },
+    signout: async () => { await api(`/admin/users/${id}/sign-out`, { method: 'POST' }); toast('Signed out of all devices'); },
+    unlock: async () => { await api(`/admin/users/${id}/unlock`, { method: 'POST' }); toast('Account unlocked'); route(); },
+    resetpw: async () => { if (!(await confirmBox('Generate a temporary password?', 'The user is signed out everywhere.', { ok: 'Generate' }))) return; const r = await api(`/admin/users/${id}/reset-password`, { method: 'POST' }); modal(`<h3>Temporary password</h3><p>Share this securely with the user:</p><pre class="mail">${esc(r.tempPassword)}</pre>`); },
     no2fa: async () => { await api(`/admin/users/${id}/disable-2fa`, { method: 'POST' }); toast('2FA disabled'); route(); },
-    del: async () => { if (prompt('Type DELETE to permanently delete this user and their workspaces') === 'DELETE') { await api(`/admin/users/${id}`, { method: 'DELETE' }); location.hash = 'users'; } },
+    del: async () => { if ((await confirmBox('Delete this user?', 'Their account and owned workspaces are deleted permanently.', { danger: true, ok: 'Delete', input: 'Type DELETE' })) === 'DELETE') { await api(`/admin/users/${id}`, { method: 'DELETE' }); location.hash = 'users'; } },
     mail: async (f) => { await api(`/admin/users/${id}/email`, { method: 'POST', body: formData(f) }); toast('Email sent'); f.reset(); },
   }, view);
 };
@@ -189,8 +197,8 @@ views.workspace = async ({ id }) => {
     extend: async (f) => { await api(`/admin/workspaces/${id}/extend-trial`, { method: 'POST', body: formData(f) }); toast('Trial extended'); route(); },
     grant: async (f) => { await api(`/admin/workspaces/${id}/grant`, { method: 'POST', body: formData(f) }); toast('Plan granted'); route(); },
     reset: async () => { await api(`/admin/workspaces/${id}/reset-usage`, { method: 'POST' }); toast('Usage reset'); route(); },
-    cancel: async () => { if (confirm('Cancel the Stripe subscription immediately?')) { await api(`/admin/workspaces/${id}/cancel-stripe`, { method: 'POST' }); toast('Canceled'); route(); } },
-    del: async () => { if (prompt('Type DELETE to delete this workspace and all its data') === 'DELETE') { await api(`/admin/workspaces/${id}`, { method: 'DELETE' }); location.hash = 'workspaces'; } },
+    cancel: async () => { if (await confirmBox('Cancel the Stripe subscription?', 'It is cancelled immediately.', { danger: true, ok: 'Cancel subscription' })) { await api(`/admin/workspaces/${id}/cancel-stripe`, { method: 'POST' }); toast('Canceled'); route(); } },
+    del: async () => { if ((await confirmBox('Delete workspace?', 'All its data is destroyed.', { danger: true, ok: 'Delete', input: 'Type DELETE' })) === 'DELETE') { await api(`/admin/workspaces/${id}`, { method: 'DELETE' }); location.hash = 'workspaces'; } },
   }, view);
 };
 
@@ -262,6 +270,7 @@ views.plans = async () => {
             <div><label>Sort order</label><input name="sort" type="number" value="${p.sort}"></div>
             <div><label>Email accounts</label><input name="mailboxes" type="number" value="${p.mailboxes}"></div>
             <div><label>AI replies / month</label><input name="ai_replies" type="number" value="${p.aiRepliesPerMonth}"></div>
+            <div><label>AI actions / month <span class="hint">(cost cap)</span></label><input name="ai_calls" type="number" value="${p.aiCalls ?? ''}"></div>
             <div><label>Rules</label><input name="rules" type="number" value="${p.rules}"></div>
             <div><label>Team seats</label><input name="team_members" type="number" value="${p.teamMembers}"></div>
             <div><label>Price / month ($)</label><input name="price_monthly" type="number" step="0.01" value="${p.priceMonthly ?? ''}"></div>
@@ -283,7 +292,7 @@ views.plans = async () => {
     <form class="card row" data-act="add"><input name="key" placeholder="new plan key, e.g. agency" required style="flex:1"><input name="name" placeholder="Display name" style="flex:1"><button class="btn primary">Add plan</button></form>`;
   bind({
     save: async (f) => { await api(`/admin/plans/${f.dataset.key}`, { method: 'PUT', body: formData(f) }); toast('Plan saved'); plans = await api('/admin/plans'); },
-    del: async (b) => { if (confirm('Delete this plan?')) { await api(`/admin/plans/${b.dataset.key}`, { method: 'DELETE' }); route(); } },
+    del: async (b) => { if (await confirmBox('Delete this plan?', '', { danger: true, ok: 'Delete' })) { await api(`/admin/plans/${b.dataset.key}`, { method: 'DELETE' }); route(); } },
     add: async (f) => { await api('/admin/plans', { method: 'POST', body: formData(f) }); plans = await api('/admin/plans'); route(); },
   }, view);
 };
@@ -328,13 +337,13 @@ views.mailboxes = async (params) => {
 views.ai = async (params) => {
   const d = await api(`/admin/ai-usage?${new URLSearchParams(params)}`);
   view.innerHTML = `
-    <h1>AI usage & cost</h1>
+    <h1>AI usage & margins</h1>
     <p class="hint">Costs are estimates from token counts × prices set in <a href="#settings">Settings → AI</a>. Compare with plan revenue to keep margins healthy.</p>
     <div class="card" style="margin-bottom:16px"><h3>Monthly</h3>${bars(d.months.slice().reverse().map((m) => ({ label: m.period, short: m.period, value: m.cost })), { fmt: money })}
       <table style="margin-top:12px"><thead><tr><th>Month</th><th>AI calls</th><th>AI replies</th><th>Emails sent</th><th>Tokens in</th><th>Tokens out</th><th>Est. cost</th></tr></thead><tbody>
       ${d.months.map((m) => `<tr><td><a href="#ai?period=${m.period}">${m.period}</a></td><td>${m.ai_calls}</td><td>${m.ai_replies}</td><td>${m.emails_sent}</td><td>${m.input_tokens.toLocaleString()}</td><td>${m.output_tokens.toLocaleString()}</td><td><b>${money(m.cost)}</b></td></tr>`).join('')}</tbody></table></div>
-    <div class="card table-wrap"><h3>Top workspaces — ${esc(d.period)}</h3><table><thead><tr><th>Workspace</th><th>Plan</th><th>AI replies / limit</th><th>Calls</th><th>Tokens in/out</th><th>Est. cost</th></tr></thead><tbody>
-      ${d.rows.map((x) => `<tr><td><a href="#workspace?id=${x.workspace_id}">${esc(x.name)}</a></td><td>${badge(x.plan)}</td><td>${x.ai_replies} / ${x.plan_limit ?? '—'}</td><td>${x.ai_calls}</td><td class="hint">${x.input_tokens.toLocaleString()} / ${x.output_tokens.toLocaleString()}</td><td><b>${money(x.cost)}</b></td></tr>`).join('') || '<tr><td colspan="6" class="hint">No usage</td></tr>'}
+    <div class="card table-wrap"><h3>Top workspaces — ${esc(d.period)}</h3><table><thead><tr><th>Workspace</th><th>Plan</th><th>AI replies / limit</th><th>Calls</th><th>Tokens in/out</th><th>Est. cost</th><th>Revenue / mo</th><th>Margin</th></tr></thead><tbody>
+      ${d.rows.map((x) => `<tr><td><a href="#workspace?id=${x.workspace_id}">${esc(x.name)}</a></td><td>${badge(x.plan)}</td><td>${x.ai_replies} / ${x.plan_limit ?? '—'}</td><td>${x.ai_calls}</td><td class="hint">${x.input_tokens.toLocaleString()} / ${x.output_tokens.toLocaleString()}</td><td><b>${money(x.cost)}</b></td><td>${x.revenue ? money(x.revenue) : '—'}</td><td>${x.margin == null ? '<span class="hint">n/a</span>' : badge(`${x.margin}%`, x.margin < 30 ? 'bad' : x.margin < 60 ? 'warn' : 'ok')}</td></tr>`).join('') || '<tr><td colspan="8" class="hint">No usage</td></tr>'}
     </tbody></table></div>`;
 };
 
@@ -394,14 +403,14 @@ views.announce = async () => {
       <button class="btn sm" data-act="toggle" data-id="${a.id}" data-on="${a.active}">${a.active ? 'Hide' : 'Show'}</button><button class="btn sm danger" data-act="del" data-id="${a.id}">Delete</button></div>`).join('') || '<p class="hint">None</p>'}</div>`;
   bind({
     add: async (f) => { const d = formData(f); d.ends_at = d.ends_at ? fromLocal(d.ends_at).replace('T', ' ').slice(0, 19) : ''; await api('/admin/announcements', { method: 'POST', body: d }); route(); },
-    broadcast: async (f) => { if (!confirm('Send this email now?')) return; const r = await api('/admin/broadcast', { method: 'POST', body: formData(f) }); toast(`Sending to ${r.queued} users`); f.reset(); },
+    broadcast: async (f) => { if (!(await confirmBox('Send this email now?', 'It goes to every user in the audience.', { ok: 'Send' }))) return; const r = await api('/admin/broadcast', { method: 'POST', body: formData(f) }); toast(`Sending to ${r.queued} users`); f.reset(); },
     toggle: async (b) => { await api(`/admin/announcements/${b.dataset.id}`, { method: 'PUT', body: { active: b.dataset.on !== '1' } }); route(); },
     del: async (b) => { await api(`/admin/announcements/${b.dataset.id}`, { method: 'DELETE' }); route(); },
   }, view);
 };
 
 // =============== Settings ===============
-const GROUPS = { general: 'General', ai: 'AI', oauth: 'Google & Microsoft sign-in', email: 'System email (SMTP)', payments: 'Payments', notifications: 'Notifications' };
+const GROUPS = { general: 'General', security: 'Security', ai: 'AI', oauth: 'Google & Microsoft sign-in', email: 'System email (SMTP)', payments: 'Payments', notifications: 'Notifications' };
 views.settings = async (params) => {
   const list = await api('/admin/settings');
   const group = params.g || 'general';
@@ -430,7 +439,7 @@ views.settings = async (params) => {
       for (const [k, v] of Object.entries(d)) if (typeof v === 'boolean') d[k] = v ? '1' : '0';
       await api('/admin/settings', { method: 'PUT', body: d }); toast('Settings saved'); route();
     },
-    clear: async (a) => { if (confirm('Remove this saved secret?')) { await api('/admin/settings/clear', { method: 'POST', body: { key: a.dataset.key } }); route(); } },
+    clear: async (a) => { if (await confirmBox('Remove this saved secret?', '', { danger: true, ok: 'Remove' })) { await api('/admin/settings/clear', { method: 'POST', body: { key: a.dataset.key } }); route(); } },
     test: async () => { const r = await api('/admin/settings/test-email', { method: 'POST', body: {} }); toast(r.logged ? 'SMTP not configured — email was only logged to the server console' : 'Test email sent', r.logged); },
   }, view);
 };
@@ -492,6 +501,26 @@ views.activity = async (params) => {
   bind({ type: (s) => { location.hash = `activity?type=${s.value}`; } }, view);
 };
 
+// =============== Security center ===============
+views.security = async () => {
+  const d = await api('/admin/security');
+  view.innerHTML = `
+    <div class="page-h"><div><h1>Security center</h1><p>Attacks, risky accounts and encryption status across the platform.</p></div>
+      <div class="actions"><button class="btn" data-act="reenc">${icon('refresh')}Re-encrypt with current key</button></div></div>
+    <div class="grid g4">
+      <div class="card stat ${d.failedLogins24h > 50 ? 'bad' : ''}"><div class="ic">${icon('alert')}</div><div class="l">Failed sign-ins (24h)</div><div class="n">${d.failedLogins24h}</div></div>
+      <div class="card stat"><div class="ic">${icon('lock')}</div><div class="l">Locked accounts</div><div class="n">${d.lockedAccounts.length}</div></div>
+      <div class="card stat"><div class="ic">${icon('monitor')}</div><div class="l">Active sessions</div><div class="n">${d.activeSessions}</div></div>
+      <div class="card stat ${d.adminsWithout2fa.length ? 'bad' : 'ok'}"><div class="ic">${icon('shieldCheck')}</div><div class="l">Admins without 2FA</div><div class="n">${d.adminsWithout2fa.length}</div></div>
+      <div class="card stat ${d.unencrypted.messages + d.unencrypted.mailboxes ? 'warn' : 'ok'}"><div class="ic">${icon('key')}</div><div class="l">Unencrypted rows</div><div class="n">${d.unencrypted.messages + d.unencrypted.mailboxes}</div><div class="d">Master key version ${d.keyVersion}</div></div>
+    </div>
+    ${d.adminsWithout2fa.length ? `<div class="callout bad mt">${icon('alert')}<div>Admins without 2FA: ${d.adminsWithout2fa.map((u) => esc(u.email)).join(', ')}</div></div>` : ''}
+    ${d.lockedAccounts.length ? `<div class="card mt"><h3>Locked accounts</h3>${d.lockedAccounts.map((u) => `<div class="row" style="padding:6px 0"><a href="#user?id=${u.id}">${esc(u.email)}</a><span class="hint">${u.failed_logins} failed · until ${fmtDate(u.locked_until)}</span></div>`).join('')}</div>` : ''}
+    <div class="card mt pad-0"><div class="table-wrap"><table><thead><tr><th>Event</th><th>User</th><th>IP</th><th>Detail</th><th>When</th></tr></thead><tbody>
+      ${d.events.map((e) => `<tr><td>${badge(e.type, /fail|lock|imperson|lockdown/.test(e.type) ? 'warn' : 'info')}</td><td>${e.user_id ? `<a href="#user?id=${e.user_id}">${esc(e.email || e.user_id)}</a>` : '—'}</td><td class="hint">${esc(e.ip || '')}</td><td class="hint truncate" style="max-width:280px">${esc(e.detail || '')}</td><td class="hint nowrap">${fmtDate(e.created_at)}</td></tr>`).join('')}</tbody></table></div></div>`;
+  bind({ reenc: async () => { const r = await api('/admin/security/reencrypt', { method: 'POST' }); toast(`Done: ${Object.entries(r).map(([k, v]) => `${k} ${v}`).join(', ')}`); route(); } }, view);
+};
+
 // =============== Router ===============
 function rowLinks() { view.querySelectorAll('tr[data-href]').forEach((tr) => tr.addEventListener('click', (e) => { if (!e.target.closest('a,button,select,input')) location.hash = tr.dataset.href.slice(1); })); }
 
@@ -499,18 +528,26 @@ async function route() {
   const [name, qs] = (location.hash.slice(1) || 'overview').split('?');
   const params = Object.fromEntries(new URLSearchParams(qs || ''));
   const parent = { user: 'users', workspace: 'workspaces', ticket: 'tickets' }[name] || name;
-  document.querySelectorAll('.side a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === `#${parent}`));
+  document.querySelectorAll('.nav-link').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === `#${parent}`));
   $('#side').classList.remove('open');
   view.innerHTML = '<p class="hint">Loading…</p>';
   try { await (views[name] || views.overview)(params); } catch (e) { view.innerHTML = `<div class="card err-text">${esc(e.message)}</div>`; }
-  api('/admin/tickets?status=open').then((l) => { $('#open-tickets').textContent = l.length; }).catch(() => {});
+  api('/admin/tickets?status=open').then((l) => { $('#open-tickets').textContent = l.length; $('#open-tickets').hidden = !l.length; }).catch(() => {});
 }
 
 (async () => {
   try {
+    applyTheme();
+    $('#brand-mark').innerHTML = icon('logo');
+    $('#menu-btn').innerHTML = icon('menu');
+    $$('.nav-link[data-i]').forEach((a) => a.insertAdjacentHTML('afterbegin', icon(a.dataset.i)));
     const me = await api('/auth/me');
-    if (!me.user.is_admin) { document.body.innerHTML = '<div class="auth container card"><h2>Admins only</h2><p><a href="/app">Back to the app</a></p></div>'; return; }
-    plans = await api('/admin/plans');
+    $('#admin-who').textContent = me.user.email;
+    if (!me.user.is_admin) { view.innerHTML = '<div class="card"><h2>Admins only</h2><p><a href="/app">Back to the app</a></p></div>'; return; }
+    try { plans = await api('/admin/plans'); } catch (e) {
+      view.innerHTML = `<div class="callout warn">${icon('lock')}<div>${esc(e.message)} ${e.code === 'admin_2fa_required' ? '<a href="/app#security">Turn on 2FA</a>' : ''}</div></div>`;
+      return;
+    }
   } catch { return; }
   $('#menu-btn').addEventListener('click', () => $('#side').classList.toggle('open'));
   window.addEventListener('hashchange', route);

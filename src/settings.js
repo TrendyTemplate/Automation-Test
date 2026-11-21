@@ -13,6 +13,11 @@ export const SETTINGS = [
   ['general', 'trial_days', 'Free trial length (days)', 'number', 'TRIAL_DAYS', false, '14'],
   ['general', 'require_email_verification', 'Require email verification before connecting mailboxes', 'bool', null, false, '0'],
 
+  ['security', 'require_admin_2fa', 'Require 2FA for platform admins (production)', 'bool', null, false, '1'],
+  ['security', 'new_device_alerts', 'Email users when their account is accessed from a new device', 'bool', null, false, '1'],
+  ['security', 'impersonation_requires_consent', 'Admins can only "log in as" a customer who granted support access', 'bool', null, false, '1'],
+  ['security', 'allowed_admin_ips', 'Restrict the admin panel to these IPs (comma separated, blank = any)', 'text', null, false, ''],
+
   ['ai', 'anthropic_api_key', 'Anthropic API key', 'text', 'ANTHROPIC_API_KEY', true, ''],
   ['ai', 'ai_model', 'AI model', 'text', 'AI_MODEL', false, 'claude-opus-5-5'],
   ['ai', 'ai_effort', 'AI effort (low / medium / high)', 'text', 'AI_EFFORT', false, 'low'],

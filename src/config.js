@@ -49,10 +49,21 @@ export const config = {
   // Emails listed here become platform admins on sign-up.
   adminEmails: (process.env.ADMIN_EMAILS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 
+  // Master key rotation: put the new key in ENCRYPTION_KEY, bump ENCRYPTION_KEY_VERSION, and move the old one to
+  // ENCRYPTION_KEYS_OLD="1:<hex>" until Admin → Security → "Re-encrypt with current key" has finished.
+  encryptionKeyVersion: Number(process.env.ENCRYPTION_KEY_VERSION || 1),
+  oldEncryptionKeys: (process.env.ENCRYPTION_KEYS_OLD || '').split(',').map((s) => s.trim()).filter(Boolean)
+    .map((s) => { const [v, k] = s.split(':'); return [Number(v), k]; }),
+  // Only for local testing / self-hosted mail servers on a private network. Never enable on a public SaaS.
+  allowPrivateMailHosts: process.env.ALLOW_PRIVATE_MAIL_HOSTS === 'true',
   syncIntervalSec: Number(process.env.SYNC_INTERVAL_SEC || 120),
   trialDays: Number(process.env.TRIAL_DAYS || 14),
 };
 
+for (const [v, k] of config.oldEncryptionKeys) {
+  if (!Number.isInteger(v) || !/^[0-9a-f]{64}$/i.test(k || '')) throw new Error('ENCRYPTION_KEYS_OLD must look like "1:<64 hex chars>,2:<64 hex chars>"');
+}
+if (config.isProd && config.jwtSecret.length < 32) throw new Error('JWT_SECRET must be at least 32 characters in production');
 if (!/^[0-9a-f]{64}$/i.test(config.encryptionKey)) {
   throw new Error('ENCRYPTION_KEY must be 64 hex characters (32 bytes). Generate one with: openssl rand -hex 32');
 }

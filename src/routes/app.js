@@ -1,53 +1,74 @@
 import { Router } from 'express';
-import { one, all, run, getUsage, logActivity, audit } from '../db.js';
-import { requireRole } from '../auth.js';
-import { encrypt } from '../crypto.js';
+import { one, all, run, getUsage, logActivity, audit, securityEvent } from '../db.js';
+import { requireRole, sha256 } from '../auth.js';
+import { randomToken } from '../crypto.js';
 import { effectivePlan } from '../plans.js';
 import { PROVIDERS, guessProvider } from '../services/providers.js';
-import { testConnection } from '../services/mail.js';
+import { testConnection, fetchSentSamples, sendNew } from '../services/mail.js';
 import { syncMailbox } from '../services/worker.js';
-import { processMessage, sendStoredReply, recordCorrection, assertPublicUrl } from '../services/processor.js';
-import { fetchSentSamples } from '../services/mail.js';
-import { askInbox, learnStyle } from '../services/ai.js';
+import { processMessage, sendStoredReply, recordCorrection, guardReply, deliverWebhook } from '../services/processor.js';
+import { askInbox, learnStyle, translate, aiEnabled, analyzeEmail, CATEGORIES, fallbackTriage } from '../services/ai.js';
 import { sendTelegram, sendSlack, notifyAdmins } from '../services/notify.js';
-import { oauthAvailability } from '../services/oauth.js';
-import { sha256 } from '../auth.js';
-import { randomToken } from '../crypto.js';
+import { oauthAvailability, revokeMailboxGrant } from '../services/oauth.js';
+import { safeFetch } from '../services/net.js';
+import { detectInjection } from '../services/guard.js';
+import { seal, open, openMessage, openReply } from '../vault.js';
 import { getBool, getNum, appUrl } from '../settings.js';
 import { validateRule, FIELDS, OPS, ACTIONS } from '../services/rules.js';
-import { aiEnabled, analyzeEmail, CATEGORIES } from '../services/ai.js';
 
 const r = Router();
 const manage = requireRole('owner', 'admin');
 const wsId = (req) => req.workspace.id;
 const int = (v) => Number.parseInt(v, 10);
+const str = (v, max = 1000) => String(v ?? '').slice(0, max);
+
+// Who is looking at which email right now (collision detection for teams). In-memory, expires after 60s.
+const viewers = new Map(); // messageId -> Map(userId -> {name, at})
+function touchViewer(msgId, user) {
+  const m = viewers.get(msgId) || new Map();
+  m.set(user.id, { name: user.name || user.email, at: Date.now() });
+  viewers.set(msgId, m);
+}
+function currentViewers(msgId, exceptUserId) {
+  const m = viewers.get(msgId);
+  if (!m) return [];
+  for (const [k, v] of m) if (Date.now() - v.at > 60_000) m.delete(k);
+  return [...m.entries()].filter(([k]) => k !== exceptUserId).map(([, v]) => v.name);
+}
 
 // ---------- Dashboard ----------
 r.get('/dashboard', (req, res) => {
   const id = wsId(req);
+  const now = new Date().toISOString();
   const counts = one(`SELECT
       COUNT(*) AS total,
       SUM(status='drafted') AS awaiting_approval,
       SUM(status='replied') AS replied,
       SUM(status='ignored') AS ignored,
-      SUM(priority='urgent') AS urgent,
-      SUM(received_at > datetime('now','-1 day')) AS last24h
-    FROM messages WHERE workspace_id = ?`, id);
+      SUM(priority='urgent' AND done=0) AS urgent,
+      SUM(datetime(received_at) > datetime('now','-1 day')) AS last24h,
+      SUM(sla_due_at IS NOT NULL AND sla_due_at < ? AND done = 0) AS overdue,
+      SUM(assigned_to = ? AND done = 0) AS mine
+    FROM messages WHERE workspace_id = ?`, now, req.user.id, id);
   const byCategory = all(`SELECT category, COUNT(*) AS n FROM messages WHERE workspace_id = ? AND category IS NOT NULL
-      AND received_at > datetime('now','-30 days') GROUP BY category ORDER BY n DESC`, id);
+      AND datetime(received_at) > datetime('now','-30 days') GROUP BY category ORDER BY n DESC`, id);
   const daily = all(`SELECT substr(received_at,1,10) AS day, COUNT(*) AS received,
-      SUM(status='replied') AS replied FROM messages WHERE workspace_id = ? AND received_at > datetime('now','-14 days')
+      SUM(status='replied') AS replied FROM messages WHERE workspace_id = ? AND datetime(received_at) > datetime('now','-14 days')
       GROUP BY day ORDER BY day`, id);
-  const activity = all('SELECT * FROM activity WHERE workspace_id = ? ORDER BY id DESC LIMIT 15', id);
+  const activity = all('SELECT * FROM activity WHERE workspace_id = ? ORDER BY id DESC LIMIT 12', id);
   const hotLeads = all(`SELECT id, from_name, from_email, subject, intent, lead_score, status FROM messages
-    WHERE workspace_id = ? AND lead_score >= 70 AND received_at > datetime('now','-14 days') ORDER BY lead_score DESC, id DESC LIMIT 6`, id);
+    WHERE workspace_id = ? AND lead_score >= 70 AND datetime(received_at) > datetime('now','-14 days') ORDER BY lead_score DESC, id DESC LIMIT 6`, id);
   const scheduled = one(`SELECT COUNT(*) AS n FROM replies WHERE workspace_id = ? AND status = 'scheduled'`, id).n;
+  const acc = one(`SELECT COUNT(*) AS n, SUM(edited = 0) AS unedited FROM replies WHERE workspace_id = ? AND status = 'sent' AND edited IS NOT NULL
+    AND sent_at > datetime('now','-30 days')`, id);
   const plan = effectivePlan(req.workspace);
+  const minutesSaved = (counts.replied || 0) * 4 + (counts.ignored || 0) * 0.5;
   res.json({ counts, byCategory, daily, activity, hotLeads, scheduled, usage: getUsage(id), plan, aiEnabled: aiEnabled(),
     emailVerified: Boolean(req.user.email_verified),
     mailboxes: one('SELECT COUNT(*) AS n FROM mailboxes WHERE workspace_id = ?', id).n,
-    // Time saved estimate: ~4 minutes per handled email.
-    minutesSaved: (counts.replied || 0) * 4 + (counts.ignored || 0) * 0.5 });
+    mailboxErrors: one('SELECT COUNT(*) AS n FROM mailboxes WHERE workspace_id = ? AND last_error IS NOT NULL AND enabled = 1', id).n,
+    aiAccuracy: acc.n ? Math.round((acc.unedited / acc.n) * 100) : null,
+    minutesSaved, moneySaved: Math.round((minutesSaved / 60) * (req.workspace.hourly_rate || 0)) });
 });
 
 // ---------- Mailboxes ----------
@@ -55,40 +76,45 @@ r.get('/providers', (req, res) => res.json({ presets: PROVIDERS, oauth: oauthAva
 
 r.get('/mailboxes', (req, res) => {
   res.json(all(`SELECT id, label, email, provider, imap_host, imap_port, smtp_host, smtp_port, username, mode, enabled,
-      last_sync_at, last_error, created_at, auth_type, signature,
-      (SELECT COUNT(*) FROM messages m WHERE m.mailbox_id = mailboxes.id) AS message_count FROM mailboxes WHERE workspace_id = ? ORDER BY id`, wsId(req)));
+      last_sync_at, last_error, created_at, auth_type, signature, auto_categories, revoked_at,
+      (SELECT COUNT(*) FROM messages m WHERE m.mailbox_id = mailboxes.id) AS message_count FROM mailboxes WHERE workspace_id = ? ORDER BY id`, wsId(req))
+    .map((m) => ({ ...m, auto_categories: m.auto_categories ? JSON.parse(m.auto_categories) : null })));
 });
 
 r.post('/mailboxes', manage, async (req, res) => {
   if (getBool('require_email_verification') && !req.user.email_verified) return res.status(403).json({ error: 'Please verify your email address first (check your inbox).' });
   const plan = effectivePlan(req.workspace);
   const count = one('SELECT COUNT(*) AS n FROM mailboxes WHERE workspace_id = ?', wsId(req)).n;
-  if (count >= plan.mailboxes) return res.status(402).json({ error: `Your ${plan.name} plan allows ${plan.mailboxes} mailbox(es). Upgrade to add more.` });
+  if (count >= plan.mailboxes) return res.status(402).json({ error: `Your ${plan.name} plan allows ${plan.mailboxes} email account(s). Upgrade to add more.` });
 
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const provider = req.body.provider || guessProvider(email);
-  const preset = PROVIDERS[provider] || PROVIDERS.custom;
+  const email = str(req.body.email, 254).trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
+  const provider = PROVIDERS[req.body.provider] ? req.body.provider : guessProvider(email);
+  const preset = PROVIDERS[provider];
   const mb = {
-    email, provider, label: req.body.label || '',
-    imap_host: req.body.imap_host || preset.imap_host, imap_port: int(req.body.imap_port) || preset.imap_port,
+    workspace_id: wsId(req), email, provider, label: str(req.body.label, 100),
+    imap_host: str(req.body.imap_host || preset.imap_host, 253).trim(), imap_port: int(req.body.imap_port) || preset.imap_port,
     imap_secure: req.body.imap_secure ?? preset.imap_secure,
-    smtp_host: req.body.smtp_host || preset.smtp_host, smtp_port: int(req.body.smtp_port) || preset.smtp_port,
+    smtp_host: str(req.body.smtp_host || preset.smtp_host, 253).trim(), smtp_port: int(req.body.smtp_port) || preset.smtp_port,
     smtp_secure: req.body.smtp_secure ?? preset.smtp_secure,
-    username: req.body.username || email,
+    username: str(req.body.username || email, 254),
     mode: ['off', 'draft', 'auto'].includes(req.body.mode) ? req.body.mode : 'draft',
   };
-  if (!email || !req.body.password || !mb.imap_host || !mb.smtp_host) return res.status(400).json({ error: 'Email, password, IMAP host and SMTP host are required' });
+  if (!req.body.password || !mb.imap_host || !mb.smtp_host) return res.status(400).json({ error: 'Email, password, IMAP host and SMTP host are required' });
+  if (Number(mb.imap_port) === 993 || Number(mb.imap_port) === 1993) mb.imap_secure = true;
+  if (Number(mb.smtp_port) === 465) mb.smtp_secure = true;
+  if (Number(mb.smtp_port) === 587) mb.smtp_secure = false; // STARTTLS (required)
 
-  if (!req.body.skipTest) {
-    try { await testConnection(mb, req.body.password); } catch (e) { return res.status(400).json({ error: e.message }); }
-  }
+  // The connection test also validates that the servers are public mail servers (SSRF protection).
+  try { await testConnection(mb, String(req.body.password)); } catch (e) { return res.status(400).json({ error: e.message }); }
   try {
     const result = run(`INSERT INTO mailboxes (workspace_id, label, email, provider, imap_host, imap_port, imap_secure,
         smtp_host, smtp_port, smtp_secure, username, password_enc, mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      wsId(req), mb.label, mb.email, mb.provider, mb.imap_host, mb.imap_port, mb.imap_secure ? 1 : 0,
-      mb.smtp_host, mb.smtp_port, mb.smtp_secure ? 1 : 0, mb.username, encrypt(req.body.password), mb.mode);
-    logActivity(wsId(req), 'mailbox_added', { email });
+    wsId(req), mb.label, mb.email, mb.provider, mb.imap_host, mb.imap_port, mb.imap_secure ? 1 : 0,
+    mb.smtp_host, mb.smtp_port, mb.smtp_secure ? 1 : 0, mb.username, seal(wsId(req), 'mailboxes.password', String(req.body.password)), mb.mode);
     const id = Number(result.lastInsertRowid);
+    logActivity(wsId(req), 'mailbox_added', { email });
+    securityEvent(req, 'mailbox_connected', { email, via: 'imap' });
     syncMailbox(id).catch(() => {});
     res.json({ id });
   } catch (e) {
@@ -97,21 +123,33 @@ r.post('/mailboxes', manage, async (req, res) => {
   }
 });
 
-r.patch('/mailboxes/:id', manage, (req, res) => {
+r.patch('/mailboxes/:id', manage, async (req, res) => {
   const mb = one('SELECT * FROM mailboxes WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   if (!mb) return res.status(404).json({ error: 'Not found' });
   const mode = ['off', 'draft', 'auto'].includes(req.body.mode) ? req.body.mode : mb.mode;
   const enabled = req.body.enabled === undefined ? mb.enabled : (req.body.enabled ? 1 : 0);
-  const label = req.body.label ?? mb.label;
-  const signature = req.body.signature ?? mb.signature;
-  run('UPDATE mailboxes SET mode=?, enabled=?, label=?, signature=? WHERE id=?', mode, enabled, label, signature, mb.id);
-  if (req.body.password) run('UPDATE mailboxes SET password_enc=?, last_error=NULL WHERE id=?', encrypt(req.body.password), mb.id);
+  const label = req.body.label === undefined ? mb.label : str(req.body.label, 100);
+  const signature = req.body.signature === undefined ? mb.signature : str(req.body.signature, 2000);
+  let autoCats = mb.auto_categories;
+  if (req.body.auto_categories !== undefined) {
+    autoCats = Array.isArray(req.body.auto_categories) ? JSON.stringify(req.body.auto_categories.filter((c) => CATEGORIES.includes(c))) : null;
+  }
+  if (req.body.password) {
+    try { await testConnection({ ...mb, auth_type: 'password' }, String(req.body.password)); } catch (e) { return res.status(400).json({ error: e.message }); }
+    run(`UPDATE mailboxes SET password_enc=?, auth_type='password', last_error=NULL, revoked_at=NULL WHERE id=?`, seal(mb.workspace_id, 'mailboxes.password', String(req.body.password)), mb.id);
+    securityEvent(req, 'mailbox_password_updated', { email: mb.email });
+  }
+  run('UPDATE mailboxes SET mode=?, enabled=?, label=?, signature=?, auto_categories=? WHERE id=?', mode, enabled, label, signature, autoCats, mb.id);
   res.json({ ok: true });
 });
 
-r.delete('/mailboxes/:id', manage, (req, res) => {
-  run('DELETE FROM mailboxes WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
-  res.json({ ok: true });
+r.delete('/mailboxes/:id', manage, async (req, res) => {
+  const mb = one('SELECT * FROM mailboxes WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!mb) return res.status(404).json({ error: 'Not found' });
+  const revoked = await revokeMailboxGrant(mb).catch(() => false);
+  run('DELETE FROM mailboxes WHERE id = ?', mb.id);
+  securityEvent(req, 'mailbox_removed', { email: mb.email, providerAccessRevoked: revoked });
+  res.json({ ok: true, revoked });
 });
 
 r.post('/mailboxes/:id/sync', async (req, res) => {
@@ -120,42 +158,140 @@ r.post('/mailboxes/:id/sync', async (req, res) => {
   res.json(await syncMailbox(mb.id));
 });
 
+// "Earned autopilot": per category, how often the AI's drafts were sent without edits.
+r.get('/autopilot/stats', (req, res) => {
+  const rows = all(`SELECT m.category, COUNT(*) AS sent, SUM(r.edited = 0) AS unedited FROM replies r JOIN messages m ON m.id = r.message_id
+    WHERE r.workspace_id = ? AND r.status = 'sent' AND r.source = 'ai' AND r.edited IS NOT NULL GROUP BY m.category ORDER BY sent DESC`, wsId(req));
+  res.json(rows.map((x) => {
+    const accuracy = x.sent ? Math.round((x.unedited / x.sent) * 100) : 0;
+    return { ...x, accuracy, recommended: x.sent >= 10 && accuracy >= 90 };
+  }));
+});
+
 // ---------- Messages (unified inbox) ----------
 r.get('/messages', (req, res) => {
   const where = ['m.workspace_id = ?'];
   const params = [wsId(req)];
+  const now = new Date().toISOString();
+  const view = req.query.view || 'inbox';
+  if (view === 'inbox') { where.push(`(m.snoozed_until IS NULL OR m.snoozed_until < ?)`); params.push(now); }
+  if (view === 'snoozed') { where.push('m.snoozed_until > ?'); params.push(now); }
+  if (view === 'mine') { where.push('m.assigned_to = ? AND m.done = 0'); params.push(req.user.id); }
+  if (view === 'unassigned') where.push(`m.assigned_to IS NULL AND m.done = 0 AND m.status IN ('triaged','drafted')`);
+  if (view === 'overdue') { where.push('m.sla_due_at IS NOT NULL AND m.sla_due_at < ? AND m.done = 0'); params.push(now); }
+  if (view === 'flagged') where.push('(m.guard_flags IS NOT NULL OR m.injection_flag = 1 OR m.is_phishing = 1)');
+  if (view === 'awaiting') {
+    // We replied and they haven't answered yet.
+    where.push(`m.status = 'replied' AND NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.workspace_id = m.workspace_id AND m2.from_email = m.from_email AND m2.received_at > m.received_at)`);
+  }
   if (req.query.starred) where.push('m.starred = 1');
   if (req.query.contact_id) { where.push('m.contact_id = ?'); params.push(req.query.contact_id); }
   if (req.query.min_lead) { where.push('m.lead_score >= ?'); params.push(Number(req.query.min_lead)); }
   for (const f of ['status', 'category', 'priority', 'mailbox_id']) {
-    if (req.query[f]) { where.push(`m.${f} = ?`); params.push(req.query[f]); }
+    if (req.query[f]) { where.push(`m.${f} = ?`); params.push(String(req.query[f])); }
   }
   if (req.query.q) {
-    where.push('(m.subject LIKE ? OR m.from_email LIKE ? OR m.from_name LIKE ? OR m.summary LIKE ?)');
-    const q = `%${req.query.q}%`; params.push(q, q, q, q);
+    where.push('(m.subject LIKE ? OR m.from_email LIKE ? OR m.from_name LIKE ? OR m.summary LIKE ? OR m.intent LIKE ?)');
+    const q = `%${str(req.query.q, 200)}%`; params.push(q, q, q, q, q);
   }
   const limit = Math.min(int(req.query.limit) || 50, 200);
-  const offset = int(req.query.offset) || 0;
+  const offset = Math.max(0, int(req.query.offset) || 0);
   res.json(all(`SELECT m.id, m.mailbox_id, mb.email AS mailbox_email, m.from_name, m.from_email, m.subject, m.summary,
-      m.category, m.priority, m.sentiment, m.language, m.status, m.received_at, m.confidence, m.lead_score, m.intent, m.starred, m.is_phishing
-    FROM messages m JOIN mailboxes mb ON mb.id = m.mailbox_id
+      m.category, m.priority, m.sentiment, m.language, m.status, m.received_at, m.confidence, m.lead_score, m.intent, m.starred,
+      m.is_phishing, m.injection_flag, m.guard_flags IS NOT NULL AS flagged, m.assigned_to, u.name AS assignee_name, m.snoozed_until,
+      m.sla_due_at, m.done, m.attachments_json IS NOT NULL AS has_attachments
+    FROM messages m JOIN mailboxes mb ON mb.id = m.mailbox_id LEFT JOIN users u ON u.id = m.assigned_to
     WHERE ${where.join(' AND ')} ORDER BY m.received_at DESC LIMIT ? OFFSET ?`, ...params, limit, offset));
 });
 
-r.get('/messages/:id', (req, res) => {
+r.get('/messages/counts', (req, res) => {
+  const now = new Date().toISOString();
+  res.json(one(`SELECT
+      SUM(snoozed_until IS NULL OR snoozed_until < ?) AS inbox,
+      SUM(assigned_to = ? AND done = 0) AS mine,
+      SUM(assigned_to IS NULL AND done = 0 AND status IN ('triaged','drafted')) AS unassigned,
+      SUM(sla_due_at IS NOT NULL AND sla_due_at < ? AND done = 0) AS overdue,
+      SUM(snoozed_until > ?) AS snoozed,
+      SUM(guard_flags IS NOT NULL OR injection_flag = 1 OR is_phishing = 1) AS flagged
+    FROM messages WHERE workspace_id = ?`, now, req.user.id, now, now, wsId(req)));
+});
+
+function loadMessage(req) {
   const m = one(`SELECT m.*, mb.email AS mailbox_email FROM messages m JOIN mailboxes mb ON mb.id = m.mailbox_id
     WHERE m.id = ? AND m.workspace_id = ?`, int(req.params.id), wsId(req));
+  return m ? openMessage(m) : null;
+}
+
+r.get('/messages/:id', (req, res) => {
+  const m = loadMessage(req);
   if (!m) return res.status(404).json({ error: 'Not found' });
   delete m.headers_json;
   m.extracted = m.extracted_json ? JSON.parse(m.extracted_json) : {};
-  m.replies = all('SELECT * FROM replies WHERE message_id = ? ORDER BY id', m.id);
+  m.attachments = m.attachments_json ? JSON.parse(m.attachments_json) : [];
+  m.guard_flags = m.guard_flags ? JSON.parse(m.guard_flags) : [];
+  m.facts_used = m.facts_used ? JSON.parse(m.facts_used) : [];
+  m.replies = all('SELECT * FROM replies WHERE message_id = ? ORDER BY id', m.id).map(openReply).map((x) => ({ ...x, guard: x.guard_json ? JSON.parse(x.guard_json) : [] }));
   m.contact = m.contact_id ? one('SELECT * FROM contacts WHERE id = ?', m.contact_id) : null;
+  m.notes = all(`SELECT n.id, n.body, n.created_at, u.name, u.email FROM message_notes n LEFT JOIN users u ON u.id = n.user_id WHERE n.message_id = ? ORDER BY n.id`, m.id);
+  m.team = all('SELECT u.id, u.name, u.email FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = ?', wsId(req));
+  touchViewer(m.id, req.user);
+  m.viewers = currentViewers(m.id, req.user.id);
   res.json(m);
+});
+
+r.post('/messages/:id/viewing', (req, res) => {
+  const m = one('SELECT id FROM messages WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!m) return res.status(404).json({ error: 'Not found' });
+  touchViewer(m.id, req.user);
+  res.json({ viewers: currentViewers(m.id, req.user.id) });
 });
 
 r.post('/messages/:id/star', (req, res) => {
   run('UPDATE messages SET starred = ? WHERE id = ? AND workspace_id = ?', req.body.starred ? 1 : 0, int(req.params.id), wsId(req));
   res.json({ ok: true });
+});
+
+// Team workflow: assign, snooze, mark done, internal notes.
+r.post('/messages/:id/assign', (req, res) => {
+  const uid = req.body.user_id ? int(req.body.user_id) : null;
+  if (uid && !one('SELECT 1 AS x FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), uid)) return res.status(400).json({ error: 'Not a teammate' });
+  const x = run('UPDATE messages SET assigned_to = ? WHERE id = ? AND workspace_id = ?', uid, int(req.params.id), wsId(req));
+  if (!x.changes) return res.status(404).json({ error: 'Not found' });
+  logActivity(wsId(req), 'assigned', { message: int(req.params.id), to: uid });
+  res.json({ ok: true });
+});
+r.post('/messages/:id/snooze', (req, res) => {
+  const until = req.body.until ? new Date(req.body.until) : null;
+  if (until && (Number.isNaN(until.getTime()) || until < new Date())) return res.status(400).json({ error: 'Choose a time in the future' });
+  run('UPDATE messages SET snoozed_until = ? WHERE id = ? AND workspace_id = ?', until ? until.toISOString() : null, int(req.params.id), wsId(req));
+  res.json({ ok: true });
+});
+r.post('/messages/:id/done', (req, res) => {
+  run('UPDATE messages SET done = ?, sla_due_at = CASE WHEN ? THEN NULL ELSE sla_due_at END WHERE id = ? AND workspace_id = ?',
+    req.body.done === false ? 0 : 1, req.body.done === false ? 0 : 1, int(req.params.id), wsId(req));
+  res.json({ ok: true });
+});
+r.post('/messages/:id/notes', (req, res) => {
+  const m = one('SELECT id FROM messages WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  const body = str(req.body.body, 5000).trim();
+  if (!m || !body) return res.status(400).json({ error: 'Write a note' });
+  run('INSERT INTO message_notes (workspace_id, message_id, user_id, body) VALUES (?,?,?,?)', wsId(req), m.id, req.user.id, body);
+  // @mentions: tag teammates by email to assign
+  const mention = body.match(/@([^\s@]+@[^\s@]+\.[^\s@]+)/);
+  if (mention) {
+    const u = one('SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = ? AND u.email = ?', wsId(req), mention[1].toLowerCase());
+    if (u) run('UPDATE messages SET assigned_to = ? WHERE id = ?', u.id, m.id);
+  }
+  res.json({ ok: true });
+});
+
+r.post('/messages/:id/translate', async (req, res) => {
+  if (!aiEnabled()) return res.status(400).json({ error: 'AI is not configured on this server' });
+  const m = loadMessage(req);
+  if (!m) return res.status(404).json({ error: 'Not found' });
+  const target = str(req.body.lang || req.workspace.owner_language || 'English', 40);
+  const text = req.body.text ? str(req.body.text, 15000) : `${m.subject}\n\n${m.text_body}`;
+  res.json({ translation: await translate(req.workspace, text, target, m.id) });
 });
 
 r.post('/messages/:id/reprocess', async (req, res) => {
@@ -168,48 +304,52 @@ r.post('/messages/:id/reprocess', async (req, res) => {
 
 // Ask the AI for a fresh draft with custom instructions (e.g. "offer a 10% discount").
 r.post('/messages/:id/draft', async (req, res) => {
-  const m = one('SELECT * FROM messages WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  const m = loadMessage(req);
   if (!m) return res.status(404).json({ error: 'Not found' });
   if (!aiEnabled()) return res.status(400).json({ error: 'AI is not configured on this server' });
-  const result = await analyzeEmail(req.workspace, m, String(req.body.instructions || ''));
-  const r2 = run(`INSERT INTO replies (workspace_id, message_id, subject, body, source, ai_original) VALUES (?,?,?,?, 'ai', ?)`,
-    wsId(req), m.id, result.reply_subject, result.reply_body, result.reply_body);
+  const result = await analyzeEmail(req.workspace, m, str(req.body.instructions, 1000));
+  const mb = one('SELECT * FROM mailboxes WHERE id = ?', m.mailbox_id);
+  const guard = guardReply(req.workspace, mb, m, result.reply_body || '');
+  const r2 = run(`INSERT INTO replies (workspace_id, message_id, subject, body, source, ai_original, guard_json, error) VALUES (?,?,?,?, 'ai', ?, ?, ?)`,
+    wsId(req), m.id, result.reply_subject, seal(wsId(req), 'replies.body', result.reply_body), seal(wsId(req), 'replies.ai_original', result.reply_body),
+    guard.length ? JSON.stringify(guard) : null, guard.length ? `Check before sending: ${guard.join('; ')}` : null);
   run(`UPDATE messages SET status='drafted' WHERE id=?`, m.id);
-  res.json({ id: Number(r2.lastInsertRowid), subject: result.reply_subject, body: result.reply_body });
+  res.json({ id: Number(r2.lastInsertRowid), subject: result.reply_subject, body: result.reply_body, guard });
 });
 
 // Manual reply composed by a human.
 r.post('/messages/:id/reply', async (req, res) => {
   const m = one('SELECT id FROM messages WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
-  if (!m || !req.body.body) return res.status(400).json({ error: 'Message and body required' });
+  const body = str(req.body.body, 50000);
+  if (!m || !body.trim()) return res.status(400).json({ error: 'Message and body required' });
   const r2 = run(`INSERT INTO replies (workspace_id, message_id, subject, body, source) VALUES (?,?,?,?, 'manual')`,
-    wsId(req), m.id, req.body.subject || '', req.body.body);
-  await sendStoredReply(Number(r2.lastInsertRowid), req.user.id);
-  res.json({ ok: true });
+    wsId(req), m.id, str(req.body.subject, 998), seal(wsId(req), 'replies.body', body));
+  try {
+    await sendStoredReply(Number(r2.lastInsertRowid), req.user.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(502).json({ error: `Send failed: ${e.message}` });
+  }
 });
 
 // ---------- Approval queue ----------
 r.get('/replies', (req, res) => {
-  const status = req.query.status || 'pending';
-  if (status === 'queue') {
-    return res.json(all(`SELECT r.*, m.from_name, m.from_email, m.subject AS original_subject, m.summary, m.category, m.priority,
-      m.text_body AS original_body, m.reasoning, m.lead_score, mb.email AS mailbox_email
-      FROM replies r JOIN messages m ON m.id = r.message_id JOIN mailboxes mb ON mb.id = m.mailbox_id
-      WHERE r.workspace_id = ? AND r.status IN ('pending','scheduled','failed') ORDER BY r.status = 'scheduled' DESC, r.id DESC LIMIT 100`, wsId(req)));
-  }
+  const status = String(req.query.status || 'pending');
+  const statuses = status === 'queue' ? ['pending', 'scheduled', 'failed'] : [status];
   res.json(all(`SELECT r.*, m.from_name, m.from_email, m.subject AS original_subject, m.summary, m.category, m.priority,
-      m.text_body AS original_body, mb.email AS mailbox_email
+      m.text_body AS original_body, m.reasoning, m.lead_score, m.guard_flags, mb.email AS mailbox_email
     FROM replies r JOIN messages m ON m.id = r.message_id JOIN mailboxes mb ON mb.id = m.mailbox_id
-    WHERE r.workspace_id = ? AND r.status = ? ORDER BY r.id DESC LIMIT 100`, wsId(req), status));
+    WHERE r.workspace_id = ? AND r.status IN (${statuses.map(() => '?').join(',')}) ORDER BY r.status = 'scheduled' DESC, r.id DESC LIMIT 100`,
+  wsId(req), ...statuses).map(openReply).map((x) => ({ ...x, guard: x.guard_json ? JSON.parse(x.guard_json) : [], ai_original: undefined })));
 });
 
 r.post('/replies/:id/approve', async (req, res) => {
   const reply = one('SELECT * FROM replies WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   if (!reply) return res.status(404).json({ error: 'Not found' });
   if (req.body.body) {
-    run('UPDATE replies SET body=?, subject=? WHERE id=?', req.body.body, req.body.subject ?? reply.subject, reply.id);
-    const ws = one('SELECT learn_from_edits FROM workspaces WHERE id = ?', wsId(req));
-    if (ws.learn_from_edits) recordCorrection(reply, req.body.body);
+    const body = str(req.body.body, 50000);
+    run('UPDATE replies SET body=?, subject=? WHERE id=?', seal(wsId(req), 'replies.body', body), str(req.body.subject ?? reply.subject, 998), reply.id);
+    if (req.workspace.learn_from_edits) recordCorrection(reply, body);
   }
   try {
     await sendStoredReply(reply.id, req.user.id);
@@ -232,6 +372,23 @@ r.post('/replies/:id/reject', (req, res) => {
   run(`UPDATE replies SET status='rejected' WHERE id=?`, reply.id);
   run(`UPDATE messages SET status='triaged' WHERE id=? AND status='drafted'`, reply.message_id);
   res.json({ ok: true });
+});
+
+// ---------- Simulator: test the AI on a sample email without sending anything ----------
+r.post('/ai/simulate', async (req, res) => {
+  const ws = req.workspace;
+  const sample = {
+    id: null, workspace_id: ws.id, from_name: str(req.body.from_name, 100) || 'Test Customer', from_email: str(req.body.from_email, 254) || 'customer@example.com',
+    subject: str(req.body.subject, 300), text_body: str(req.body.body, 20000), received_at: new Date().toISOString(),
+  };
+  if (!sample.text_body.trim()) return res.status(400).json({ error: 'Paste an email to test' });
+  const triage = aiEnabled() ? await analyzeEmail(ws, sample) : fallbackTriage(sample);
+  const anyMb = one('SELECT * FROM mailboxes WHERE workspace_id = ? LIMIT 1', ws.id) || { email: 'you@example.com' };
+  const guard = triage.reply_body ? guardReply(ws, anyMb, sample, triage.reply_body) : [];
+  const injection = detectInjection(`${sample.subject}\n${sample.text_body}`);
+  const wouldAutoSend = Boolean(triage.reply_body) && !triage.requires_human && !triage.unsupported_claims && !triage.is_phishing
+    && triage.confidence >= ws.auto_send_min_confidence && !guard.length && !injection.flagged;
+  res.json({ triage, guard, injection: injection.flagged, wouldAutoSend });
 });
 
 // ---------- Rules ----------
@@ -291,8 +448,9 @@ for (const [path, table, fields] of [['templates', 'templates', ['name', 'subjec
 const SETTINGS = ['name', 'business_name', 'business_description', 'reply_tone', 'signature', 'default_language',
   'business_hours', 'auto_send_min_confidence', 'style_guide', 'retention_days', 'privacy_shield', 'reply_delay_min',
   'reply_delay_max', 'followup_days', 'digest_enabled', 'digest_hour', 'timezone', 'telegram_chat_id', 'slack_webhook',
-  'alert_on', 'booking_link', 'learn_from_edits'];
-const INT_SETTINGS = ['retention_days', 'privacy_shield', 'reply_delay_min', 'reply_delay_max', 'followup_days', 'digest_enabled', 'digest_hour', 'learn_from_edits'];
+  'alert_on', 'booking_link', 'learn_from_edits', 'sensitive_topics', 'never_say', 'allowed_link_domains', 'hourly_rate',
+  'ooo_until', 'ooo_message', 'sla_json', 'read_attachments', 'owner_language'];
+const INT_SETTINGS = ['retention_days', 'privacy_shield', 'reply_delay_min', 'reply_delay_max', 'followup_days', 'digest_enabled', 'digest_hour', 'learn_from_edits', 'read_attachments'];
 r.get('/settings', (req, res) => {
   const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId(req));
   res.json(Object.fromEntries(SETTINGS.map((k) => [k, ws[k]])));
@@ -309,12 +467,19 @@ r.put('/settings', manage, (req, res) => {
   if (v.slack_webhook && !/^https:\/\/hooks\.slack\.com\//.test(v.slack_webhook)) return res.status(400).json({ error: 'Slack webhook must start with https://hooks.slack.com/' });
   try { new Intl.DateTimeFormat('en', { timeZone: v.timezone || 'UTC' }); } catch { return res.status(400).json({ error: 'Unknown timezone' }); }
   v.timezone ||= 'UTC';
+  v.hourly_rate = Math.max(0, Number(v.hourly_rate) || 0);
+  v.sensitive_topics ??= '';
+  v.owner_language ||= 'en';
+  if (v.booking_link && !/^https:\/\//.test(v.booking_link)) return res.status(400).json({ error: 'Booking link must start with https://' });
+  if (v.ooo_until && Number.isNaN(new Date(v.ooo_until).getTime())) return res.status(400).json({ error: 'Invalid out-of-office date' });
+  try { const sla = JSON.parse(v.sla_json || '{}'); if (typeof sla !== 'object' || Array.isArray(sla)) throw new Error(); } catch { return res.status(400).json({ error: 'SLA must be JSON like {"urgent":60,"high":240,"normal":1440}' }); }
+  for (const k of ['business_description', 'style_guide', 'signature', 'never_say', 'ooo_message', 'sensitive_topics']) if (v[k] != null) v[k] = String(v[k]).slice(0, 20000);
   v.alert_on ??= '';
   v.name ||= ws.name;
   v.reply_tone ||= 'friendly and professional';
   v.default_language ||= 'auto';
   v.auto_send_min_confidence = Math.max(0, Math.min(1, Number(v.auto_send_min_confidence)));
-  run(`UPDATE workspaces SET ${SETTINGS.map((k) => `${k}=?`).join(',')} WHERE id=?`, ...SETTINGS.map((k) => (v[k] === '' && !['alert_on'].includes(k) ? null : v[k])), ws.id);
+  run(`UPDATE workspaces SET ${SETTINGS.map((k) => `${k}=?`).join(',')} WHERE id=?`, ...SETTINGS.map((k) => (v[k] === '' && !['alert_on', 'sensitive_topics'].includes(k) ? null : v[k])), ws.id);
   res.json({ ok: true });
 });
 
@@ -368,8 +533,9 @@ r.put('/contacts/:id', (req, res) => {
   const c = one('SELECT * FROM contacts WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   if (!c) return res.status(404).json({ error: 'Not found' });
   const v = (k) => (req.body[k] === undefined ? c[k] : req.body[k]);
-  run('UPDATE contacts SET name=?, company=?, phone=?, tags=?, notes=?, vip=?, blocked=? WHERE id=?',
-    v('name'), v('company'), v('phone'), v('tags'), v('notes'), v('vip') ? 1 : 0, v('blocked') ? 1 : 0, c.id);
+  run('UPDATE contacts SET name=?, company=?, phone=?, tags=?, notes=?, vip=?, blocked=?, do_not_contact=? WHERE id=?',
+    str(v('name'), 200), str(v('company'), 200), str(v('phone'), 50), str(v('tags'), 500), str(v('notes'), 5000),
+    v('vip') ? 1 : 0, v('blocked') ? 1 : 0, v('do_not_contact') ? 1 : 0, c.id);
   res.json({ ok: true });
 });
 r.get('/contacts.csv', (req, res) => {
@@ -391,12 +557,12 @@ r.post('/ai/ask', async (req, res) => {
   // Retrieve candidates: keyword matches first, then most recent mail.
   const words = question.toLowerCase().match(/[\p{L}\p{N}@.]{3,}/gu)?.filter((w) => !['what', 'when', 'who', 'did', 'the', 'and', 'from', 'about', 'with', 'have', 'which', 'this', 'that', 'last', 'week'].includes(w)).slice(0, 8) || [];
   const byWords = words.length ? all(`SELECT m.*, mb.email AS mailbox_email FROM messages m JOIN mailboxes mb ON mb.id = m.mailbox_id
-    WHERE m.workspace_id = ? AND (${words.map(() => '(m.subject LIKE ? OR m.text_body LIKE ? OR m.from_email LIKE ? OR m.from_name LIKE ?)').join(' OR ')})
-    ORDER BY m.received_at DESC LIMIT 25`, wsId(req), ...words.flatMap((w) => Array(4).fill(`%${w}%`))) : [];
+    WHERE m.workspace_id = ? AND (${words.map(() => '(m.subject LIKE ? OR m.summary LIKE ? OR m.intent LIKE ? OR m.from_email LIKE ? OR m.from_name LIKE ?)').join(' OR ')})
+    ORDER BY m.received_at DESC LIMIT 25`, wsId(req), ...words.flatMap((w) => Array(5).fill(`%${w}%`))) : [];
   const recent = all(`SELECT m.*, mb.email AS mailbox_email FROM messages m JOIN mailboxes mb ON mb.id = m.mailbox_id
     WHERE m.workspace_id = ? AND m.is_automated = 0 ORDER BY m.received_at DESC LIMIT 20`, wsId(req));
   const seen = new Set();
-  const ctx = [...byWords, ...recent].filter((m) => !seen.has(m.id) && seen.add(m.id)).slice(0, 35);
+  const ctx = [...byWords, ...recent].filter((m) => !seen.has(m.id) && seen.add(m.id)).slice(0, 35).map(openMessage);
   if (!ctx.length) return res.json({ answer: 'There are no emails to search yet.', sources: [] });
   const answer = await askInbox(req.workspace, question, ctx);
   const cited = [...answer.matchAll(/#(\d+)/g)].map((x) => Number(x[1]));
@@ -414,7 +580,12 @@ r.post('/ai/learn-style', manage, async (req, res) => {
   res.json({ style_guide: guide, samples: samples.length });
 });
 
-r.get('/ai/corrections', (req, res) => res.json(all('SELECT * FROM corrections WHERE workspace_id = ? ORDER BY id DESC LIMIT 50', wsId(req))));
+r.get('/ai/corrections', (req, res) => res.json(all('SELECT * FROM corrections WHERE workspace_id = ? ORDER BY id DESC LIMIT 50', wsId(req))
+  .map((c) => ({ ...c, ai_draft: open(c.workspace_id, 'corrections.ai_draft', c.ai_draft), final_text: open(c.workspace_id, 'corrections.final_text', c.final_text) }))));
+
+// Transparency: every time the AI saw one of your emails.
+r.get('/ai/log', (req, res) => res.json(all(`SELECT l.id, l.message_id, l.purpose, l.model, l.input_tokens, l.output_tokens, l.redactions, l.created_at, m.subject
+  FROM ai_log l LEFT JOIN messages m ON m.id = l.message_id WHERE l.workspace_id = ? ORDER BY l.id DESC LIMIT 200`, wsId(req))));
 r.delete('/ai/corrections/:id', manage, (req, res) => {
   run('DELETE FROM corrections WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   res.json({ ok: true });
@@ -423,10 +594,10 @@ r.delete('/ai/corrections/:id', manage, (req, res) => {
 // Import FAQ/pricing text from the customer's own website into the knowledge base.
 r.post('/knowledge/import-url', manage, async (req, res) => {
   const url = String(req.body.url || '');
-  try { await assertPublicUrl(url); } catch (e) { return res.status(400).json({ error: e.message }); }
-  const resp = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(15_000), headers: { 'user-agent': 'KnowledgeImporter/1.0' } });
+  let resp;
+  try { resp = await safeFetch(url, { headers: { 'user-agent': 'KnowledgeImporter/1.0' } }); } catch (e) { return res.status(400).json({ error: e.message }); }
   if (!resp.ok) return res.status(400).json({ error: `Could not fetch page (${resp.status})` });
-  const html = (await resp.text()).slice(0, 2_000_000);
+  const html = resp.text().slice(0, 2_000_000);
   const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || url).trim().slice(0, 150);
   const text = html.replace(/<(script|style|noscript|svg|nav|footer)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|li|h\d|tr)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;|&rsquo;/g, "'").replace(/&quot;/g, '"')
@@ -443,22 +614,27 @@ r.get('/analytics', (req, res) => {
   const since = `-${days} days`;
   const totals = one(`SELECT COUNT(*) AS received, SUM(status='replied') AS replied, SUM(status='ignored') AS filtered,
       SUM(is_automated) AS automated, SUM(is_phishing) AS phishing, AVG(first_response_sec) AS avg_response_sec,
-      SUM(lead_score >= 70) AS hot_leads FROM messages WHERE workspace_id = ? AND received_at > datetime('now', ?)`, id, since);
+      SUM(lead_score >= 70) AS hot_leads FROM messages WHERE workspace_id = ? AND datetime(received_at) > datetime('now', ?)`, id, since);
   const bySource = all(`SELECT r.source, COUNT(*) AS n, SUM(r.approved_by IS NULL) AS autopilot FROM replies r
       WHERE r.workspace_id = ? AND r.status = 'sent' AND r.sent_at > datetime('now', ?) GROUP BY r.source`, id, since);
   const byMailbox = all(`SELECT mb.email, COUNT(m.id) AS received, SUM(m.status='replied') AS replied FROM mailboxes mb
-      LEFT JOIN messages m ON m.mailbox_id = mb.id AND m.received_at > datetime('now', ?) WHERE mb.workspace_id = ? GROUP BY mb.id`, since, id);
+      LEFT JOIN messages m ON m.mailbox_id = mb.id AND datetime(m.received_at) > datetime('now', ?) WHERE mb.workspace_id = ? GROUP BY mb.id`, since, id);
   const byHour = all(`SELECT CAST(strftime('%H', received_at) AS INTEGER) AS hour, COUNT(*) AS n FROM messages
-      WHERE workspace_id = ? AND received_at > datetime('now', ?) GROUP BY hour ORDER BY hour`, id, since);
+      WHERE workspace_id = ? AND datetime(received_at) > datetime('now', ?) GROUP BY hour ORDER BY hour`, id, since);
   const bySentiment = all(`SELECT sentiment, COUNT(*) AS n FROM messages WHERE workspace_id = ? AND sentiment IS NOT NULL
-      AND received_at > datetime('now', ?) GROUP BY sentiment`, id, since);
+      AND datetime(received_at) > datetime('now', ?) GROUP BY sentiment`, id, since);
   const topSenders = all(`SELECT from_email, MAX(from_name) AS name, COUNT(*) AS n FROM messages WHERE workspace_id = ? AND is_automated = 0
-      AND received_at > datetime('now', ?) GROUP BY from_email ORDER BY n DESC LIMIT 10`, id, since);
+      AND datetime(received_at) > datetime('now', ?) GROUP BY from_email ORDER BY n DESC LIMIT 10`, id, since);
   const byCategory = all(`SELECT category, COUNT(*) AS n FROM messages WHERE workspace_id = ? AND category IS NOT NULL
-      AND received_at > datetime('now', ?) GROUP BY category ORDER BY n DESC`, id, since);
+      AND datetime(received_at) > datetime('now', ?) GROUP BY category ORDER BY n DESC`, id, since);
   const corrections = one('SELECT COUNT(*) AS n FROM corrections WHERE workspace_id = ?', id).n;
+  const acc = one(`SELECT COUNT(*) AS n, SUM(edited = 0) AS unedited FROM replies WHERE workspace_id = ? AND status = 'sent' AND edited IS NOT NULL AND sent_at > datetime('now', ?)`, id, since);
+  const guardHolds = one(`SELECT COUNT(*) AS n FROM replies WHERE workspace_id = ? AND guard_json IS NOT NULL AND created_at > datetime('now', ?)`, id, since).n;
+  const sla = one(`SELECT COUNT(*) AS due, SUM(first_response_sec IS NOT NULL) AS answered FROM messages WHERE workspace_id = ? AND sla_due_at IS NOT NULL AND datetime(received_at) > datetime('now', ?)`, id, since);
   const autoSent = bySource.reduce((a, x) => a + (x.autopilot || 0), 0);
-  res.json({ days, totals, bySource, byMailbox, byHour, bySentiment, topSenders, byCategory, corrections,
+  res.json({ days, totals, bySource, byMailbox, byHour, bySentiment, topSenders, byCategory, corrections, guardHolds,
+    aiAccuracy: acc.n ? Math.round((acc.unedited / acc.n) * 100) : null, overdueNow: sla.due - (sla.answered || 0),
+    moneySaved: Math.round(((((totals.replied || 0) * 4) + ((totals.filtered || 0) * 0.5)) / 60) * (req.workspace.hourly_rate || 0)),
     automationRate: totals.received ? Math.round(((autoSent + (totals.filtered || 0)) / totals.received) * 100) : 0,
     hoursSaved: Math.round((((totals.replied || 0) * 4) + ((totals.filtered || 0) * 0.5)) / 6) / 10 });
 });
@@ -468,13 +644,30 @@ r.get('/api-keys', manage, (req, res) => res.json(all('SELECT id, name, prefix, 
 r.post('/api-keys', manage, (req, res) => {
   if (req.viaApiKey) return res.status(403).json({ error: 'Use the dashboard to create API keys' });
   const key = `mp_live_${randomToken(24)}`;
-  run('INSERT INTO api_keys (workspace_id, name, prefix, key_hash) VALUES (?,?,?,?)', wsId(req), String(req.body.name || 'API key'), key.slice(0, 14), sha256(key));
+  run('INSERT INTO api_keys (workspace_id, name, prefix, key_hash) VALUES (?,?,?,?)', wsId(req), str(req.body.name || 'API key', 80), key.slice(0, 14), sha256(key));
+  securityEvent(req, 'api_key_created', { name: str(req.body.name, 80) });
   res.json({ key }); // shown once
 });
 r.delete('/api-keys/:id', manage, (req, res) => {
+  securityEvent(req, 'api_key_revoked', { id: int(req.params.id) });
   run('DELETE FROM api_keys WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   res.json({ ok: true });
 });
+r.get('/integrations/webhook-secret', manage, (req, res) => res.json({ secret: one('SELECT webhook_secret FROM workspaces WHERE id = ?', wsId(req)).webhook_secret }));
+r.post('/integrations/webhook-secret/rotate', manage, (req, res) => {
+  const secret = randomToken(24);
+  run('UPDATE workspaces SET webhook_secret = ? WHERE id = ?', secret, wsId(req));
+  securityEvent(req, 'webhook_secret_rotated');
+  res.json({ secret });
+});
+r.post('/integrations/webhook-test', manage, async (req, res) => {
+  const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId(req));
+  try {
+    await deliverWebhook(ws, String(req.body.url || ''), { event: 'test', message: { subject: 'Test from your email assistant' } });
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 r.post('/integrations/test', manage, async (req, res) => {
   const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId(req));
   const text = `✅ Test alert from your email assistant (${ws.name}). Alerts are working!`;
@@ -517,6 +710,39 @@ r.get('/referrals', (req, res) => {
   const earn = one(`SELECT COALESCE(SUM(commission),0) AS total, COALESCE(SUM(CASE WHEN commission_paid=1 THEN commission ELSE 0 END),0) AS paid,
     COUNT(*) AS payments FROM payments WHERE referral_user_id = ? AND status = 'paid'`, req.user.id);
   res.json({ link: `${appUrl()}/?ref=${u.referral_code}`, code: u.referral_code, signups, ...earn, commissionPct: getNum('referral_commission_pct') });
+});
+
+// ---------- Declutter: newsletters & automated senders, one-click unsubscribe ----------
+r.get('/declutter', (req, res) => {
+  res.json(all(`SELECT from_email, MAX(from_name) AS name, COUNT(*) AS n, MAX(received_at) AS last, MAX(list_unsubscribe) AS unsubscribe,
+      MAX(list_unsubscribe_post) AS one_click, MAX(c.blocked) AS blocked
+    FROM messages m LEFT JOIN contacts c ON c.workspace_id = m.workspace_id AND c.email = m.from_email
+    WHERE m.workspace_id = ? AND (m.is_automated = 1 OR m.category IN ('newsletter','notification','spam'))
+    GROUP BY from_email ORDER BY n DESC LIMIT 200`, wsId(req)));
+});
+r.post('/declutter/unsubscribe', manage, async (req, res) => {
+  const from = str(req.body.from_email, 254).toLowerCase();
+  const row = one(`SELECT m.*, mb.id AS mbid FROM messages m JOIN mailboxes mb ON mb.id = m.mailbox_id WHERE m.workspace_id = ? AND m.from_email = ?
+    AND m.list_unsubscribe IS NOT NULL ORDER BY m.id DESC LIMIT 1`, wsId(req), from);
+  // Always block locally so future mail from this sender is filtered, even if the sender ignores the request.
+  run(`INSERT INTO contacts (workspace_id, email, blocked) VALUES (?,?,1) ON CONFLICT(workspace_id, email) DO UPDATE SET blocked = 1`, wsId(req), from);
+  if (!row) return res.json({ ok: true, method: 'blocked' });
+  try {
+    if (row.list_unsubscribe.startsWith('https://') && row.list_unsubscribe_post) {
+      // RFC 8058 one-click unsubscribe.
+      await safeFetch(row.list_unsubscribe, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'List-Unsubscribe=One-Click' }, { maxBytes: 200_000 });
+      return res.json({ ok: true, method: 'one-click' });
+    }
+    if (row.list_unsubscribe.startsWith('mailto:')) {
+      const u = new URL(row.list_unsubscribe);
+      const mb = one('SELECT * FROM mailboxes WHERE id = ?', row.mbid);
+      await sendNew(mb, { to: u.pathname, subject: u.searchParams.get('subject') || 'unsubscribe', body: 'unsubscribe' });
+      return res.json({ ok: true, method: 'email' });
+    }
+    return res.json({ ok: true, method: 'blocked', link: row.list_unsubscribe });
+  } catch (e) {
+    return res.json({ ok: true, method: 'blocked', warning: `Sender blocked; unsubscribe request failed: ${e.message}` });
+  }
 });
 
 export default r;

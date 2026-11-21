@@ -3,11 +3,14 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import fs from 'node:fs';
 import os from 'node:os';
-import { all, one, run, tx, audit, db } from '../db.js';
+import { all, one, run, tx, audit, db, securityEvent } from '../db.js';
 import { config } from '../config.js';
 import { allPlans, getPlan, effectivePlan } from '../plans.js';
 import { listSettings, setSetting, SETTINGS, getNum } from '../settings.js';
-import { issueToken } from '../auth.js';
+import { issueSession, revokeAllSessions } from '../auth.js';
+import { migrateEncryption } from '../vault.js';
+import { keyVersion } from '../crypto.js';
+import { getBool } from '../settings.js';
 import { workerState, syncMailbox } from '../services/worker.js';
 import { sendSystemEmail } from '../services/notify.js';
 import { aiEnabled } from '../services/ai.js';
@@ -15,6 +18,13 @@ import { recordPayment, stripe } from './billing.js';
 import { randomToken } from '../crypto.js';
 
 const r = Router();
+
+// Optional IP allowlist for the whole admin API.
+r.use((req, res, next) => {
+  const allowed = String(listSettings().find((x) => x.key === 'allowed_admin_ips')?.value || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (allowed.length && !allowed.includes(req.ip)) return res.status(403).json({ error: 'Admin access is not allowed from this network' });
+  next();
+});
 const int = (v) => Number.parseInt(v, 10);
 const like = (q) => `%${q}%`;
 
@@ -86,6 +96,7 @@ r.put('/users/:id', (req, res) => {
   if (id === req.user.id && (req.body.is_admin === false || req.body.suspended)) return res.status(400).json({ error: "You can't demote or suspend yourself" });
   const v = (k) => (req.body[k] === undefined ? u[k] : req.body[k]);
   run('UPDATE users SET name=?, is_admin=?, suspended=?, email_verified=? WHERE id=?', v('name'), v('is_admin') ? 1 : 0, v('suspended') ? 1 : 0, v('email_verified') ? 1 : 0, id);
+  if (req.body.suspended) revokeAllSessions(id);
   if (req.body.email && req.body.email !== u.email) {
     if (one('SELECT id FROM users WHERE email = ?', String(req.body.email).toLowerCase())) return res.status(409).json({ error: 'Email in use' });
     run('UPDATE users SET email = ? WHERE id = ?', String(req.body.email).toLowerCase(), id);
@@ -97,8 +108,9 @@ r.post('/users/:id/reset-password', async (req, res) => {
   const id = int(req.params.id);
   const u = one('SELECT email FROM users WHERE id = ?', id);
   if (!u) return res.status(404).json({ error: 'Not found' });
-  const temp = randomToken(6);
-  run('UPDATE users SET password_hash = ? WHERE id = ?', await bcrypt.hash(temp, 12), id);
+  const temp = `${randomToken(6)}-${randomToken(3)}`;
+  run(`UPDATE users SET password_hash = ?, password_changed_at = datetime('now'), failed_logins = 0, locked_until = NULL WHERE id = ?`, await bcrypt.hash(temp, 12), id);
+  revokeAllSessions(id);
   audit(req, 'password_reset_by_admin', `user:${id}`);
   res.json({ tempPassword: temp });
 });
@@ -110,8 +122,22 @@ r.post('/users/:id/disable-2fa', (req, res) => {
 r.post('/users/:id/impersonate', (req, res) => {
   const u = one('SELECT * FROM users WHERE id = ?', int(req.params.id));
   if (!u) return res.status(404).json({ error: 'Not found' });
-  audit(req, 'impersonate', `user:${u.id}`);
-  issueToken(res, u, { imp: req.user.id });
+  if (u.is_admin) return res.status(400).json({ error: 'Admins cannot be impersonated' });
+  const reason = String(req.body.reason || '').trim();
+  if (reason.length < 5) return res.status(400).json({ error: 'Give a reason (it is recorded and shown to the customer)' });
+  const consent = one(`SELECT 1 AS x FROM workspace_members wm JOIN workspaces w ON w.id = wm.workspace_id
+    WHERE wm.user_id = ? AND w.support_access_until > ?`, u.id, new Date().toISOString());
+  if (getBool('impersonation_requires_consent') && !consent) {
+    return res.status(403).json({ error: 'This customer has not granted support access. Ask them to enable it in Security & privacy → Support access.' });
+  }
+  audit(req, 'impersonate', `user:${u.id}`, reason);
+  securityEvent(req, 'support_impersonation', { admin: req.user.email, reason }, { userId: u.id });
+  issueSession(req, res, u, { impersonatorId: req.user.id });
+  res.json({ ok: true });
+});
+r.post('/users/:id/sign-out', (req, res) => {
+  revokeAllSessions(int(req.params.id));
+  audit(req, 'user_signed_out_everywhere', `user:${req.params.id}`);
   res.json({ ok: true });
 });
 r.post('/users/:id/email', async (req, res) => {
@@ -286,6 +312,7 @@ r.put('/plans/:key', (req, res) => {
   const num = (k) => (b[k] === undefined || b[k] === '' ? (b[k] === '' ? null : p[k]) : Number(b[k]));
   const txt = (k) => (b[k] === undefined ? p[k] : (b[k] || null));
   const features = b.features === undefined ? p.features_json : JSON.stringify(String(b.features).split('\n').map((x) => x.trim()).filter(Boolean));
+  if (b.ai_calls !== undefined) run('UPDATE plans SET ai_calls = ? WHERE key = ?', b.ai_calls === '' ? null : Number(b.ai_calls), p.key);
   run(`UPDATE plans SET name=?, description=?, mailboxes=?, ai_replies=?, rules=?, team_members=?, auto_send=?, features_json=?,
       price_monthly=?, price_yearly=?, price_once=?, stripe_price_monthly=?, stripe_price_yearly=?, stripe_price_once=?, public=?, sort=?, highlight=? WHERE key=?`,
   txt('name') || p.name, txt('description'), num('mailboxes') ?? 0, num('ai_replies') ?? 0, num('rules') ?? 0, num('team_members') ?? 1,
@@ -324,9 +351,13 @@ r.put('/mailboxes/:id', (req, res) => {
 r.get('/ai-usage', (req, res) => {
   const period = String(req.query.period || new Date().toISOString().slice(0, 7));
   const inP = getNum('ai_input_price'); const outP = getNum('ai_output_price');
-  const rows = all(`SELECT u.*, w.name, w.plan, p.ai_replies AS plan_limit FROM usage u JOIN workspaces w ON w.id = u.workspace_id
+  const rows = all(`SELECT u.*, w.name, w.plan, w.billing_interval, p.ai_replies AS plan_limit, p.price_monthly, p.price_yearly FROM usage u JOIN workspaces w ON w.id = u.workspace_id
     LEFT JOIN plans p ON p.key = w.plan WHERE u.period = ? ORDER BY u.input_tokens + u.output_tokens * 5 DESC LIMIT 500`, period)
-    .map((x) => ({ ...x, cost: Math.round(((x.input_tokens * inP) + (x.output_tokens * outP)) / 1e4) / 100 }));
+    .map((x) => {
+      const cost = Math.round(((x.input_tokens * inP) + (x.output_tokens * outP)) / 1e4) / 100;
+      const revenue = x.billing_interval === 'yearly' ? (x.price_yearly || 0) / 12 : ['monthly', 'manual'].includes(x.billing_interval) ? (x.price_monthly || 0) : 0;
+      return { ...x, cost, revenue, margin: revenue ? Math.round(((revenue - cost) / revenue) * 100) : null };
+    });
   const months = all(`SELECT period, SUM(ai_calls) AS ai_calls, SUM(ai_replies) AS ai_replies, SUM(input_tokens) AS input_tokens,
     SUM(output_tokens) AS output_tokens, SUM(emails_sent) AS emails_sent FROM usage GROUP BY period ORDER BY period DESC LIMIT 12`)
     .map((x) => ({ ...x, cost: Math.round(((x.input_tokens * inP) + (x.output_tokens * outP)) / 1e4) / 100 }));
@@ -400,6 +431,30 @@ r.get('/referrals', (req, res) => {
 r.post('/referrals/:userId/mark-paid', (req, res) => {
   run('UPDATE payments SET commission_paid = 1 WHERE referral_user_id = ? AND status = ?', int(req.params.userId), 'paid');
   audit(req, 'commission_paid', `user:${req.params.userId}`);
+  res.json({ ok: true });
+});
+
+// ---------------- Security ----------------
+r.get('/security', (req, res) => {
+  res.json({
+    keyVersion: keyVersion(),
+    events: all(`SELECT e.*, u.email FROM security_events e LEFT JOIN users u ON u.id = e.user_id ORDER BY e.id DESC LIMIT 300`),
+    failedLogins24h: one(`SELECT COUNT(*) AS n FROM security_events WHERE type IN ('login_failed','2fa_failed') AND created_at > datetime('now','-1 day')`).n,
+    lockedAccounts: all(`SELECT id, email, locked_until, failed_logins FROM users WHERE locked_until > datetime('now')`),
+    activeSessions: one(`SELECT COUNT(*) AS n FROM sessions WHERE revoked_at IS NULL AND expires_at > datetime('now')`).n,
+    adminsWithout2fa: all('SELECT id, email FROM users WHERE is_admin = 1 AND totp_enabled = 0'),
+    unencrypted: one(`SELECT (SELECT COUNT(*) FROM messages WHERE text_body NOT LIKE 'e3.%' AND text_body != '' AND text_body NOT LIKE '[deleted%') AS messages,
+      (SELECT COUNT(*) FROM mailboxes WHERE password_enc != '' AND password_enc NOT LIKE 'e3.%') AS mailboxes`),
+  });
+});
+r.post('/security/reencrypt', (req, res) => {
+  const counts = migrateEncryption();
+  audit(req, 'reencrypt_all', null, counts);
+  res.json(counts);
+});
+r.post('/users/:id/unlock', (req, res) => {
+  run('UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?', int(req.params.id));
+  audit(req, 'user_unlocked', `user:${req.params.id}`);
   res.json({ ok: true });
 });
 

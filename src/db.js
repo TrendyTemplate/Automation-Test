@@ -333,3 +333,85 @@ export function audit(req, action, target, detail) {
     req?.user?.id ?? null, req?.user?.email ?? 'system', action, target == null ? null : String(target),
     detail == null ? null : (typeof detail === 'string' ? detail : JSON.stringify(detail)), req?.ip ?? null);
 }
+
+// ---------------------------------------------------------------------------
+// Migrations (v3): security, trust & team features.
+// ---------------------------------------------------------------------------
+for (const [col, def] of [
+  ['failed_logins', 'INTEGER NOT NULL DEFAULT 0'], ['locked_until', 'TEXT'], ['password_changed_at', 'TEXT'],
+  ['ui_theme', "TEXT NOT NULL DEFAULT 'system'"], ['ui_language', "TEXT NOT NULL DEFAULT 'en'"],
+]) addColumn('users', col, def);
+
+for (const [col, def] of [
+  ['dek_enc', 'TEXT'], ['support_access_until', 'TEXT'],
+  ['sensitive_topics', "TEXT NOT NULL DEFAULT 'refund, chargeback, cancel subscription, lawyer, legal action, lawsuit, medical, emergency'"],
+  ['never_say', 'TEXT'], ['allowed_link_domains', 'TEXT'], ['hourly_rate', 'REAL NOT NULL DEFAULT 30'],
+  ['ooo_until', 'TEXT'], ['ooo_message', 'TEXT'], ['sla_json', "TEXT NOT NULL DEFAULT '{\"urgent\":60,\"high\":240,\"normal\":1440}'"],
+  ['webhook_secret', 'TEXT'], ['read_attachments', 'INTEGER NOT NULL DEFAULT 1'], ['owner_language', "TEXT NOT NULL DEFAULT 'en'"],
+  ['last_sla_alert_at', 'TEXT'],
+]) addColumn('workspaces', col, def);
+
+for (const [col, def] of [
+  ['auto_categories', 'TEXT'], // JSON array; null = all categories may be auto-sent ("earned autopilot")
+  ['revoked_at', 'TEXT'],
+]) addColumn('mailboxes', col, def);
+
+for (const [col, def] of [
+  ['assigned_to', 'INTEGER'], ['snoozed_until', 'TEXT'], ['injection_flag', 'INTEGER NOT NULL DEFAULT 0'],
+  ['attachments_json', 'TEXT'], ['list_unsubscribe', 'TEXT'], ['list_unsubscribe_post', 'INTEGER NOT NULL DEFAULT 0'],
+  ['opt_out', 'INTEGER NOT NULL DEFAULT 0'], ['facts_used', 'TEXT'], ['sla_due_at', 'TEXT'], ['done', 'INTEGER NOT NULL DEFAULT 0'],
+]) addColumn('messages', col, def);
+
+for (const [col, def] of [
+  ['guard_json', 'TEXT'], ['edited', 'INTEGER'],
+]) addColumn('replies', col, def);
+
+addColumn('contacts', 'do_not_contact', 'INTEGER NOT NULL DEFAULT 0');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,                -- random; only its hash is stored
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ip TEXT, user_agent TEXT, impersonator_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')), last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL, revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS security_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER, workspace_id INTEGER, type TEXT NOT NULL, detail TEXT, ip TEXT, user_agent TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_secev_user ON security_events(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_secev_ws ON security_events(workspace_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS message_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS ai_log (            -- transparency: every time an email is shown to the AI
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  message_id INTEGER, purpose TEXT NOT NULL, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
+  redactions INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ailog_ws ON ai_log(workspace_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_snooze ON messages(workspace_id, snoozed_until);
+`);
+
+addColumn('plans', 'ai_calls', 'INTEGER');
+run('UPDATE plans SET ai_calls = ai_replies * 3 WHERE ai_calls IS NULL');
+
+export function securityEvent(req, type, detail, { userId, workspaceId } = {}) {
+  run('INSERT INTO security_events (user_id, workspace_id, type, detail, ip, user_agent) VALUES (?,?,?,?,?,?)',
+    userId ?? req?.user?.id ?? null, workspaceId ?? req?.workspace?.id ?? null, type,
+    detail == null ? null : (typeof detail === 'string' ? detail : JSON.stringify(detail)),
+    req?.ip ?? null, String(req?.headers?.['user-agent'] || '').slice(0, 200) || null);
+}
+addColumn('messages', 'reply_to_email', 'TEXT');
+addColumn('messages', 'guard_flags', 'TEXT');

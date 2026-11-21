@@ -1,32 +1,52 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
-import { decrypt } from '../crypto.js';
 import { appName } from '../settings.js';
 import { mailboxAccessToken } from './oauth.js';
+import { open } from '../vault.js';
+import { resolveMailHost } from './net.js';
 
 const isOAuth = (mb) => String(mb.auth_type || '').startsWith('oauth_');
 
-// Note: these are async because OAuth mailboxes may need a token refresh first.
+function mailboxPassword(mb, password) {
+  if (password != null) return password;
+  const p = mb.password_enc ? open(mb.workspace_id, 'mailboxes.password', mb.password_enc) : '';
+  if (!p || p.startsWith('[unreadable')) throw new Error('Mailbox password missing — update it in Email accounts');
+  return p;
+}
+
+// Connections are pinned to the validated public IP (SSRF / DNS-rebinding safe) while TLS still verifies
+// the real hostname. Certificates are always verified (never rejectUnauthorized:false).
 async function imapClient(mb, password) {
   const auth = isOAuth(mb)
     ? { user: mb.username, accessToken: await mailboxAccessToken(mb) }
-    : { user: mb.username, pass: password ?? decrypt(mb.password_enc) };
+    : { user: mb.username, pass: mailboxPassword(mb, password) };
+  const { ip, servername } = await resolveMailHost(mb.imap_host, mb.imap_port);
   return new ImapFlow({
-    host: mb.imap_host, port: mb.imap_port, secure: Boolean(mb.imap_secure),
-    auth, logger: false, socketTimeout: 60_000,
+    host: ip, port: mb.imap_port, secure: Boolean(mb.imap_secure), servername,
+    tls: { servername, minVersion: 'TLSv1.2' }, auth, logger: false, socketTimeout: 60_000,
+    disableAutoIdle: true,
   });
 }
 
 async function smtpTransport(mb, password) {
   const auth = isOAuth(mb)
     ? { type: 'OAuth2', user: mb.username, accessToken: await mailboxAccessToken(mb) }
-    : { user: mb.username, pass: password ?? decrypt(mb.password_enc) };
+    : { user: mb.username, pass: mailboxPassword(mb, password) };
+  const { ip, servername } = await resolveMailHost(mb.smtp_host, mb.smtp_port);
   return nodemailer.createTransport({
-    host: mb.smtp_host, port: mb.smtp_port, secure: Boolean(mb.smtp_secure),
+    host: ip, port: mb.smtp_port, secure: Boolean(mb.smtp_secure), name: 'mailpilot',
+    tls: { servername, minVersion: 'TLSv1.2' }, requireTLS: !mb.smtp_secure && Number(mb.smtp_port) === 587,
     auth, connectionTimeout: 20_000,
   });
 }
+
+const htmlToText = (html) => String(html || '').replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ')
+  .replace(/<br\s*\/?>|<\/(p|div|li|tr|h\d)>/gi, '\n').replace(/<[^>]+>/g, ' ')
+  .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+  .replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n\n').trim();
+
+const AI_READABLE = /^(application\/pdf|text\/(plain|csv)|image\/(png|jpeg|gif|webp))$/;
 
 /** Verify IMAP + SMTP credentials before saving a mailbox. Throws with a readable message. */
 export async function testConnection(mb, password) {
@@ -57,28 +77,42 @@ export async function fetchNewMessages(mb, { initialCount = 20, maxBatch = 50 } 
   const out = [];
   let lastUid = mb.last_uid;
   let uidValidity;
+  const connectedAt = mb.created_at ? new Date(`${String(mb.created_at).replace(' ', 'T')}Z`) : new Date();
   try {
     const lock = await imap.getMailboxLock('INBOX');
     try {
       const status = imap.mailbox;
       uidValidity = String(status.uidValidity);
-      if (mb.uid_validity && mb.uid_validity !== uidValidity) lastUid = 0; // mailbox was rebuilt server-side
-      const isFirstSync = lastUid === 0;
+      // First sync = never synced before (no UIDVALIDITY stored) or the server rebuilt the mailbox.
+      const isFirstSync = !mb.uid_validity || mb.uid_validity !== uidValidity;
+      if (isFirstSync) lastUid = 0;
       let range;
       if (isFirstSync) {
         const uids = (await imap.search({ all: true }, { uid: true })) || [];
         const recent = uids.slice(-initialCount);
-        if (!recent.length) return { messages: [], lastUid: 0, uidValidity, firstSync: true };
+        // Remember where "now" is even for an empty mailbox, so the next email is treated as new.
+        const nowUid = Math.max(0, ...uids, Number(status.uidNext || 1) - 1);
+        if (!recent.length) return { messages: [], lastUid: nowUid, uidValidity, firstSync: true };
         range = recent.join(',');
+        lastUid = nowUid;
       } else {
         range = `${lastUid + 1}:*`;
       }
       for await (const m of imap.fetch(range, { uid: true, source: true, internalDate: true }, { uid: true })) {
-        if (m.uid <= mb.last_uid && !isFirstSync) continue; // `N:*` returns the last message even when none are new
+        if (!isFirstSync && m.uid <= mb.last_uid) continue; // `N:*` returns the last message even when none are new
         if (out.length >= maxBatch) break;
         const parsed = await simpleParser(m.source);
         const headers = {};
         for (const [k, v] of parsed.headers) headers[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        // mailparser exposes List-Unsubscribe as headers.get('list').unsubscribe = { url?, mail? }
+        const unsub = parsed.headers.get('list')?.unsubscribe;
+        const unsubUrl = unsub ? ((unsub.url && /^https:/i.test(unsub.url) ? unsub.url : null) || (unsub.mail ? `mailto:${unsub.mail}` : null)) : null;
+        const unsubPost = (parsed.headerLines || []).some((h) => h.key === 'list-unsubscribe-post' && /one-click/i.test(h.line));
+        const attachments = (parsed.attachments || []).filter((a) => a.contentDisposition !== 'inline' || a.contentType === 'application/pdf').slice(0, 10).map((a) => ({
+          filename: String(a.filename || 'attachment').slice(0, 150), contentType: a.contentType, size: a.size,
+          // Content is kept in memory only for this processing run (never stored), and only for small, AI-readable files.
+          content: AI_READABLE.test(a.contentType) && a.size <= 5_000_000 ? a.content : null,
+        }));
         out.push({
           uid: m.uid,
           message_id: parsed.messageId || `uid-${m.uid}@${mb.email}`,
@@ -89,10 +123,14 @@ export async function fetchNewMessages(mb, { initialCount = 20, maxBatch = 50 } 
           reply_to: (parsed.replyTo?.value?.[0]?.address || '').toLowerCase() || null,
           to_email: parsed.to?.value?.map((a) => a.address).join(', ') || '',
           subject: parsed.subject || '',
-          text_body: parsed.text || (parsed.html ? String(parsed.html).replace(/<[^>]+>/g, ' ') : ''),
+          text_body: (parsed.text || htmlToText(parsed.html)).slice(0, 200_000),
+          attachments,
+          list_unsubscribe: unsubUrl ? String(unsubUrl).slice(0, 500) : null,
+          list_unsubscribe_post: unsubPost,
           received_at: (parsed.date || m.internalDate || new Date()).toISOString(),
           headers,
-          firstSync: isFirstSync,
+          // History = mail that was already there before the account was connected (never auto-answered).
+          firstSync: isFirstSync && (m.internalDate || parsed.date || new Date()) < connectedAt,
         });
         lastUid = Math.max(lastUid, m.uid);
       }

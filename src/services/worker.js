@@ -4,7 +4,8 @@ import { effectivePlan } from '../plans.js';
 import { fetchNewMessages } from './mail.js';
 import { storeMessage, processMessage, sendStoredReply } from './processor.js';
 import { aiEnabled, writeFollowUp, writeBriefing } from './ai.js';
-import { sendSystemEmail } from './notify.js';
+import { sendSystemEmail, sendTelegram, sendSlack } from './notify.js';
+import { open } from '../vault.js';
 import { appUrl, appName } from '../settings.js';
 
 const busy = new Set();
@@ -55,17 +56,20 @@ export async function createFollowUps() {
       AND m.category IN ('sales_inquiry','partnership','meeting_request')
       AND r.sent_at < datetime('now', '-' || w.followup_days || ' days')
       AND r.sent_at > datetime('now', '-30 days')
-      AND NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.workspace_id = m.workspace_id AND m2.from_email = m.from_email AND m2.received_at > r.sent_at)
+      AND NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.workspace_id = m.workspace_id AND m2.from_email = m.from_email AND m2.id != m.id AND datetime(m2.received_at) > datetime(r.sent_at))
       AND NOT EXISTS (SELECT 1 FROM replies f WHERE f.message_id = m.id AND f.kind = 'followup')
+      AND NOT EXISTS (SELECT 1 FROM contacts ct WHERE ct.id = m.contact_id AND (ct.do_not_contact = 1 OR ct.blocked = 1))
     LIMIT 20`);
   for (const c of candidates) {
     const ws = one('SELECT * FROM workspaces WHERE id = ?', c.workspace_id);
     if (effectivePlan(ws).key === 'expired') continue;
     try {
-      const fu = await writeFollowUp(ws, c, { body: c.body }, c.followup_days);
+      const original = { ...c, text_body: open(ws.id, 'messages.text_body', c.text_body) };
+      const fu = await writeFollowUp(ws, original, { body: open(ws.id, 'replies.body', c.body) }, c.followup_days);
+      const { seal } = await import('../vault.js');
       run(`INSERT INTO replies (workspace_id, message_id, subject, body, source, status, kind, error, ai_original)
-        VALUES (?,?,?,?, 'ai', 'pending', 'followup', ?, ?)`, ws.id, c.id, fu.subject, fu.body,
-      `Follow-up: no answer for ${c.followup_days} day(s)`, fu.body);
+        VALUES (?,?,?,?, 'ai', 'pending', 'followup', ?, ?)`, ws.id, c.id, fu.subject, seal(ws.id, 'replies.body', fu.body),
+      `Follow-up: no answer for ${c.followup_days} day(s)`, seal(ws.id, 'replies.ai_original', fu.body));
       logActivity(ws.id, 'followup_drafted', { message: c.id, to: c.from_email, subject: c.subject });
     } catch (e) { console.error('[followup]', e.message); }
   }
@@ -85,10 +89,10 @@ export async function sendDigests(now = new Date()) {
     run('UPDATE workspaces SET last_digest_on = ? WHERE id = ?', today, ws.id);
     if (effectivePlan(ws).key === 'expired') continue;
     const counts = one(`SELECT COUNT(*) AS received, SUM(status='replied') AS replied, SUM(status='drafted') AS awaiting,
-        SUM(priority='urgent') AS urgent FROM messages WHERE workspace_id = ? AND received_at > datetime('now','-1 day')`, ws.id);
+        SUM(priority='urgent') AS urgent FROM messages WHERE workspace_id = ? AND datetime(received_at) > datetime('now','-1 day')`, ws.id);
     if (!counts.received) continue;
     const important = all(`SELECT id, from_name, from_email, subject, summary, priority, category, status, lead_score FROM messages
-        WHERE workspace_id = ? AND received_at > datetime('now','-1 day') AND status != 'ignored'
+        WHERE workspace_id = ? AND datetime(received_at) > datetime('now','-1 day') AND status != 'ignored'
         ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, lead_score DESC LIMIT 15`, ws.id);
     let text;
     try {
@@ -100,11 +104,29 @@ export async function sendDigests(now = new Date()) {
   }
 }
 
+/** SLA: alert the team (Telegram/Slack + activity) about emails past their response-time target. */
+export async function checkSla() {
+  const rows = all(`SELECT m.id, m.workspace_id, m.subject, m.from_email, m.priority FROM messages m
+    WHERE m.sla_due_at IS NOT NULL AND m.sla_due_at < ? AND m.done = 0 AND m.status IN ('triaged','drafted','error')
+      AND (m.snoozed_until IS NULL OR m.snoozed_until < ?) LIMIT 200`, new Date().toISOString(), new Date().toISOString());
+  const byWs = new Map();
+  for (const r of rows) byWs.set(r.workspace_id, [...(byWs.get(r.workspace_id) || []), r]);
+  for (const [wsId, list] of byWs) {
+    const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId);
+    if (ws.last_sla_alert_at && new Date(ws.last_sla_alert_at) > new Date(Date.now() - 3600_000)) continue; // max hourly
+    run('UPDATE workspaces SET last_sla_alert_at = ? WHERE id = ?', new Date().toISOString(), wsId);
+    logActivity(wsId, 'sla_breach', { count: list.length, subject: list[0].subject });
+    const text = `⏰ ${list.length} email(s) are past your response-time target.\nOldest: ${list[0].subject} (${list[0].from_email})\n${appUrl()}/app#inbox?view=overdue`;
+    await Promise.allSettled([sendTelegram(ws.telegram_chat_id, text), sendSlack(ws.slack_webhook, text)]);
+  }
+  return rows.length;
+}
+
 /** Data retention: wipe email bodies older than the workspace's retention window (privacy / GDPR). */
 export function purgeOldData() {
   for (const ws of all('SELECT id, retention_days FROM workspaces WHERE retention_days > 0')) {
     run(`UPDATE messages SET text_body = '[deleted by retention policy]', headers_json = NULL
-         WHERE workspace_id = ? AND received_at < datetime('now', ?) AND text_body != '[deleted by retention policy]'`, ws.id, `-${ws.retention_days} days`);
+         WHERE workspace_id = ? AND datetime(received_at) < datetime('now', ?) AND text_body != '[deleted by retention policy]'`, ws.id, `-${ws.retention_days} days`);
   }
   run(`DELETE FROM sent_log WHERE sent_at < datetime('now','-7 days')`);
   run(`DELETE FROM tokens WHERE expires_at < datetime('now')`);
@@ -124,6 +146,7 @@ async function tick() {
     purgeOldData();
   }
   await sendDigests().catch((e) => console.error('[digest]', e.message));
+  await checkSla().catch((e) => console.error('[sla]', e.message));
   workerState.lastTickAt = new Date().toISOString();
   workerState.lastTickMs = Date.now() - t0;
 }

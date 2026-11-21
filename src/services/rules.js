@@ -5,12 +5,14 @@
 //              | { type: "forward", to }
 //              | { type: "mark_read" }
 //              | { type: "ignore" }
-//              | { type: "webhook", url }]
+//              | { type: "webhook", url }
+//              | { type: "assign", user_id }
+//              | { type: "snooze", hours }]
 
 export const FIELDS = ['from_email', 'from_domain', 'from_name', 'to_email', 'subject', 'body', 'category',
   'priority', 'sentiment', 'language', 'mailbox_id'];
 export const OPS = ['contains', 'not_contains', 'equals', 'not_equals', 'starts_with', 'ends_with', 'regex'];
-export const ACTIONS = ['ai_reply', 'template_reply', 'forward', 'mark_read', 'ignore', 'webhook'];
+export const ACTIONS = ['ai_reply', 'template_reply', 'forward', 'mark_read', 'ignore', 'webhook', 'assign', 'snooze'];
 
 function fieldValue(msg, field) {
   switch (field) {
@@ -57,6 +59,8 @@ export function validateRule({ name, conditions, actions }) {
     if (a.type === 'forward' && !/^[^@\s]+@[^@\s]+$/.test(a.to || '')) return 'forward action needs a valid "to" email';
     if (a.type === 'webhook' && !/^https:\/\//.test(a.url || '')) return 'webhook action needs an https:// url';
     if (a.type === 'template_reply' && !a.template_id) return 'template_reply action needs template_id';
+    if (a.type === 'assign' && !Number.isInteger(Number(a.user_id))) return 'assign action needs a teammate';
+    if (a.type === 'snooze' && !(Number(a.hours) > 0)) return 'snooze action needs hours';
   }
   return null;
 }

@@ -27,7 +27,7 @@ process.env.DB_PATH = ':memory:';
 
 const { run, one, getUsage } = await import('../src/db.js');
 const { storeMessage, processMessage } = await import('../src/services/processor.js');
-const { encrypt } = await import('../src/crypto.js');
+const { seal, open } = await import('../src/vault.js');
 
 let ws; let mb;
 before(() => {
@@ -35,8 +35,8 @@ before(() => {
   ws = Number(run(`INSERT INTO workspaces (name, owner_id, plan, subscription_status, billing_interval, business_name, business_description, privacy_shield, reply_delay_min, reply_delay_max)
     VALUES ('Shop', ?, 'pro', 'active', 'monthly', 'Shoe Shop', 'We sell shoes', 1, 0, 0)`, u).lastInsertRowid);
   run(`INSERT INTO knowledge (workspace_id, title, content) VALUES (?, 'Shipping', 'Ships in 3 days')`, ws);
-  run(`INSERT INTO corrections (workspace_id, email_summary, ai_draft, final_text) VALUES (?, 'q', 'Dear customer', 'Hey there')`, ws);
-  const id = Number(run(`INSERT INTO mailboxes (workspace_id, email, imap_host, smtp_host, username, password_enc, mode) VALUES (?, 'shop@x.com', 'i', 's', 'shop@x.com', ?, 'draft')`, ws, encrypt('pw')).lastInsertRowid);
+  run(`INSERT INTO corrections (workspace_id, email_summary, ai_draft, final_text) VALUES (?, 'q', ?, ?)`, ws, seal(ws, 'corrections.ai_draft', 'Dear customer'), seal(ws, 'corrections.final_text', 'Hey there'));
+  const id = Number(run(`INSERT INTO mailboxes (workspace_id, email, imap_host, smtp_host, username, password_enc, mode) VALUES (?, 'shop@x.com', 'i', 's', 'shop@x.com', ?, 'draft')`, ws, seal(ws, 'mailboxes.password', 'pw')).lastInsertRowid);
   mb = one('SELECT * FROM mailboxes WHERE id = ?', id);
 });
 after(() => fake.close());
@@ -45,6 +45,7 @@ const triage = (over = {}) => ({
   category: 'sales_inquiry', priority: 'high', sentiment: 'positive', language: 'en', summary: 'Wants 50 pairs',
   reasoning: 'Bulk purchase request', intent: 'bulk order quote', lead_score: 88, is_phishing: false,
   extracted: { name: 'Ann', company: 'Ann Co', phone: '+1 555', budget: '$2k', deadline: 'June', order_number: '' },
+  facts_used: ['Shipping'], unsupported_claims: false, wants_opt_out: false,
   needs_reply: true, requires_human: false, requires_human_reason: '', confidence: 0.93,
   reply_subject: 'Re: Bulk order', reply_body: 'Hi Ann, yes we can ship 50 pairs in 3 days.', ...over,
 });
@@ -76,7 +77,7 @@ test('AI request shape: structured output, fallback, cached system prompt with K
   assert.equal(JSON.parse(m.extracted_json).company, 'Ann Co');
   const reply = one('SELECT * FROM replies WHERE message_id = ?', id);
   assert.equal(reply.status, 'pending'); // mailbox in draft mode
-  assert.equal(reply.ai_original, reply.body);
+  assert.equal(open(ws, 'replies.ai_original', reply.ai_original), open(ws, 'replies.body', reply.body));
   const contact = one('SELECT * FROM contacts WHERE id = ?', m.contact_id);
   assert.equal(contact.company, 'Ann Co');
   assert.equal(contact.lead_score, 88);
@@ -84,6 +85,8 @@ test('AI request shape: structured output, fallback, cached system prompt with K
   assert.equal(usage.ai_calls, 1);
   assert.equal(usage.ai_replies, 1);
   assert.equal(usage.input_tokens, 2000);
+  assert.equal(one('SELECT COUNT(*) AS n FROM ai_log WHERE workspace_id = ?', ws).n, 1, 'AI access is logged for transparency');
+  assert.ok(one('SELECT redactions FROM ai_log WHERE workspace_id = ?', ws).redactions >= 1);
 });
 
 test('autopilot guardrails: requires_human and low confidence hold the reply; phishing is never answered', async () => {

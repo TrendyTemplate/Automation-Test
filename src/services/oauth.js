@@ -2,8 +2,8 @@
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 import { getSetting, getBool, appUrl } from '../settings.js';
-import { encrypt, decrypt } from '../crypto.js';
 import { run } from '../db.js';
+import { seal, open } from '../vault.js';
 
 export const PROVIDERS = {
   google: {
@@ -88,8 +88,8 @@ export async function exchangeCode(provider, code) {
 /** Get a valid access token for an OAuth mailbox, refreshing (and persisting) when needed. */
 export async function mailboxAccessToken(mb) {
   const provider = mb.auth_type === 'oauth_google' ? 'google' : 'microsoft';
-  if (mb.oauth_access_enc && mb.oauth_expires_at && mb.oauth_expires_at > Date.now() + 60_000) return decrypt(mb.oauth_access_enc);
-  const refresh = decrypt(mb.oauth_refresh_enc);
+  if (mb.oauth_access_enc && mb.oauth_expires_at && mb.oauth_expires_at > Date.now() + 60_000) return open(mb.workspace_id, 'mailboxes.oauth_access', mb.oauth_access_enc);
+  const refresh = mb.oauth_refresh_enc ? open(mb.workspace_id, 'mailboxes.oauth_refresh', mb.oauth_refresh_enc) : null;
   if (!refresh) throw new Error('Mailbox authorization expired — please reconnect this account');
   let t;
   try {
@@ -98,9 +98,27 @@ export async function mailboxAccessToken(mb) {
     throw new Error(`Authorization expired or revoked — reconnect this account (${e.message})`);
   }
   const expires = Date.now() + (t.expires_in || 3600) * 1000;
+  // Providers may rotate refresh tokens: always keep the newest one.
+  const accessEnc = seal(mb.workspace_id, 'mailboxes.oauth_access', t.access_token);
   run('UPDATE mailboxes SET oauth_access_enc=?, oauth_expires_at=?, oauth_refresh_enc=COALESCE(?, oauth_refresh_enc) WHERE id=?',
-    encrypt(t.access_token), expires, t.refresh_token ? encrypt(t.refresh_token) : null, mb.id);
-  mb.oauth_access_enc = encrypt(t.access_token);
+    accessEnc, expires, t.refresh_token ? seal(mb.workspace_id, 'mailboxes.oauth_refresh', t.refresh_token) : null, mb.id);
+  mb.oauth_access_enc = accessEnc;
   mb.oauth_expires_at = expires;
   return t.access_token;
+}
+
+/**
+ * Revoke our access at the provider when a mailbox is removed (least privilege: no dormant tokens left behind).
+ * Google supports token revocation; Microsoft grants are removed by the user (myapps.microsoft.com), so we just
+ * discard the tokens.
+ */
+export async function revokeMailboxGrant(mb) {
+  if (mb.auth_type !== 'oauth_google' || !mb.oauth_refresh_enc) return false;
+  const token = open(mb.workspace_id, 'mailboxes.oauth_refresh', mb.oauth_refresh_enc);
+  if (!token || token.startsWith('[unreadable')) return false;
+  const res = await fetch('https://oauth2.googleapis.com/revoke', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token }), signal: AbortSignal.timeout(10_000),
+  });
+  return res.ok;
 }

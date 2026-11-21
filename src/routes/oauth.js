@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { one, run, logActivity } from '../db.js';
-import { issueToken, requireAuth, requireRole } from '../auth.js';
+import { requireAuth, requireRole } from '../auth.js';
 import { buildAuthUrl, verifyState, exchangeCode, oauthAvailability, PROVIDERS } from '../services/oauth.js';
-import { encrypt } from '../crypto.js';
+import { seal } from '../vault.js';
+import { securityEvent } from '../db.js';
 import { effectivePlan } from '../plans.js';
 import { getBool } from '../settings.js';
-import { createAccount } from './auth.js';
+import { createAccount, finishLogin } from './auth.js';
 import { syncMailbox } from '../services/worker.js';
 
 const r = Router();
@@ -55,8 +56,14 @@ r.get('/:provider/callback', async (req, res) => {
         run(`UPDATE users SET ${idCol} = ?, email_verified = 1, avatar_url = COALESCE(avatar_url, ?) WHERE id = ?`, id.sub, id.picture, user.id);
       }
       if (user.suspended) return res.redirect('/login?error=suspended');
-      run(`UPDATE users SET last_login_at = datetime('now'), last_login_ip = ? WHERE id = ?`, req.ip, user.id);
-      issueToken(res, user);
+      if (user.totp_enabled) {
+        // OAuth proves the identity at the provider, but 2FA on our side still applies.
+        const jwt = (await import('jsonwebtoken')).default;
+        const { config } = await import('../config.js');
+        const pending = jwt.sign({ uid: user.id, pending2fa: true }, config.jwtSecret, { expiresIn: '10m' });
+        return res.redirect(`/login?twofa=${encodeURIComponent(pending)}`);
+      }
+      finishLogin(req, res, user, provider);
       return res.redirect('/app');
     }
 
@@ -66,17 +73,22 @@ r.get('/:provider/callback', async (req, res) => {
     if (!id.refreshToken) return res.redirect('/app#mailboxes?error=no_refresh_token');
     const p = PROVIDERS[provider];
     const existing = one('SELECT id FROM mailboxes WHERE workspace_id = ? AND email = ?', state.wsId, id.email);
+    const sealTokens = (wsId) => [seal(wsId, 'mailboxes.oauth_refresh', id.refreshToken), seal(wsId, 'mailboxes.oauth_access', id.accessToken)];
     if (existing) {
-      run(`UPDATE mailboxes SET auth_type=?, oauth_refresh_enc=?, oauth_access_enc=?, oauth_expires_at=?, last_error=NULL, enabled=1 WHERE id=?`,
-        `oauth_${provider}`, encrypt(id.refreshToken), encrypt(id.accessToken), id.expiresAt, existing.id);
+      const [refEnc, accEnc] = sealTokens(state.wsId);
+      run(`UPDATE mailboxes SET auth_type=?, oauth_refresh_enc=?, oauth_access_enc=?, oauth_expires_at=?, password_enc='', last_error=NULL, enabled=1, revoked_at=NULL WHERE id=?`,
+        `oauth_${provider}`, refEnc, accEnc, id.expiresAt, existing.id);
+      securityEvent(req, 'mailbox_reconnected', { email: id.email, via: provider }, { userId: state.uid, workspaceId: state.wsId });
       return res.redirect('/app#mailboxes?connected=1');
     }
+    const [refEnc, accEnc] = sealTokens(state.wsId);
     const ins = run(`INSERT INTO mailboxes (workspace_id, label, email, provider, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure,
         username, password_enc, mode, auth_type, oauth_refresh_enc, oauth_access_enc, oauth_expires_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, state.wsId, id.name || '', id.email, provider === 'google' ? 'gmail' : 'outlook',
     p.imap.host, p.imap.port, p.imap.secure ? 1 : 0, p.smtp.host, p.smtp.port, p.smtp.secure ? 1 : 0,
-    id.email, encrypt(''), state.mode || 'draft', `oauth_${provider}`, encrypt(id.refreshToken), encrypt(id.accessToken), id.expiresAt);
+    id.email, '', state.mode || 'draft', `oauth_${provider}`, refEnc, accEnc, id.expiresAt);
     logActivity(state.wsId, 'mailbox_added', { email: id.email, via: provider });
+    securityEvent(req, 'mailbox_connected', { email: id.email, via: provider }, { userId: state.uid, workspaceId: state.wsId });
     syncMailbox(Number(ins.lastInsertRowid)).catch(() => {});
     return res.redirect('/app#mailboxes?connected=1');
   } catch (e) {

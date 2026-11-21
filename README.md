@@ -2,7 +2,8 @@
 
 Multi-mailbox email automation SaaS. Customers connect all their email accounts (Gmail, Outlook, Yahoo, iCloud, Zoho, Yandex, any custom-domain IMAP/SMTP), and the AI (Anthropic Claude) reads, classifies, prioritizes and replies automatically — or drafts replies for one-click approval.
 
-> 🇧🇩 বাংলা: **[লঞ্চ চেকলিস্ট](docs/LAUNCH_CHECKLIST_BN.md)** · **[ব্যবসায়িক গাইড ও প্রতিযোগী বিশ্লেষণ](docs/BUSINESS_GUIDE_BN.md)**
+> 🇧🇩 বাংলা: **[লঞ্চ চেকলিস্ট](docs/LAUNCH_CHECKLIST_BN.md)** · **[ব্যবসায়িক গাইড ও প্রতিযোগী বিশ্লেষণ](docs/BUSINESS_GUIDE_BN.md)** · **[গবেষণা: কেন অন্যরা ব্যর্থ হয়েছে](docs/RESEARCH_BN.md)**
+> 🔒 **[Security architecture](docs/SECURITY.md)**
 
 ## What makes it different
 - **Any provider**: Gmail, Outlook/M365, Yahoo, iCloud, Zoho, Yandex and any IMAP/cPanel/custom domain — plus one-click Google & Microsoft OAuth.
@@ -13,6 +14,10 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 - **Lead radar & mini-CRM**: lead score, intent, extracted company/phone/budget/deadline, automatic follow-ups for quiet leads.
 - **Morning briefing + Telegram/Slack alerts**, **Privacy Shield** (masks cards/passwords/OTPs before AI), phishing guard, 2FA, retention auto-delete.
 - **Agency workspaces**, REST API with API keys, webhooks, rule recipes, affiliate program, lifetime licenses.
+- **Trust layer**: deterministic outbound guard (invented prices, unapproved links, third-party addresses, secrets, card numbers, "never say"), prompt-injection detection, BEC/look-alike detection, earned autopilot per category, AI accuracy score, AI transparency log, test lab.
+- **Team inbox**: assignment, internal notes with @mentions, collision warnings, SLA targets & breach alerts, snooze, awaiting-reply view, out-of-office mode.
+- **Global**: translate any email, preview replies in your own language, reads PDF/image attachments, one-click unsubscribe (RFC 8058) declutter.
+- **Security**: per-workspace envelope encryption (AES-256-GCM + AAD) for credentials *and* email content, server-side revocable sessions, lockout, 2FA (required for admins), consent-based support access, emergency lockdown, SSRF-proof networking — see [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Features
 
@@ -38,8 +43,8 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 ```bash
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test
-# Optional: explore with demo data (login demo@mailpilot.test / demo12345, platform admin)
+npm test             # 42 tests: unit, API, security attacks, real IMAP/SMTP end-to-end, browser (Playwright)
+# Optional: explore with demo data (login demo@mailpilot.test / Demo-Pass-2026, platform admin)
 DB_PATH=./data/demo.db node scripts/seed-demo.js && DB_PATH=./data/demo.db npm start
 ```
 
@@ -75,7 +80,9 @@ src/
   config.js            env configuration
   db.js                SQLite schema (node:sqlite) + helpers
   plans.js             pricing & limits
-  auth.js              JWT cookie auth, roles
+  auth.js              server-side sessions, roles, lockout, password policy
+  crypto.js            AES-256-GCM primitives, versioned master keys
+  vault.js             per-workspace envelope encryption + migration
   settings.js          admin-editable platform settings (secrets encrypted)
   routes/              auth, oauth, app (inbox, contacts, AI, analytics, …), billing (Stripe), admin
   services/
@@ -84,11 +91,14 @@ src/
     processor.js       pipeline: store → triage → rules → draft/auto-send → side actions
     rules.js           rule matching/validation
     safety.js          automated-sender detection, reply rate-limit, business hours
+    guard.js           deterministic outbound checks, injection / BEC / look-alike / opt-out detection
+    net.js             SSRF-safe fetch (DNS-pinned), mail-host validation
     worker.js          sync loop, scheduled sends, follow-ups, daily briefing, retention purge
     oauth.js           Google/Microsoft OAuth + XOAUTH2 token refresh
     notify.js          system email, Telegram, Slack
     totp.js            2FA (RFC 6238)
-public/                landing page, auth pages, customer app (/app) and admin panel (/admin), vanilla JS
+public/                landing, auth pages, customer app (/app, js/views/*) and admin panel (/admin); vanilla JS ES modules, no build step
+test/                  unit, api, security, e2e-mail (real IMAP+SMTP servers), ui (Playwright), ai-pipeline
 scripts/seed-demo.js   demo data for screenshots and sales demos
 ```
 

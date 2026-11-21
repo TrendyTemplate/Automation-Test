@@ -3,7 +3,7 @@ import { all, one } from './db.js';
 function rowToPlan(r) {
   return {
     key: r.key, name: r.name, description: r.description,
-    mailboxes: r.mailboxes, aiRepliesPerMonth: r.ai_replies, rules: r.rules, teamMembers: r.team_members,
+    mailboxes: r.mailboxes, aiRepliesPerMonth: r.ai_replies, aiCalls: r.ai_calls || r.ai_replies * 3, rules: r.rules, teamMembers: r.team_members,
     autoSend: Boolean(r.auto_send), features: r.features_json ? JSON.parse(r.features_json) : [],
     priceMonthly: r.price_monthly, priceYearly: r.price_yearly, priceOnce: r.price_once,
     stripe: { monthly: r.stripe_price_monthly, yearly: r.stripe_price_yearly, once: r.stripe_price_once },
@@ -14,7 +14,7 @@ function rowToPlan(r) {
 export const getPlan = (key) => { const r = one('SELECT * FROM plans WHERE key = ?', key); return r ? rowToPlan(r) : null; };
 export const allPlans = () => all('SELECT * FROM plans ORDER BY sort, key').map(rowToPlan);
 
-const EXPIRED = { key: 'expired', name: 'Expired', mailboxes: 0, aiRepliesPerMonth: 0, rules: 0, teamMembers: 1, autoSend: false };
+const EXPIRED = { key: 'expired', name: 'Expired', mailboxes: 0, aiRepliesPerMonth: 0, aiCalls: 0, rules: 0, teamMembers: 1, autoSend: false };
 
 /** The plan a workspace is entitled to right now, including admin overrides. */
 export function effectivePlan(ws) {

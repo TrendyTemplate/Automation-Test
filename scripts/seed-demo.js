@@ -1,6 +1,6 @@
 // Fill a database with realistic demo data so you can explore the dashboard and admin panel
 // without connecting a real mailbox. Usage:  DB_PATH=./data/demo.db node scripts/seed-demo.js
-// Log in afterwards with demo@mailpilot.test / demo12345 (platform admin).
+// Log in afterwards with demo@mailpilot.test / Demo-Pass-2026 (platform admin).
 import bcrypt from 'bcryptjs';
 import { run, one } from '../src/db.js';
 import { encrypt } from '../src/crypto.js';
@@ -11,7 +11,7 @@ if (one('SELECT id FROM users WHERE email = ?', email)) {
   process.exit(0);
 }
 const uid = Number(run(`INSERT INTO users (email, name, password_hash, is_admin, email_verified, referral_code) VALUES (?,?,?,1,1,'demo01')`,
-  email, 'Demo Owner', await bcrypt.hash('demo12345', 10)).lastInsertRowid);
+  email, 'Demo Owner', await bcrypt.hash('Demo-Pass-2026', 10)).lastInsertRowid);
 const ws = Number(run(`INSERT INTO workspaces (name, owner_id, business_name, business_description, plan, subscription_status, billing_interval, current_period_end, signature, telegram_chat_id)
   VALUES ('Acme Travel', ?, 'Acme Travel', 'Boutique travel agency selling tour packages to Thailand, Bali and the Maldives.', 'pro', 'active', 'monthly', datetime('now','+20 days'), 'Best regards,\nAcme Travel Team', '12345')`, uid).lastInsertRowid);
 run(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?,?, 'owner')`, ws, uid);
@@ -70,4 +70,4 @@ for (const [e, plan, status, interval, amount, method] of [
   }
 }
 run(`INSERT INTO announcements (message, level) VALUES ('New: the AI now learns your writing style. Try it in AI brain → Writing style!', 'success')`);
-console.log('Demo data created. Log in with demo@mailpilot.test / demo12345');
+console.log('Demo data created. Log in with demo@mailpilot.test / Demo-Pass-2026');
