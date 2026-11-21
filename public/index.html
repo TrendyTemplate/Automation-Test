@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MailPilot AI — All your inboxes, answered by AI</title>
+  <meta name="description" content="Connect every email account in one place. MailPilot AI sorts, prioritizes and replies to your emails automatically — in any language.">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header class="container nav">
+    <a class="logo" href="/">Mail<span>Pilot</span> AI</a>
+    <span class="spacer"></span>
+    <a href="#features">Features</a>
+    <a href="#pricing">Pricing</a>
+    <a href="/login">Log in</a>
+    <a class="btn primary" href="/signup">Start free trial</a>
+  </header>
+
+  <section class="hero container">
+    <h1>All your inboxes.<br>One AI assistant that replies for you.</h1>
+    <p>Connect Gmail, Outlook, Yahoo, Zoho or any business email. MailPilot AI reads every message, sorts it, flags what's urgent, and writes accurate replies in your customer's language — automatically or with your one-click approval.</p>
+    <div class="row" style="justify-content:center">
+      <a class="btn primary" href="/signup">Start your free trial</a>
+      <a class="btn" href="#how">See how it works</a>
+    </div>
+    <p class="hint" style="margin-top:14px">No credit card required · Works with any IMAP email · 40+ languages</p>
+  </section>
+
+  <section class="section" id="features">
+    <div class="container">
+      <h2>Everything you need to never miss an email again</h2>
+      <p class="sub">Built for founders, agencies, support teams and freelancers worldwide.</p>
+      <div class="grid g2">
+        <div class="card feature"><div class="icon">⇄</div><h3>Unified inbox</h3><p>Every email account in one dashboard — personal, support@, sales@, client domains. Search and filter across all of them.</p></div>
+        <div class="card feature"><div class="icon">AI</div><h3>Smart triage</h3><p>Each email is classified (sales, support, billing, complaint, spam…), prioritized, summarized and scored for sentiment.</p></div>
+        <div class="card feature"><div class="icon">↩</div><h3>Automatic replies</h3><p>AI drafts answers using your own knowledge base — prices, policies, FAQs. Auto-send when confident, or queue for approval.</p></div>
+        <div class="card feature"><div class="icon">文</div><h3>Replies in any language</h3><p>Customer writes in Spanish, Arabic or Bangla? The reply goes back in the same language, in your brand's tone.</p></div>
+        <div class="card feature"><div class="icon">⚙</div><h3>Rules & workflows</h3><p>"If a complaint arrives on support@, forward to my manager and draft an apology." No code, unlimited combinations.</p></div>
+        <div class="card feature"><div class="icon">✓</div><h3>Safe by design</h3><p>Never replies to newsletters or robots, prevents reply loops, respects business hours, and holds risky emails for a human.</p></div>
+        <div class="card feature"><div class="icon">⚡</div><h3>Webhooks & templates</h3><p>Send email events to Slack, Zapier, Make or your CRM. Use canned templates with personalization tags.</p></div>
+        <div class="card feature"><div class="icon">▦</div><h3>Analytics</h3><p>See volume, response rates, categories and the hours of work saved every month.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="how">
+    <div class="container">
+      <h2>Up and running in 3 minutes</h2>
+      <div class="grid g4" style="margin-top:24px">
+        <div class="card"><div class="icon">1</div><h3>Connect</h3><p class="hint">Add your email accounts with an app password. We encrypt credentials with AES-256.</p></div>
+        <div class="card"><div class="icon">2</div><h3>Teach</h3><p class="hint">Describe your business and add FAQs, prices and policies to the knowledge base.</p></div>
+        <div class="card"><div class="icon">3</div><h3>Choose a mode</h3><p class="hint">Draft-only (you approve) or Auto-pilot (AI sends when confident).</p></div>
+        <div class="card"><div class="icon">4</div><h3>Relax</h3><p class="hint">Emails get answered in minutes, 24/7. You handle only what really needs you.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="pricing">
+    <div class="container">
+      <h2>Simple pricing</h2>
+      <p class="sub">Start with a free trial. Pay monthly, save ~17% yearly, or buy once for life.</p>
+      <div style="text-align:center;margin-bottom:24px">
+        <div class="toggle" id="interval-toggle">
+          <button data-i="monthly" class="on">Monthly</button><button data-i="yearly">Yearly</button>
+        </div>
+      </div>
+      <div class="grid g4" id="pricing-cards"></div>
+    </div>
+  </section>
+
+  <section class="section faq">
+    <div class="container" style="max-width:780px">
+      <h2>Questions</h2>
+      <details><summary>Which email providers are supported?</summary><p>Any provider that supports IMAP and SMTP: Gmail & Google Workspace, Outlook & Microsoft 365, Yahoo, iCloud, Zoho, Yandex, and custom-domain email from cPanel, Hostinger, GoDaddy, Namecheap and others.</p></details>
+      <details><summary>Will the AI send something wrong to my customers?</summary><p>You decide. In Draft mode nothing is sent without your approval. In Auto-pilot, the AI only sends when it's confident and the answer is grounded in your knowledge base; anything sensitive (refunds, legal, complaints it can't resolve) is held for a human.</p></details>
+      <details><summary>Is my data safe?</summary><p>Mailbox passwords are encrypted at rest with AES-256-GCM. We recommend app passwords, which you can revoke at any time. We don't use your emails to train AI models.</p></details>
+      <details><summary>What does "Lifetime" include?</summary><p>One payment, no subscription. You keep the Lifetime plan's mailboxes and features forever, including a monthly AI reply allowance.</p></details>
+      <details><summary>Can I cancel anytime?</summary><p>Yes. Manage or cancel your subscription from the Billing page with one click.</p></details>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container row">
+      <span>© <span id="year"></span> MailPilot AI</span><span class="spacer"></span>
+      <a href="/terms">Terms</a><a href="/privacy">Privacy</a>
+    </div>
+  </footer>
+  <script src="/js/landing.js"></script>
+</body>
+</html>

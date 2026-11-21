@@ -1,0 +1,31 @@
+{
+  "name": "mailpilot-ai",
+  "version": "1.0.0",
+  "description": "MailPilot AI - multi-mailbox email automation SaaS with AI triage and auto-replies",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.5",
+    "helmet": "^8.3.0",
+    "imapflow": "^2.12.2",
+    "jsonwebtoken": "^9.0.3",
+    "mailparser": "^3.15.0",
+    "nodemailer": "^10.6.1",
+    "stripe": "^23.2.0"
+  }
+}

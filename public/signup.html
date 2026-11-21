@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign up — MailPilot AI</title><link rel="stylesheet" href="/css/style.css"></head>
+<body>
+  <div class="auth container">
+    <a class="logo" href="/">Mail<span>Pilot</span> AI</a>
+    <div class="card" style="margin-top:20px">
+      <h2>Start your free trial</h2>
+      <p class="hint">No credit card required.</p>
+      <form id="auth-form" data-mode="signup">
+        <label>Your name</label><input name="name" required autocomplete="name">
+        <label>Company / brand</label><input name="company" autocomplete="organization">
+        <label>Email</label><input name="email" type="email" required autocomplete="email">
+        <label>Password</label><input name="password" type="password" required minlength="8" autocomplete="new-password">
+        <div class="err-text" id="err"></div>
+        <button class="btn primary" style="width:100%;margin-top:16px;justify-content:center">Create account</button>
+      </form>
+      <p class="hint">Already have an account? <a href="/login">Log in</a></p>
+    </div>
+  </div>
+  <script src="/js/auth.js"></script>
+</body></html>
