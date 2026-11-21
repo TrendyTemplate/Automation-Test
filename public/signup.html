@@ -7,13 +7,15 @@
     <div class="card" style="margin-top:20px">
       <h2>Start your free trial</h2>
       <p class="hint">No credit card required.</p>
+      <div class="oauth-buttons"></div>
       <form id="auth-form" data-mode="signup">
         <label>Your name</label><input name="name" required autocomplete="name">
         <label>Company / brand</label><input name="company" autocomplete="organization">
         <label>Email</label><input name="email" type="email" required autocomplete="email">
         <label>Password</label><input name="password" type="password" required minlength="8" autocomplete="new-password">
         <div class="err-text" id="err"></div>
-        <button class="btn primary" style="width:100%;margin-top:16px;justify-content:center">Create account</button>
+        <button class="btn primary block">Create account</button>
+        <p class="hint">By signing up you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.</p>
       </form>
       <p class="hint">Already have an account? <a href="/login">Log in</a></p>
     </div>

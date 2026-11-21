@@ -2,7 +2,17 @@
 
 Multi-mailbox email automation SaaS. Customers connect all their email accounts (Gmail, Outlook, Yahoo, iCloud, Zoho, Yandex, any custom-domain IMAP/SMTP), and the AI (Anthropic Claude) reads, classifies, prioritizes and replies automatically — or drafts replies for one-click approval.
 
-> বাংলায় ব্যবসায়িক গাইড: [docs/BUSINESS_GUIDE_BN.md](docs/BUSINESS_GUIDE_BN.md)
+> 🇧🇩 বাংলা: **[লঞ্চ চেকলিস্ট](docs/LAUNCH_CHECKLIST_BN.md)** · **[ব্যবসায়িক গাইড ও প্রতিযোগী বিশ্লেষণ](docs/BUSINESS_GUIDE_BN.md)**
+
+## What makes it different
+- **Any provider**: Gmail, Outlook/M365, Yahoo, iCloud, Zoho, Yandex and any IMAP/cPanel/custom domain — plus one-click Google & Microsoft OAuth.
+- **Writes like you, improves itself**: learns your style from your Sent folder and learns from every edit you make to a draft.
+- **Safe autopilot**: confidence threshold, human-like send delay with undo, VIP/legal/refund guardrails, business hours, loop protection.
+- **Explainable**: every classification and every held reply shows *why*.
+- **Ask your inbox**: natural-language questions across all accounts, with links to source emails.
+- **Lead radar & mini-CRM**: lead score, intent, extracted company/phone/budget/deadline, automatic follow-ups for quiet leads.
+- **Morning briefing + Telegram/Slack alerts**, **Privacy Shield** (masks cards/passwords/OTPs before AI), phishing guard, 2FA, retention auto-delete.
+- **Agency workspaces**, REST API with API keys, webhooks, rule recipes, affiliate program, lifetime licenses.
 
 ## Features
 
@@ -19,7 +29,8 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 | Team | Owner / admin / member roles, seat limits per plan |
 | Billing | Stripe Checkout: monthly, yearly, and one-time **Lifetime** license; Stripe customer portal; webhooks keep plans in sync; free trial |
 | Plan limits | Mailboxes, AI replies/month, rules, seats enforced server-side (`src/plans.js`) |
-| Platform admin | Users, workspaces, est. MRR, AI token usage; manually grant plans (for bank transfer / bKash / PayPal customers) |
+| Platform admin (`/admin`) | Overview (MRR/ARR, revenue, sign-ups, AI cost), users (suspend, impersonate, reset password/2FA, email), workspaces (plans, custom limits, trial extension, suspension), payments (Stripe + manual bKash/bank/PayPal with plan activation, CSV), plan & pricing editor, affiliates, mailbox monitor, AI usage & cost, support tickets, announcements & email broadcast, settings (AI, OAuth, SMTP, Stripe, Telegram, maintenance mode), system health, one-click DB backup, audit & activity logs |
+| Accounts | Email/password, Sign in with Google/Microsoft, TOTP 2FA, password reset, email verification, GDPR export & delete |
 | Security | Mailbox passwords AES-256-GCM encrypted, bcrypt passwords, httpOnly JWT cookie, CSRF origin check, rate limits, Helmet CSP, tenant isolation, SSRF-safe webhooks |
 
 ## Quick start (local)
@@ -28,9 +39,11 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
 npm test
+# Optional: explore with demo data (login demo@mailpilot.test / demo12345, platform admin)
+DB_PATH=./data/demo.db node scripts/seed-demo.js && DB_PATH=./data/demo.db npm start
 ```
 
-Without `ANTHROPIC_API_KEY` the app runs with keyword-based sorting only; without `STRIPE_SECRET_KEY` payments are disabled (you can still grant plans from the admin page).
+Without an Anthropic key the app runs with keyword-based sorting only; without Stripe, payments are manual (record them in Admin → Payments). All keys can be entered in **Admin → Settings** instead of `.env`.
 
 ## Production deployment
 
@@ -43,11 +56,13 @@ Works on any VPS (Hetzner, DigitalOcean, AWS Lightsail, Contabo) or Railway/Rend
 
 ### Stripe setup
 1. Create Products in Stripe: Starter, Pro, Business (each with a monthly and a yearly recurring Price) and Lifetime (one-time Price).
-2. Put the Price IDs in `.env` (`STRIPE_PRICE_*`).
-3. Add a webhook endpoint `https://YOUR_DOMAIN/api/billing/webhook` with events `checkout.session.completed`, `customer.subscription.created|updated|deleted`, `invoice.payment_failed`; put its signing secret in `STRIPE_WEBHOOK_SECRET`.
-4. Enable the Customer Portal in Stripe settings. Optionally enable Stripe Tax and set `STRIPE_AUTOMATIC_TAX=true`.
+2. Paste the Price IDs in **Admin → Plans & pricing** (or `.env` `STRIPE_PRICE_*` on first boot).
+3. Add a webhook endpoint `https://YOUR_DOMAIN/api/billing/webhook` with events `checkout.session.completed`, `customer.subscription.created|updated|deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`; put its signing secret in Admin → Settings → Payments.
+4. Enable the Customer Portal in Stripe settings. Optionally enable Stripe Tax.
 
-Displayed prices live in `src/plans.js` — keep them in sync with Stripe.
+### Google & Microsoft OAuth
+See the step-by-step in [docs/LAUNCH_CHECKLIST_BN.md](docs/LAUNCH_CHECKLIST_BN.md#ধাপ-৫). Redirect URIs: `/api/oauth/google/callback`, `/api/oauth/microsoft/callback`.
+"Sign in with Google" uses only basic scopes. One-click **Gmail** mailbox connection uses the restricted `https://mail.google.com/` scope: fine for up to 100 test users; beyond that Google requires restricted-scope verification and an annual CASA security assessment. App passwords work for everyone meanwhile.
 
 ### AI cost control
 Each incoming email that isn't filtered out costs one Claude call (triage + draft in a single structured-output request). The system prompt (business description + knowledge base) is prompt-cached. `AI_EFFORT=low` keeps it cheap; usage and tokens per workspace are tracked in the `usage` table and on the admin page. Plan limits cap AI replies per month. Server-side refusal fallback is enabled.
@@ -61,20 +76,26 @@ src/
   db.js                SQLite schema (node:sqlite) + helpers
   plans.js             pricing & limits
   auth.js              JWT cookie auth, roles
-  routes/              auth, app (inbox, mailboxes, rules, …), billing (Stripe), admin
+  settings.js          admin-editable platform settings (secrets encrypted)
+  routes/              auth, oauth, app (inbox, contacts, AI, analytics, …), billing (Stripe), admin
   services/
     mail.js            IMAP fetch (imapflow), SMTP send (nodemailer), threading headers
     ai.js              Claude triage + reply drafting (structured JSON output)
     processor.js       pipeline: store → triage → rules → draft/auto-send → side actions
     rules.js           rule matching/validation
     safety.js          automated-sender detection, reply rate-limit, business hours
-    worker.js          background sync loop (concurrency 5)
-public/                landing page, signup/login, dashboard SPA (vanilla JS)
+    worker.js          sync loop, scheduled sends, follow-ups, daily briefing, retention purge
+    oauth.js           Google/Microsoft OAuth + XOAUTH2 token refresh
+    notify.js          system email, Telegram, Slack
+    totp.js            2FA (RFC 6238)
+public/                landing page, auth pages, customer app (/app) and admin panel (/admin), vanilla JS
+scripts/seed-demo.js   demo data for screenshots and sales demos
 ```
 
+## REST API
+Create a key in **Alerts & integrations**, then call `/api/v1/...` with `Authorization: Bearer mp_live_…`. Every dashboard endpoint is available (e.g. `GET /api/v1/messages`, `GET /api/v1/contacts`, `POST /api/v1/messages/:id/reply`, `GET /api/v1/analytics`). Admin endpoints are never reachable with API keys.
+
 ## Roadmap ideas
-- Google & Microsoft OAuth login for mailboxes (no app passwords; requires Google/Microsoft app verification)
-- Postgres + separate worker processes / queue (BullMQ) for >1,000 mailboxes
-- IMAP IDLE for instant replies, follow-up reminders, daily digest email, Slack/WhatsApp/Telegram alerts
-- White-label / agency reseller mode, affiliate program, public API keys
-- Localized UI (Bangla, Spanish, Arabic …)
+- Paddle / Lemon Squeezy (merchant of record) checkout
+- Postgres + separate worker processes / queue (BullMQ) for >1,000 mailboxes; IMAP IDLE for instant replies
+- White-label reseller mode, WhatsApp alerts, localized UI (Bangla, Spanish, Arabic …), PWA mobile app

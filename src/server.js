@@ -11,6 +11,10 @@ import authRoutes from './routes/auth.js';
 import appRoutes from './routes/app.js';
 import billingRoutes, { webhookRouter } from './routes/billing.js';
 import adminRoutes from './routes/admin.js';
+import oauthRoutes from './routes/oauth.js';
+import { appUrl, appName } from './settings.js';
+import { aiEnabled } from './services/ai.js';
+import { stripe } from './routes/billing.js';
 import { startWorker } from './services/worker.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -23,7 +27,8 @@ export function createApp() {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-        fontSrc: ["'self'", 'https://fonts.gstatic.com'], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'"],
+        fontSrc: ["'self'", 'https://fonts.gstatic.com'], imgSrc: ["'self'", 'data:', 'https://*.googleusercontent.com'], connectSrc: ["'self'"],
+        formAction: ["'self'"], frameAncestors: ["'none'"],
       },
     },
   }));
@@ -40,9 +45,28 @@ export function createApp() {
     next();
   });
 
+  // Affiliate links: remember ?ref=CODE for 30 days.
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && typeof req.query.ref === 'string' && /^[a-z0-9]{3,20}$/i.test(req.query.ref)) {
+      res.cookie('mp_ref', req.query.ref, { maxAge: 30 * 86400_000, sameSite: 'lax', httpOnly: true });
+    }
+    next();
+  });
+
+  // API keys are for the data API only — never for account, OAuth, billing or admin routes.
+  app.use(['/api/auth', '/api/oauth', '/api/billing', '/api/admin'], (req, res, next) =>
+    (/^Bearer\s+mp_live_/i.test(req.headers.authorization || '') ? res.status(403).json({ error: 'API keys cannot access this endpoint' }) : next()));
+  app.get('/api/public/config', (req, res) => res.json({ appName: appName() }));
+  app.use('/api/oauth', rateLimit({ windowMs: 15 * 60_000, limit: 60 }), oauthRoutes);
   app.use('/api/auth', rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false }), authRoutes);
   app.use('/api/billing', billingRoutes);
   app.use('/api/admin', requireAuth, requireAdmin, adminRoutes);
+  // Public REST API (API keys) uses the same handlers under /api/v1.
+  const guard = [rateLimit({ windowMs: 60_000, limit: 300 }), requireAuth, (req, res, next) => {
+    if (!req.workspace) return res.status(403).json({ error: 'No workspace' });
+    next();
+  }];
+  app.use('/api/v1', ...guard, appRoutes);
   app.use('/api', rateLimit({ windowMs: 60_000, limit: 300 }), requireAuth, (req, res, next) => {
     if (!req.workspace) return res.status(403).json({ error: 'No workspace' });
     next();
@@ -51,6 +75,7 @@ export function createApp() {
   app.get('/health', (req, res) => res.json({ ok: true }));
   app.use(express.static(publicDir, { extensions: ['html'] }));
   app.get(['/app', '/app/*splat'], (req, res) => res.sendFile(path.join(publicDir, 'app.html')));
+  app.get(['/admin', '/admin/*splat'], (req, res) => res.sendFile(path.join(publicDir, 'admin.html')));
 
   app.use((err, req, res, _next) => {
     console.error(err);
@@ -61,9 +86,9 @@ export function createApp() {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   createApp().listen(config.port, () => {
-    console.log(`${config.appName} running at ${config.appUrl} (port ${config.port})`);
-    if (!config.anthropic.apiKey) console.warn('ANTHROPIC_API_KEY not set: AI triage/replies disabled (keyword fallback only).');
-    if (!config.stripe.secretKey) console.warn('STRIPE_SECRET_KEY not set: payments disabled.');
+    console.log(`${appName()} running at ${appUrl()} (port ${config.port})`);
+    if (!aiEnabled()) console.warn('Anthropic API key not set: AI disabled (keyword fallback only). Set it in Admin → Settings.');
+    if (!stripe()) console.warn('Stripe key not set: online payments disabled.');
   });
   if (process.env.DISABLE_WORKER !== 'true') startWorker();
 }

@@ -188,3 +188,148 @@ export function logActivity(workspaceId, type, detail) {
   run('INSERT INTO activity (workspace_id, type, detail) VALUES (?, ?, ?)', workspaceId, type,
     typeof detail === 'string' ? detail : JSON.stringify(detail));
 }
+
+// ---------------------------------------------------------------------------
+// Migrations (v2). Idempotent: safe to run on every boot and on old databases.
+// ---------------------------------------------------------------------------
+function addColumn(table, col, def) {
+  const cols = all(`PRAGMA table_info(${table})`).map((c) => c.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+
+for (const [col, def] of [
+  ['google_id', 'TEXT'], ['microsoft_id', 'TEXT'], ['avatar_url', 'TEXT'],
+  ['email_verified', 'INTEGER NOT NULL DEFAULT 0'], ['suspended', 'INTEGER NOT NULL DEFAULT 0'],
+  ['totp_secret_enc', 'TEXT'], ['totp_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+  ['last_login_at', 'TEXT'], ['last_login_ip', 'TEXT'], ['referral_code', 'TEXT'], ['referred_by', 'INTEGER'],
+  ['current_workspace_id', 'INTEGER'], ['locale', "TEXT NOT NULL DEFAULT 'en'"],
+]) addColumn('users', col, def);
+
+for (const [col, def] of [
+  ['suspended', 'INTEGER NOT NULL DEFAULT 0'], ['limits_override_json', 'TEXT'], ['admin_notes', 'TEXT'],
+  ['style_guide', 'TEXT'], ['retention_days', 'INTEGER NOT NULL DEFAULT 0'],
+  ['privacy_shield', 'INTEGER NOT NULL DEFAULT 1'],
+  ['reply_delay_min', 'INTEGER NOT NULL DEFAULT 2'], ['reply_delay_max', 'INTEGER NOT NULL DEFAULT 8'],
+  ['followup_days', 'INTEGER NOT NULL DEFAULT 3'], ['digest_enabled', 'INTEGER NOT NULL DEFAULT 1'],
+  ['digest_hour', 'INTEGER NOT NULL DEFAULT 8'], ['timezone', "TEXT NOT NULL DEFAULT 'UTC'"],
+  ['last_digest_on', 'TEXT'], ['telegram_chat_id', 'TEXT'], ['slack_webhook', 'TEXT'],
+  ['alert_on', "TEXT NOT NULL DEFAULT 'urgent,negative,vip,phishing'"], ['booking_link', 'TEXT'],
+  ['learn_from_edits', 'INTEGER NOT NULL DEFAULT 1'],
+]) addColumn('workspaces', col, def);
+
+for (const [col, def] of [
+  ['auth_type', "TEXT NOT NULL DEFAULT 'password'"], ['oauth_refresh_enc', 'TEXT'],
+  ['oauth_access_enc', 'TEXT'], ['oauth_expires_at', 'INTEGER'], ['signature', 'TEXT'],
+]) addColumn('mailboxes', col, def);
+
+for (const [col, def] of [
+  ['reasoning', 'TEXT'], ['intent', 'TEXT'], ['lead_score', 'INTEGER'], ['extracted_json', 'TEXT'],
+  ['is_phishing', 'INTEGER NOT NULL DEFAULT 0'], ['contact_id', 'INTEGER'], ['starred', 'INTEGER NOT NULL DEFAULT 0'],
+  ['first_response_sec', 'INTEGER'],
+]) addColumn('messages', col, def);
+
+for (const [col, def] of [
+  ['scheduled_at', 'TEXT'], ['ai_original', 'TEXT'], ['kind', "TEXT NOT NULL DEFAULT 'reply'"],
+]) addColumn('replies', col, def);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT DEFAULT (datetime('now')));
+
+CREATE TABLE IF NOT EXISTS plans (
+  key TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+  mailboxes INTEGER NOT NULL, ai_replies INTEGER NOT NULL, rules INTEGER NOT NULL, team_members INTEGER NOT NULL,
+  auto_send INTEGER NOT NULL DEFAULT 1, features_json TEXT,
+  price_monthly REAL, price_yearly REAL, price_once REAL,
+  stripe_price_monthly TEXT, stripe_price_yearly TEXT, stripe_price_once TEXT,
+  public INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0, highlight INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  email TEXT NOT NULL, name TEXT, company TEXT, phone TEXT,
+  vip INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0,
+  tags TEXT, notes TEXT, lead_score INTEGER, last_sentiment TEXT,
+  emails_in INTEGER NOT NULL DEFAULT 0, emails_out INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT,
+  UNIQUE (workspace_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS corrections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  email_summary TEXT, ai_draft TEXT NOT NULL, final_text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, prefix TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+  last_used_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS tokens (          -- password reset / email verification / 2FA pending login
+  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  purpose TEXT NOT NULL, expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id INTEGER, actor_email TEXT,
+  action TEXT NOT NULL, target TEXT, detail TEXT, ip TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subject TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', priority TEXT NOT NULL DEFAULT 'normal',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS ticket_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+  author_id INTEGER, is_staff INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS announcements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'info',
+  active INTEGER NOT NULL DEFAULT 1, starts_at TEXT, ends_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL,
+  amount REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'usd', method TEXT NOT NULL,   -- stripe | bkash | bank | paypal | other
+  plan TEXT, interval TEXT, reference TEXT, status TEXT NOT NULL DEFAULT 'paid', note TEXT,
+  referral_user_id INTEGER, commission REAL NOT NULL DEFAULT 0, commission_paid INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_payments_ref ON payments(reference);
+CREATE INDEX IF NOT EXISTS idx_contacts_ws ON contacts(workspace_id, last_seen DESC);
+`);
+
+// Seed default plans once (admins edit them from the admin panel afterwards).
+if (one('SELECT COUNT(*) AS n FROM plans').n === 0) {
+  const seed = [
+    ['trial', 'Free Trial', 'Try everything free', 2, 100, 5, 1, 1, null, 0, 0, null, 0, 0],
+    ['starter', 'Starter', 'For freelancers & solo founders', 3, 1000, 20, 1, 1, null, 19, 190, null, 1, 1],
+    ['pro', 'Pro', 'For growing businesses', 10, 5000, 100, 5, 1, null, 49, 490, null, 1, 2],
+    ['business', 'Business', 'For teams & agencies', 50, 25000, 500, 25, 1, null, 149, 1490, null, 1, 3],
+    ['lifetime', 'Lifetime', 'Pay once, use forever', 5, 1500, 50, 2, 1, null, null, null, 299, 1, 4],
+  ];
+  for (const p of seed) {
+    run(`INSERT INTO plans (key, name, description, mailboxes, ai_replies, rules, team_members, auto_send, features_json,
+      price_monthly, price_yearly, price_once, public, sort, highlight) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, ...p, p[0] === 'pro' ? 1 : 0);
+  }
+}
+
+// Existing users without a referral code get one.
+for (const u of all('SELECT id FROM users WHERE referral_code IS NULL')) {
+  run('UPDATE users SET referral_code = ? WHERE id = ?', Math.random().toString(36).slice(2, 8) + u.id.toString(36), u.id);
+}
+
+export function audit(req, action, target, detail) {
+  run('INSERT INTO audit_log (actor_id, actor_email, action, target, detail, ip) VALUES (?,?,?,?,?,?)',
+    req?.user?.id ?? null, req?.user?.email ?? 'system', action, target == null ? null : String(target),
+    detail == null ? null : (typeof detail === 'string' ? detail : JSON.stringify(detail)), req?.ip ?? null);
+}

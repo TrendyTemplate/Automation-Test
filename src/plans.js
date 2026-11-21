@@ -1,50 +1,42 @@
-// Single source of truth for pricing & limits. Prices are display prices (USD);
-// actual charging happens through the Stripe Price IDs configured in .env.
-export const PLANS = {
-  trial: {
-    name: 'Free Trial', mailboxes: 2, aiRepliesPerMonth: 100, rules: 5, teamMembers: 1,
-    autoSend: true, priceMonthly: 0, priceYearly: 0,
-  },
-  starter: {
-    name: 'Starter', mailboxes: 3, aiRepliesPerMonth: 1000, rules: 20, teamMembers: 1,
-    autoSend: true, priceMonthly: 19, priceYearly: 190,
-  },
-  pro: {
-    name: 'Pro', mailboxes: 10, aiRepliesPerMonth: 5000, rules: 100, teamMembers: 5,
-    autoSend: true, priceMonthly: 49, priceYearly: 490,
-  },
-  business: {
-    name: 'Business', mailboxes: 50, aiRepliesPerMonth: 25000, rules: 500, teamMembers: 25,
-    autoSend: true, priceMonthly: 149, priceYearly: 1490,
-  },
-  lifetime: {
-    // One-time purchase. AI usage is capped monthly so a single payment can't create unbounded API cost.
-    name: 'Lifetime', mailboxes: 5, aiRepliesPerMonth: 1500, rules: 50, teamMembers: 2,
-    autoSend: true, priceOnce: 299,
-  },
-  expired: {
-    name: 'Expired', mailboxes: 0, aiRepliesPerMonth: 0, rules: 0, teamMembers: 1,
-    autoSend: false, priceMonthly: 0, priceYearly: 0,
-  },
-};
+import { all, one } from './db.js';
 
-export function effectivePlan(workspace) {
-  if (!workspace) return { key: 'expired', ...PLANS.expired };
-  const key = workspace.plan;
-  if (key === 'lifetime') return { key, ...PLANS.lifetime };
+function rowToPlan(r) {
+  return {
+    key: r.key, name: r.name, description: r.description,
+    mailboxes: r.mailboxes, aiRepliesPerMonth: r.ai_replies, rules: r.rules, teamMembers: r.team_members,
+    autoSend: Boolean(r.auto_send), features: r.features_json ? JSON.parse(r.features_json) : [],
+    priceMonthly: r.price_monthly, priceYearly: r.price_yearly, priceOnce: r.price_once,
+    stripe: { monthly: r.stripe_price_monthly, yearly: r.stripe_price_yearly, once: r.stripe_price_once },
+    public: Boolean(r.public), highlight: Boolean(r.highlight), sort: r.sort,
+  };
+}
+
+export const getPlan = (key) => { const r = one('SELECT * FROM plans WHERE key = ?', key); return r ? rowToPlan(r) : null; };
+export const allPlans = () => all('SELECT * FROM plans ORDER BY sort, key').map(rowToPlan);
+
+const EXPIRED = { key: 'expired', name: 'Expired', mailboxes: 0, aiRepliesPerMonth: 0, rules: 0, teamMembers: 1, autoSend: false };
+
+/** The plan a workspace is entitled to right now, including admin overrides. */
+export function effectivePlan(ws) {
+  if (!ws || ws.suspended) return { ...EXPIRED, suspended: Boolean(ws?.suspended) };
+  let key = ws.plan;
   if (key === 'trial') {
-    const ended = workspace.trial_ends_at && new Date(workspace.trial_ends_at) < new Date();
-    return ended ? { key: 'expired', ...PLANS.expired } : { key, ...PLANS.trial };
+    if (ws.trial_ends_at && new Date(ws.trial_ends_at) < new Date()) return EXPIRED;
+  } else if (key !== 'lifetime') {
+    const active = ['active', 'trialing', 'past_due'].includes(ws.subscription_status);
+    const manualExpired = ws.billing_interval === 'manual' && ws.current_period_end && new Date(ws.current_period_end) < new Date();
+    if (!active || manualExpired) return EXPIRED;
   }
-  const active = ['active', 'trialing'].includes(workspace.subscription_status);
-  const manualExpired = workspace.billing_interval === 'manual' && workspace.current_period_end &&
-    new Date(workspace.current_period_end) < new Date();
-  if (!active || manualExpired || !PLANS[key]) return { key: 'expired', ...PLANS.expired };
-  return { key, ...PLANS[key] };
+  const plan = getPlan(key);
+  if (!plan) return EXPIRED;
+  let override = {};
+  try { override = ws.limits_override_json ? JSON.parse(ws.limits_override_json) : {}; } catch { /* ignore */ }
+  return { ...plan, ...override, key };
 }
 
 export function publicPlans() {
-  return Object.entries(PLANS)
-    .filter(([k]) => !['trial', 'expired'].includes(k))
-    .map(([key, p]) => ({ key, ...p }));
+  return allPlans().filter((p) => p.public && p.key !== 'trial').map(({ stripe, ...p }) => p);
 }
+
+// Legacy export used by older code paths.
+export const PLANS = new Proxy({}, { get: (_, k) => getPlan(String(k)) });

@@ -6,13 +6,20 @@
     <a class="logo" href="/">Mail<span>Pilot</span> AI</a>
     <div class="card" style="margin-top:20px">
       <h2>Welcome back</h2>
+      <div class="oauth-buttons"></div>
       <form id="auth-form" data-mode="login">
         <label>Email</label><input name="email" type="email" required autocomplete="email">
         <label>Password</label><input name="password" type="password" required autocomplete="current-password">
         <div class="err-text" id="err"></div>
-        <button class="btn primary" style="width:100%;margin-top:16px;justify-content:center">Log in</button>
+        <button class="btn primary block">Log in</button>
       </form>
-      <p class="hint">No account? <a href="/signup">Start a free trial</a></p>
+      <form id="twofa-form" hidden>
+        <p>Enter the 6-digit code from your authenticator app.</p>
+        <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+        <div class="err-text" id="err2"></div>
+        <button class="btn primary block">Verify</button>
+      </form>
+      <p class="hint"><a href="/forgot">Forgot password?</a> · No account? <a href="/signup">Start a free trial</a></p>
     </div>
   </div>
   <script src="/js/auth.js"></script>

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forgot password — MailPilot AI</title><link rel="stylesheet" href="/css/style.css"></head>
+<body>
+  <div class="auth container">
+    <a class="logo" href="/">Mail<span>Pilot</span> AI</a>
+    <div class="card" style="margin-top:20px">
+      <h2>Reset your password</h2>
+      <form id="auth-form" data-mode="forgot">
+        <label>Email</label><input name="email" type="email" required autocomplete="email">
+        <div class="err-text" id="err"></div>
+        <button class="btn primary block">Send reset link</button>
+      </form>
+      <p class="hint"><a href="/login">Back to log in</a></p>
+    </div>
+  </div>
+  <script src="/js/auth.js"></script>
+</body></html>

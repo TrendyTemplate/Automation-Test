@@ -2,27 +2,35 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { decrypt } from '../crypto.js';
-import { config } from '../config.js';
+import { appName } from '../settings.js';
+import { mailboxAccessToken } from './oauth.js';
 
-function imapClient(mb, password) {
+const isOAuth = (mb) => String(mb.auth_type || '').startsWith('oauth_');
+
+// Note: these are async because OAuth mailboxes may need a token refresh first.
+async function imapClient(mb, password) {
+  const auth = isOAuth(mb)
+    ? { user: mb.username, accessToken: await mailboxAccessToken(mb) }
+    : { user: mb.username, pass: password ?? decrypt(mb.password_enc) };
   return new ImapFlow({
     host: mb.imap_host, port: mb.imap_port, secure: Boolean(mb.imap_secure),
-    auth: { user: mb.username, pass: password ?? decrypt(mb.password_enc) },
-    logger: false, socketTimeout: 60_000,
+    auth, logger: false, socketTimeout: 60_000,
   });
 }
 
-function smtpTransport(mb, password) {
+async function smtpTransport(mb, password) {
+  const auth = isOAuth(mb)
+    ? { type: 'OAuth2', user: mb.username, accessToken: await mailboxAccessToken(mb) }
+    : { user: mb.username, pass: password ?? decrypt(mb.password_enc) };
   return nodemailer.createTransport({
     host: mb.smtp_host, port: mb.smtp_port, secure: Boolean(mb.smtp_secure),
-    auth: { user: mb.username, pass: password ?? decrypt(mb.password_enc) },
-    connectionTimeout: 20_000,
+    auth, connectionTimeout: 20_000,
   });
 }
 
 /** Verify IMAP + SMTP credentials before saving a mailbox. Throws with a readable message. */
 export async function testConnection(mb, password) {
-  const imap = imapClient(mb, password);
+  const imap = await imapClient(mb, password);
   try {
     await imap.connect();
     await imap.mailboxOpen('INBOX', { readOnly: true });
@@ -32,7 +40,7 @@ export async function testConnection(mb, password) {
     await imap.logout().catch(() => {});
   }
   try {
-    await smtpTransport(mb, password).verify();
+    await (await smtpTransport(mb, password)).verify();
   } catch (e) {
     throw new Error(`SMTP login failed: ${e.message}`);
   }
@@ -44,7 +52,7 @@ export async function testConnection(mb, password) {
  * Returns {messages, lastUid, uidValidity}.
  */
 export async function fetchNewMessages(mb, { initialCount = 20, maxBatch = 50 } = {}) {
-  const imap = imapClient(mb);
+  const imap = await imapClient(mb);
   await imap.connect();
   const out = [];
   let lastUid = mb.last_uid;
@@ -98,7 +106,7 @@ export async function fetchNewMessages(mb, { initialCount = 20, maxBatch = 50 } 
 }
 
 export async function markSeen(mb, uid) {
-  const imap = imapClient(mb);
+  const imap = await imapClient(mb);
   await imap.connect();
   try {
     const lock = await imap.getMailboxLock('INBOX');
@@ -108,7 +116,8 @@ export async function markSeen(mb, uid) {
 
 /** Send a reply in-thread. Adds RFC 3834 headers so other autoresponders don't reply back. */
 export async function sendReply(mb, original, { subject, body, signature, to }) {
-  const fullBody = signature ? `${body}\n\n${signature}` : body;
+  const sig = mb.signature || signature;
+  const fullBody = sig ? `${body}\n\n${sig}` : body;
   const subj = subject || (/^re:/i.test(original.subject || '') ? original.subject : `Re: ${original.subject || ''}`);
   const references = [original.references_hdr, original.message_id].filter(Boolean).join(' ');
   const mail = {
@@ -118,19 +127,19 @@ export async function sendReply(mb, original, { subject, body, signature, to }) 
     text: fullBody,
     inReplyTo: original.message_id,
     references,
-    headers: { 'Auto-Submitted': 'auto-replied', 'X-MailPilot-Generated': config.appName },
+    headers: { 'Auto-Submitted': 'auto-replied', 'X-MailPilot-Generated': appName() },
   };
-  const info = await smtpTransport(mb).sendMail(mail);
+  const info = await (await smtpTransport(mb)).sendMail(mail);
   appendToSent(mb, mail).catch(() => {}); // best effort: Gmail stores sent mail itself, many IMAP hosts don't
   return info;
 }
 
 export async function forwardEmail(mb, original, to) {
-  return smtpTransport(mb).sendMail({
+  return (await smtpTransport(mb)).sendMail({
     from: mb.email, to,
     subject: `Fwd: ${original.subject || ''}`,
     text: `---------- Forwarded message ----------\nFrom: ${original.from_name} <${original.from_email}>\nDate: ${original.received_at}\nSubject: ${original.subject}\n\n${original.text_body}`,
-    headers: { 'Auto-Submitted': 'auto-generated', 'X-MailPilot-Generated': config.appName },
+    headers: { 'Auto-Submitted': 'auto-generated', 'X-MailPilot-Generated': appName() },
   });
 }
 
@@ -139,11 +148,45 @@ async function appendToSent(mb, mail) {
   const raw = await new Promise((resolve, reject) => {
     nodemailer.createTransport({ streamTransport: true, buffer: true }).sendMail(mail, (err, info) => (err ? reject(err) : resolve(info.message)));
   });
-  const imap = imapClient(mb);
+  const imap = await imapClient(mb);
   await imap.connect();
   try {
     const list = await imap.list();
     const sent = list.find((b) => b.specialUse === '\\Sent') || list.find((b) => /^sent/i.test(b.name));
     if (sent) await imap.append(sent.path, raw, ['\\Seen']);
   } finally { await imap.logout().catch(() => {}); }
+}
+
+/** Read recent emails the user wrote themselves (Sent folder) — used to learn their writing style. */
+export async function fetchSentSamples(mb, limit = 25) {
+  const imap = await imapClient(mb);
+  await imap.connect();
+  const out = [];
+  try {
+    const list = await imap.list();
+    const sent = list.find((b) => b.specialUse === '\\Sent') || list.find((b) => /sent/i.test(b.name));
+    if (!sent) return out;
+    const lock = await imap.getMailboxLock(sent.path);
+    try {
+      const uids = ((await imap.search({ all: true }, { uid: true })) || []).slice(-limit * 2);
+      if (!uids.length) return out;
+      for await (const m of imap.fetch(uids.join(','), { uid: true, source: true }, { uid: true })) {
+        const parsed = await simpleParser(m.source);
+        // Strip quoted history so we only learn from what the user actually wrote.
+        const own = String(parsed.text || '').split(/\n(On .+wrote:|-{2,} ?Original Message|From: )/)[0].trim();
+        if (own.length > 40) out.push({ subject: parsed.subject || '', body: own.slice(0, 1500) });
+      }
+    } finally { lock.release(); }
+  } finally { await imap.logout().catch(() => {}); }
+  return out.slice(-limit);
+}
+
+/** Send a brand-new email (used for follow-ups to people who didn't answer). */
+export async function sendNew(mb, { to, subject, body, inReplyTo, references }) {
+  const sig = mb.signature;
+  return (await smtpTransport(mb)).sendMail({
+    from: mb.label ? `"${mb.label}" <${mb.email}>` : mb.email, to, subject,
+    text: sig ? `${body}\n\n${sig}` : body, inReplyTo, references,
+    headers: { 'X-MailPilot-Generated': appName() },
+  });
 }
