@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocChase – Month-end document chasing for Xero practices</title>
+<meta name="description" content="Stop chasing clients for receipts. DocChase finds missing documents against the bank feed, chases clients by email and WhatsApp, and drafts them into Xero for your review.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230f766e'/><path d='M9 16.5l4.5 4.5L23 11.5' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<style>
+  :root {
+    --bg: #fbfaf7; --surface: #ffffff; --ink: #14201e; --muted: #56625f;
+    --line: #e4e1da; --brand: #0f766e; --brand-ink: #ffffff; --brand-soft: #e3f2ef;
+    --warn: #9a5b00; --warn-soft: #fbf0dc; --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1514; --surface: #161e1d; --ink: #e8efed; --muted: #9aaba7;
+      --line: #263331; --brand: #2fb3a5; --brand-ink: #06201d; --brand-soft: #173230;
+      --warn: #f0b45a; --warn-soft: #2e2414;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  a { color: var(--brand); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+  header.top { display: flex; align-items: center; justify-content: space-between; padding: 18px 0; }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; text-decoration: none; color: var(--ink); }
+  .logo span.mark { width: 28px; height: 28px; border-radius: 7px; background: var(--brand); display: grid; place-items: center; color: var(--brand-ink); font-size: 16px; }
+  .btn { display: inline-block; background: var(--brand); color: var(--brand-ink); text-decoration: none; font-weight: 600;
+         padding: 12px 20px; border-radius: 10px; border: 0; font-size: 16px; cursor: pointer; }
+  .btn.ghost { background: transparent; color: var(--brand); border: 1.5px solid var(--brand); }
+  .btn.small { padding: 8px 14px; font-size: 14px; }
+  .hero { padding: 48px 0 40px; display: grid; gap: 40px; grid-template-columns: 1.1fr 0.9fr; align-items: center; }
+  .eyebrow { display: inline-block; font-size: 13px; font-weight: 600; color: var(--brand); background: var(--brand-soft);
+             padding: 4px 10px; border-radius: 999px; margin-bottom: 14px; }
+  h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.12; margin: 0 0 16px; letter-spacing: -0.02em; }
+  .lead { font-size: 19px; color: var(--muted); margin: 0 0 26px; max-width: 34em; }
+  .cta-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .note { font-size: 14px; color: var(--muted); margin-top: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+  .chase { font-size: 14px; }
+  .chase h3 { margin: 0 0 12px; font-size: 15px; }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .pill { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill.ok { background: var(--brand-soft); color: var(--brand); }
+  .pill.wait { background: var(--warn-soft); color: var(--warn); }
+  section { padding: 44px 0; }
+  h2 { font-size: clamp(24px, 3.4vw, 32px); margin: 0 0 10px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 28px; max-width: 40em; }
+  .grid3 { display: grid; gap: 16px; grid-template-columns: repeat(3, 1fr); }
+  .grid3 h3 { margin: 6px 0 6px; font-size: 17px; }
+  .grid3 p { margin: 0; color: var(--muted); font-size: 15px; }
+  .num { font-weight: 700; color: var(--brand); font-size: 14px; }
+  .pain li { margin-bottom: 8px; }
+  .price { display: flex; flex-direction: column; }
+  .price .amt { font-size: 34px; font-weight: 700; margin: 6px 0 2px; }
+  .price .amt small { font-size: 15px; font-weight: 500; color: var(--muted); }
+  .price ul { padding-left: 18px; color: var(--muted); font-size: 15px; flex: 1; }
+  .price.featured { border: 2px solid var(--brand); }
+  .pilot { background: var(--brand-soft); border-color: transparent; }
+  form { display: grid; gap: 14px; }
+  label { font-weight: 600; font-size: 14px; display: grid; gap: 6px; }
+  input, select, textarea { font: inherit; padding: 11px 12px; border-radius: 9px; border: 1px solid var(--line);
+                            background: var(--bg); color: var(--ink); width: 100%; }
+  .two { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+  details { border-top: 1px solid var(--line); padding: 14px 0; }
+  details summary { font-weight: 600; cursor: pointer; }
+  details p { color: var(--muted); margin: 8px 0 0; }
+  footer { padding: 30px 0 50px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); }
+  @media (max-width: 820px) {
+    .hero { grid-template-columns: 1fr; padding-top: 24px; }
+    .grid3 { grid-template-columns: 1fr; }
+    .two { grid-template-columns: 1fr; }
+    header.top .btn { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="logo" href="#"><span class="mark">✓</span> DocChase</a>
+    <a class="btn small" href="#pilot">Join the pilot</a>
+  </header>
+
+  <div class="hero">
+    <div>
+      <span class="eyebrow">For bookkeeping &amp; accounting practices on Xero</span>
+      <h1>Stop chasing clients for receipts every month-end.</h1>
+      <p class="lead">DocChase checks each client's bank feed, works out which receipts and invoices are missing, chases the client politely by email or WhatsApp, and drafts what comes back into Xero for your team to approve.</p>
+      <div class="cta-row">
+        <a class="btn" href="#pilot">Apply for a founding pilot</a>
+        <a class="btn ghost" href="#how">See how it works</a>
+      </div>
+      <p class="note">Flat price per practice. No per-client fees. Nothing is posted to Xero without your approval.</p>
+    </div>
+
+    <div class="card chase" aria-label="Example month-end status">
+      <h3>October close · example view</h3>
+      <div class="row"><span>Patel Plumbing Ltd</span><span class="pill ok">38 / 38 matched</span></div>
+      <div class="row"><span>Green Leaf Café</span><span class="pill wait">4 missing · chased twice</span></div>
+      <div class="row"><span>Hughes Design Studio</span><span class="pill ok">21 / 21 matched</span></div>
+      <div class="row"><span>Northside Builders</span><span class="pill wait">7 missing · reminder due Thu</span></div>
+      <div class="row"><span>Bloom Florist</span><span class="pill ok">12 / 12 matched</span></div>
+      <p class="note" style="margin-bottom:0">Illustrative mock-up, not real client data.</p>
+    </div>
+  </div>
+</div>
+
+<section style="background:var(--surface);border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <h2>Sound familiar?</h2>
+    <ul class="pain">
+      <li>Half your month-end is spent emailing clients for the same missing receipts.</li>
+      <li>Your capture tool's price keeps going up, and per-client pricing punishes you for growing.</li>
+      <li>You can't see at a glance which clients are holding up the close.</li>
+      <li>Clients send photos on WhatsApp, forward PDFs, or just don't reply.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="sub">A team of focused AI agents handles the repetitive parts. Your team stays in control of every posting.</p>
+    <div class="grid3">
+      <div class="card"><div class="num">1 · Find the gaps</div><h3>Bank feed vs documents</h3><p>Each morning DocChase compares every client's Xero bank transactions with the documents received and lists what's missing.</p></div>
+      <div class="card"><div class="num">2 · Chase the client</div><h3>Polite, persistent reminders</h3><p>Clients get a clear list ("12 Oct, £450, Screwfix") by email or WhatsApp, with follow-ups on your schedule and escalation to you if they go quiet.</p></div>
+      <div class="card"><div class="num">3 · Read &amp; draft</div><h3>Captured, coded, ready to approve</h3><p>Receipts are read, matched, given a suggested account and VAT rate, checked for duplicates and odd bank details, then drafted into Xero.</p></div>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:10px">
+  <div class="wrap">
+    <h2>Planned pricing</h2>
+    <p class="sub">Per practice, not per client. These are the prices we expect to launch with; founding pilot practices lock in a discount.</p>
+    <div class="grid3">
+      <div class="card price"><strong>Starter</strong><div class="amt">£39<small>/month</small></div>
+        <ul><li>Up to 15 clients</li><li>500 documents / month</li><li>Email chasing</li></ul></div>
+      <div class="card price featured"><strong>Practice</strong><div class="amt">£119<small>/month</small></div>
+        <ul><li>Up to 60 clients</li><li>2,000 documents / month</li><li>Email + WhatsApp chasing</li><li>Weekly close report</li></ul></div>
+      <div class="card price"><strong>Firm</strong><div class="amt">£239<small>/month</small></div>
+        <ul><li>Up to 150 clients</li><li>5,000 documents / month</li><li>Team seats &amp; priority support</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section id="pilot">
+  <div class="wrap">
+    <div class="card pilot">
+      <h2>Founding pilot: one month-end, done with you</h2>
+      <p class="sub" style="margin-bottom:18px">We're taking a small number of practices for a hands-on pilot. For one month-end we run document chasing and capture for up to 10 of your Xero clients, with a person checking every result. <strong>£99 one-off</strong>, credited against your first year if you continue.</p>
+      <form action="https://formspree.io/f/YOUR_FORM_ID" method="POST">
+        <div class="two">
+          <label>Your name<input name="name" required autocomplete="name"></label>
+          <label>Work email<input name="email" type="email" required autocomplete="email"></label>
+        </div>
+        <div class="two">
+          <label>Practice name<input name="practice" required autocomplete="organization"></label>
+          <label>Country
+            <select name="country"><option>United Kingdom</option><option>Australia</option><option>New Zealand</option><option>Ireland</option><option>Other</option></select>
+          </label>
+        </div>
+        <div class="two">
+          <label>Number of bookkeeping clients
+            <select name="clients"><option>1–15</option><option>16–60</option><option>61–150</option><option>150+</option></select>
+          </label>
+          <label>What do you use for receipt capture today?
+            <select name="current_tool"><option>Dext</option><option>Hubdoc / Xero Files</option><option>AutoEntry</option><option>Nothing / email &amp; spreadsheets</option><option>Other</option></select>
+          </label>
+        </div>
+        <label>Which plan would you most likely choose?
+          <select name="plan_interest"><option>Starter £39</option><option selected>Practice £119</option><option>Firm £239</option><option>None of these at these prices</option></select>
+        </label>
+        <label>What's the most painful part of month-end for you? (optional)<textarea name="pain" rows="3"></textarea></label>
+        <input type="hidden" name="_subject" value="DocChase pilot application">
+        <button class="btn" type="submit">Apply for the pilot</button>
+        <p class="note" style="margin:0">We'll reply within one working day to book a 20-minute call. No payment until we agree the pilot is a fit.</p>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:10px">
+  <div class="wrap">
+    <h2>Questions</h2>
+    <details><summary>Does it post anything to Xero automatically?</summary><p>No. Everything goes in as a draft for your team to approve. Unusual items (duplicates, changed bank details, VAT mismatches) are flagged for review.</p></details>
+    <details><summary>Is this connected to Xero officially?</summary><p>DocChase connects through Xero's standard API using the permissions you grant. DocChase is an independent product and is not affiliated with or endorsed by Xero.</p></details>
+    <details><summary>Where is client data stored, and who sees it?</summary><p>During the pilot we agree a data processing agreement with you first. Documents are encrypted in storage and used only to deliver the service to your practice.</p></details>
+    <details><summary>Is it live yet?</summary><p>Not as self-serve software. We're running hands-on pilots with a small number of practices first, so the product is built around how real practices work.</p></details>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">© DocChase. Xero is a trademark of Xero Limited; DocChase is not affiliated with Xero. · <a href="mailto:hello@example.com">hello@example.com</a></div>
+</footer>
+</body>
+</html>
