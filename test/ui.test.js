@@ -97,7 +97,7 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   assert.match(smtp.received[0].parsed.text, /Thanks for asking/);
 
   // Every page renders; no console errors
-  for (const v of ['dashboard', 'approvals', 'ask', 'contacts', 'analytics', 'mailboxes', 'brain', 'autopilot', 'knowledge', 'rules', 'templates', 'simulator', 'declutter', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
+  for (const v of ['dashboard', 'automation', 'recipes', 'tasks', 'approvals', 'ask', 'contacts', 'analytics', 'mailboxes', 'brain', 'autopilot', 'knowledge', 'rules', 'templates', 'simulator', 'declutter', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('.page-h h1', { timeout: 5000 });
   }
@@ -106,6 +106,22 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   await page.waitForSelector('.tabs a.on:has-text("Knowledge base")');
   await page.goto(`${base}/app#team`);
   await page.waitForSelector('.tabs a:has-text("Security & privacy")');
+  // Automation: switch on a recipe, see the live pipeline, add a task
+  await page.goto(`${base}/app#recipes`);
+  await page.click('[data-act=install][data-key=newsletter_silence]');
+  await page.waitForSelector('.recipe.installed:has-text("Newsletter silence")');
+  await page.goto(`${base}/app#automation`);
+  await page.waitForSelector('.flow-node');
+  await page.waitForSelector('.tabs a:has-text("Recipes")');
+  assert.match(await page.textContent('.flow'), /Emails arrived/);
+  await page.waitForSelector('.feed-row:has-text("Automation installed")');
+  await page.goto(`${base}/app#tasks`);
+  await page.click('[data-act=new]');
+  await page.fill('.modal [name=title]', 'Ship order #42');
+  await page.click('.modal button[type=submit]');
+  await page.waitForSelector('.task-row:has-text("Ship order #42")');
+  await page.click('.task-row [data-act=toggle]');
+  await page.waitForSelector('text=All clear');
   // Command palette finds the email
   await page.goto(`${base}/app#dashboard`);
   await page.waitForSelector('.page-h');
@@ -167,6 +183,8 @@ test('public pages: no horizontal overflow on phones, no errors', { skip: !chrom
   }
   await page.goto(`${base}/`);
   await page.waitForSelector('#pricing-cards .price-card');
+  await page.waitForSelector('#demo-read .demo-from', { timeout: 5000 });
+  await page.waitForSelector('#nl-rule .nl-col', { timeout: 10000 });
   assert.ok((await page.locator('#pricing-cards .price-card').count()) >= 3);
   assert.deepEqual(errors, []);
 });

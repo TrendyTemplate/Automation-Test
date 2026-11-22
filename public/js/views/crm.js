@@ -100,7 +100,7 @@ export async function declutter(ctx) {
 
 export async function simulator(ctx) {
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Autopilot & rules</h1><p>Test lab — Paste any email and see exactly how the AI would classify and answer it — and whether autopilot would send it. Nothing is sent.</p></div></div>
+    <div class="page-h"><div><h1>Test lab</h1><p>Paste any email and see exactly how the AI would classify and answer it — and whether autopilot would send it. Nothing is sent.</p></div></div>
     <div class="split">
       <form class="card" data-act="sim"><h3>Sample email</h3>
         <div class="grid g2"><div><label>From name</label><input name="from_name" value="Alex Morgan"></div><div><label>From email</label><input name="from_email" value="alex@example.com"></div></div>

@@ -15,7 +15,7 @@
 <body>
   <nav class="lp-nav"><div class="container">
     <a class="brand" href="/"><span class="brand-mark" data-icon="logo"></span><span>MailPilot AI</span></a>
-    <div class="links"><a href="#why">Why us</a><a href="#features">Features</a><a href="#security">Security</a><a href="#pricing">Pricing</a><a href="#faq">FAQ</a></div>
+    <div class="links"><a href="#why">Why us</a><a href="#automations">Automations</a><a href="#features">Features</a><a href="#security">Security</a><a href="#pricing">Pricing</a><a href="#faq">FAQ</a></div>
     <span class="spacer"></span>
     <a href="/login" class="btn ghost">Sign in</a>
     <a href="/signup" class="btn primary">Start free trial</a>
@@ -23,30 +23,17 @@
 
   <header class="hero"><div class="container hero-grid">
     <div>
-      <span class="eyebrow"><b>New</b> Earned Autopilot — the AI sends only what it has proven it gets right</span>
-      <h1>Every inbox.<br><span class="grad">Answered in your voice.</span><br>Never out of line.</h1>
-      <p class="lead-p">Connect Gmail, Outlook, Yahoo, Zoho or any business email. MailPilot AI sorts every message, flags what matters, and writes replies that sound like you — with deterministic safety checks that stop invented prices, phishing and risky auto-replies.</p>
+      <span class="eyebrow"><b>New</b> Automation Center — watch every email get handled, live</span>
+      <h1>Your inbox,<br><span class="grad">on autopilot.</span><br>Safely.</h1>
+      <p class="lead-p">Connect Gmail, Outlook, Yahoo, Zoho or any business email. MailPilot AI reads every message, runs your automations, answers in your voice, turns requests into tasks and alerts you to what matters — with code-level safety checks that stop invented prices, phishing and risky auto-replies.</p>
       <div class="ctas"><a class="btn primary lg" href="/signup">Start free — 14 days</a><a class="btn lg" href="#how">See how it stays safe</a></div>
       <div class="trust-row"><span data-icon="check">No credit card</span><span data-icon="check">Any email provider</span><span data-icon="check">40+ languages</span><span data-icon="check">Cancel anytime</span></div>
     </div>
-    <div class="mock" aria-label="Product preview">
-      <div class="mock-top"><i></i><i></i><i></i></div>
+    <div class="mock live" aria-label="Live product demo: emails arriving and being handled automatically">
+      <div class="mock-top"><i></i><i></i><i></i><span class="mock-title"><span class="live-pill">Live</span> Automation run</span><span class="mock-counter"><b id="demo-count">1,284</b> handled today</span></div>
       <div class="mock-body">
-        <div class="mock-list">
-          <div class="mock-row on"><b>Sarah · BigCorp</b><span>Group trip for 25 people</span></div>
-          <div class="mock-row"><b>Carlos Méndez</b><span>¿Precio del paquete?</span></div>
-          <div class="mock-row"><b>Ahmed R.</b><span>Booking not confirmed</span></div>
-          <div class="mock-row"><b>IT Security ⚠</b><span>Password expires today</span></div>
-          <div class="mock-row"><b>Priya Sharma</b><span>Change my travel dates</span></div>
-        </div>
-        <div class="mock-read">
-          <div class="row"><span class="badge info">Sales</span><span class="badge high">High</span><span class="badge ok">Lead 92</span><span class="hint">Why: group size, date & budget given</span></div>
-          <div class="mock-mail">Hi! We'd like a quote for a 25-person company retreat to Bali in March. Budget around $40,000…</div>
-          <div class="mock-draft"><div class="row hint"><span data-icon="sparkles"></span>AI draft · written in your style</div>
-            <p style="margin:8px 0">Hi Sarah, thanks for thinking of us! Our 7-night Bali package is $1,290 per person including hotel, breakfast and transfers…</p>
-            <div class="mock-checks"><span>✓ Price found in knowledge base</span><span>✓ Links approved</span><span>✓ No injection</span><span>✓ 91% confident</span></div></div>
-          <div class="row"><span class="btn primary sm">Approve & send</span><span class="btn sm">Edit</span><span class="hint">Autopilot in 4 min · Undo</span></div>
-        </div>
+        <div class="mock-list" id="demo-list"></div>
+        <div class="mock-read" id="demo-read" aria-live="polite"></div>
       </div>
     </div>
   </div>
@@ -65,6 +52,24 @@
         <div class="now" data-icon="check">The AI can't send anywhere or follow hidden orders</div><p>Recipients are fixed by code, injection attempts are detected, and the AI has no tools to leak your data.</p></div>
       <div class="card fail"><div class="was" data-icon="x">Your inbox becomes someone's data product</div><p>Some "free" email apps sold insights from users' mail.</p>
         <div class="now" data-icon="check">Never sold, never used for training</div><p>Per-workspace encryption, a log of every time the AI saw an email, auto-delete, and one-click export or deletion.</p></div>
+    </div>
+  </div></section>
+
+  <section class="lp-section" id="automations"><div class="container auto-grid">
+    <div><span class="kicker">Automation, without the flowcharts</span>
+      <h2 class="auto-h">Say what you want.<br>It runs on every email.</h2>
+      <p class="lead-p" style="font-size:17px">Type an automation in plain words — or switch on a proven recipe. You see the rule before it runs, and the Automation Center shows every time it fires.</p>
+      <div class="recipe-chips">
+        <span data-icon="zap">Lead fast-lane</span><span data-icon="alert">Angry-customer rescue</span><span data-icon="card">Invoices → accounting</span>
+        <span data-icon="calendar">Meeting booker</span><span data-icon="bell">Urgent → Slack</span><span data-icon="archive">Newsletter silence</span><span data-icon="users">Job-application reply</span><span data-icon="clock">Cold pitches wait 3 days</span>
+      </div>
+      <ul class="auto-points"><li data-icon="listCheck"><span><b>Emails become tasks.</b> “Send the quote by Friday” lands on your task list automatically.</span></li>
+        <li data-icon="activity"><span><b>Live pipeline.</b> See arrivals, AI decisions, held replies and sends as they happen.</span></li>
+        <li data-icon="clock"><span><b>Stop any send.</b> Autopilot replies wait a few human-like minutes — one click stops them.</span></li></ul>
+    </div>
+    <div class="card nl-demo" aria-label="Plain-language automation demo">
+      <div class="nl-input"><span data-icon="sparkles"></span><span id="nl-text"></span><span class="caret"></span></div>
+      <div class="nl-rule" id="nl-rule"></div>
     </div>
   </div></section>
 

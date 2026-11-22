@@ -21,6 +21,8 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 - **Runs itself**: automatic lifecycle emails (welcome, trial ending/ended, 80%/100% usage, disconnected mailbox, failed payment) and white-label branding — product name, company details and support email from Admin → Settings appear on every page and in the legal templates.
 - **Security**: per-workspace envelope encryption (AES-256-GCM + AAD) for credentials *and* email content, server-side revocable sessions, lockout, 2FA (required for admins), consent-based support access, emergency lockdown, SSRF-proof networking — see [docs/SECURITY.md](docs/SECURITY.md).
 
+- **Automation, not just drafting**: a live **Automation Center** (pipeline, real-time activity feed, auto-replies counting down with *Send now / Stop*, automation-readiness score, per-rule run counts), **10 one-click recipes**, **plain-language rules** ("when a customer is angry, assign it to me and draft an apology" → a validated rule you review), and **emails become tasks** (the AI extracts action items with due dates, linked to the email and assignable).
+
 ## Features
 
 | Area | What it does |
@@ -29,6 +31,9 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 | AI triage | Category, priority, sentiment, language, one-line summary per email |
 | Auto-reply | Replies in the sender's language, grounded in the customer's knowledge base. Modes per account: **Off** (sort only), **Draft** (human approves), **Auto-pilot** |
 | Guardrails | Never replies to no-reply/newsletters/bulk/auto-replies (RFC 3834), max one auto-reply per sender per 24h, business hours, confidence threshold, AI flags sensitive mail (legal, refunds, unknown facts) for a human, prompt-injection-resistant system prompt |
+| Automation Center | Live pipeline (arrived → automations → AI → safety checks → sent / approved / filtered / blocked), activity feed that updates every 5s, upcoming auto-sends with countdown, readiness checklist, rule performance |
+| Recipes & plain-language rules | 10 playbooks (lead fast-lane, angry-customer rescue, invoices to accounting, urgent → Slack …); describe an automation in words and AI builds a rule (ids and values validated server-side, never saved without review) |
+| Tasks | AI pulls action items out of every email (max 5, with due dates); manual tasks, assign to teammates, done/undo, shown on the email |
 | Rules engine | IF from/domain/subject/body/category/priority/sentiment/language … THEN AI reply (with extra instructions), template reply, forward, mark read, ignore, webhook (Slack/Zapier/Make/CRM) |
 | Approval queue | Edit-and-send AI drafts; ask AI to rewrite with instructions ("offer 10% discount") |
 | Knowledge base & templates | Facts the AI may use; canned replies with `{{first_name}}` tags |
@@ -45,7 +50,7 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 ```bash
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test             # 51 tests: unit, API, workflows, security attacks, real IMAP/SMTP end-to-end, browser (Playwright)
+npm test             # 56 tests: unit, API, workflows, security attacks, real IMAP/SMTP end-to-end, browser (Playwright)
 # Optional: explore with demo data (login demo@mailpilot.test / Demo-Pass-2026, platform admin)
 DB_PATH=./data/demo.db node scripts/seed-demo.js && DB_PATH=./data/demo.db npm start
 ```
@@ -110,10 +115,11 @@ scripts/seed-demo.js   demo data for screenshots and sales demos
 | Home | setup checklist, KPIs, hot leads, activity | everyone |
 | Inbox | two-pane inbox; views: inbox, mine, unassigned, overdue, awaiting reply, flagged, snoozed; bulk actions | everyone |
 | Approvals | AI drafts, follow-ups, scheduled autopilot replies (undo) | everyone |
+| Tasks | open · assigned to me · done; AI-extracted and manual to-dos | everyone |
+| Automation Center | Live pipeline · Recipes · Rules · Autopilot & safety · Test lab (setup tabs owner/admin) | everyone |
 | Ask AI · Contacts & leads · Analytics | | everyone |
 | Email accounts | connect (OAuth / IMAP), edit, signature, mode | owner/admin |
 | AI training | Business & voice · Knowledge base · Templates | owner/admin |
-| Autopilot & rules | Autopilot & safety · Rules · Test lab | owner/admin |
 | Alerts & API | Telegram/Slack, signed webhooks, API keys | owner/admin |
 | Declutter | newsletters & robots, one-click unsubscribe | everyone |
 | Settings | Profile · Team · Plan & billing (owner/admin) · Security & privacy · Refer & earn | everyone |

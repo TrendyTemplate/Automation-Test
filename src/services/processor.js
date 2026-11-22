@@ -117,6 +117,8 @@ export async function processMessage(messageId) {
   const attachments = pendingAttachments.get(msg.id) || [];
   pendingAttachments.delete(msg.id);
 
+  let matchedRuleName = null;
+  const hits = new Set(); // rules that fired for this email (counted once, shown in the Automation Center)
   try {
     if (msg.is_automated || contact?.blocked) {
       const t = fallbackTriage(msg);
@@ -130,13 +132,13 @@ export async function processMessage(messageId) {
     const callCap = plan.aiCalls || plan.aiRepliesPerMonth * 3;
     const canUseAi = aiEnabled() && plan.key !== 'expired' && usage.ai_replies < plan.aiRepliesPerMonth && usage.ai_calls < callCap;
     const rules = all('SELECT * FROM rules WHERE workspace_id = ? AND enabled = 1 ORDER BY position, id', ws.id);
-    let matchedRuleName = null;
     const evaluate = (m) => {
       const acts = [];
       for (const r of rules) {
         if (ruleMatches(m, JSON.parse(r.conditions_json))) {
           acts.push(...JSON.parse(r.actions_json));
           matchedRuleName ??= r.name;
+          hits.add(r.id);
           if (r.stop_processing) break;
         }
       }
@@ -196,6 +198,14 @@ export async function processMessage(messageId) {
     if (triage.is_phishing) alerts.push('phishing');
     if (triage.lead_score >= 80) alerts.push('hot_lead');
     alert(ws, triaged, alerts).catch(() => {});
+
+    if (!triage.is_phishing && Array.isArray(triage.action_items) && triage.action_items.length) {
+      for (const a of triage.action_items.slice(0, 5)) {
+        run('INSERT INTO tasks (workspace_id, message_id, title, due_text, source) VALUES (?,?,?,?,?)', ws.id, msg.id,
+          String(a.title).slice(0, 200), String(a.due || '').slice(0, 80) || null, 'ai');
+      }
+      logActivity(ws.id, 'tasks_extracted', { message: msg.id, count: Math.min(5, triage.action_items.length), subject: msg.subject });
+    }
 
     if (triage.is_phishing) {
       run(`UPDATE messages SET status='ignored' WHERE id=?`, msg.id);
@@ -273,6 +283,9 @@ export async function processMessage(messageId) {
     run(`UPDATE messages SET status='error', reasoning=? WHERE id=?`, `Error: ${e.message}`.slice(0, 300), msg.id);
     logActivity(ws.id, 'error', { message: msg.id, error: e.message });
     console.error(`[processor] message ${msg.id}:`, e.message);
+  } finally {
+    for (const id of hits) run(`UPDATE rules SET hits = hits + 1, last_hit_at = datetime('now') WHERE id = ?`, id);
+    if (hits.size) logActivity(ws.id, 'rule_fired', { message: msg.id, rules: [...hits].length, rule: matchedRuleName });
   }
 }
 

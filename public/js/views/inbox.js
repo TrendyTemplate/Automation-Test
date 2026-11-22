@@ -172,6 +172,9 @@ async function reader(ctx, id) {
           ${m.facts_used.length ? `<dt>Facts used</dt><dd>${m.facts_used.map(esc).join(', ')}</dd>` : ''}</dl>
           ${m.reasoning ? `<p class="why mt-s">${icon('info', 'sm')}<span>${esc(m.reasoning)}</span></p>` : ''}
           <button class="btn sm ghost mt-s" data-act="reprocess">${icon('refresh')}Re-analyse</button></div>
+        <div class="card flat"><div class="card-h"><h4 class="section-title" style="margin:0">${icon('listCheck', 'sm')} Tasks from this email</h4></div>
+          ${(m.tasks || []).map((t) => `<label class="check task-line ${t.done ? 'done' : ''}"><input type="checkbox" data-act="task" data-id="${t.id}" ${t.done ? 'checked' : ''}><span>${esc(t.title)}${t.due_text ? ` <span class="badge info">${esc(t.due_text)}</span>` : ''}${t.source === 'ai' ? ` <span class="hint" title="Pulled out of the email by AI">${icon('sparkles', 'sm')}</span>` : ''}</span></label>`).join('') || '<p class="hint">No action items found.</p>'}
+          <form data-act="addTask" class="row nowrap mt-s"><input name="title" placeholder="Add a to-do…" style="flex:1"><button class="btn sm" type="submit">Add</button></form></div>
         ${m.contact ? `<div class="card flat"><div class="row nowrap">${avatar(m.contact.name, m.contact.email)}<div class="truncate" style="flex:1"><b>${esc(m.contact.name || m.contact.email)}</b>${m.contact.vip ? ' <span class="badge warn">VIP</span>' : ''}<div class="hint truncate">${esc(m.contact.company || m.contact.email)}</div></div></div>
           <dl class="kv mt"><dt>Emails</dt><dd>${m.contact.emails_in} in · ${m.contact.emails_out} out</dd>${ex.map(([k, v]) => `<dt>${esc(label(k))}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
           <div class="row mt"><a class="btn sm" href="#contact?id=${m.contact.id}">Profile</a><button class="btn sm" data-act="vip">${m.contact.vip ? 'Remove VIP' : 'Mark VIP'}</button><button class="btn sm danger" data-act="block">${m.contact.blocked ? 'Unblock' : 'Block'}</button></div></div>` : ''}
@@ -238,6 +241,8 @@ async function reader(ctx, id) {
       toast(r.guard?.length ? 'Draft ready — check the safety notes' : 'New draft ready'); refresh();
     },
     note: async (f) => { await api(`/messages/${id}/notes`, { method: 'POST', body: formData(f) }); refresh(); },
+    task: async (c) => { await api(`/tasks/${c.dataset.id}`, { method: 'PATCH', body: { done: c.checked } }); c.closest('.task-line').classList.toggle('done', c.checked); toast(c.checked ? 'Task done' : 'Task reopened'); },
+    addTask: async (f) => { const d = formData(f); if (!d.title.trim()) return; await api('/tasks', { method: 'POST', body: { title: d.title, message_id: id } }); refresh(); },
     vip: async () => { await api(`/contacts/${m.contact.id}`, { method: 'PUT', body: { vip: !m.contact.vip } }); toast(m.contact.vip ? 'VIP removed' : 'Marked VIP — replies to them are always reviewed'); refresh(); },
     block: async () => { await api(`/contacts/${m.contact.id}`, { method: 'PUT', body: { blocked: !m.contact.blocked } }); toast(m.contact.blocked ? 'Unblocked' : 'Blocked — future emails are ignored'); refresh(); },
   }, box);

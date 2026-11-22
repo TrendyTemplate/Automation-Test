@@ -52,6 +52,25 @@ emails.forEach(([mb, name, from, subject, category, priority, sentiment, lang, s
 run(`INSERT INTO usage (workspace_id, period, ai_calls, ai_replies, emails_sent, input_tokens, output_tokens) VALUES (?, ?, 412, 318, 287, 1650000, 210000)`, ws, new Date().toISOString().slice(0, 7));
 run(`INSERT INTO activity (workspace_id, type, detail) VALUES (?, 'auto_reply_sent', '{"to":"sarah@bigcorp.com","subject":"Group trip to Bali"}'), (?, 'phishing_blocked', '{"from":"security@acme-trave1.com","subject":"Your mailbox password expires today"}')`, ws, ws);
 
+// Automation Center demo: running recipes with hit counts, AI-extracted tasks, activity and a queued auto-reply.
+for (const [key, name, hits, cond, acts] of [
+  ['lead_fast_lane', 'Lead fast-lane', 38, '{"match":"all","items":[{"field":"category","op":"equals","value":"sales_inquiry"}]}', '[{"type":"ai_reply","mode":"draft"}]'],
+  ['newsletter_silence', 'Newsletter silence', 214, '{"match":"any","items":[{"field":"category","op":"equals","value":"newsletter"}]}', '[{"type":"mark_read"},{"type":"ignore"}]'],
+  ['angry_customer', 'Angry-customer rescue', 6, '{"match":"any","items":[{"field":"sentiment","op":"equals","value":"negative"}]}', `[{"type":"assign","user_id":${uid}},{"type":"ai_reply","mode":"draft"}]`],
+]) run(`INSERT INTO rules (workspace_id, name, enabled, position, conditions_json, actions_json, stop_processing, recipe_key, hits, last_hit_at) VALUES (?,?,1,0,?,?,1,?,?, datetime('now','-25 minutes'))`, ws, name, cond, acts, key, hits);
+const firstMsg = one('SELECT id FROM messages WHERE workspace_id = ? ORDER BY id LIMIT 1', ws).id;
+for (const [t, due, off, done] of [['Send Bali group quote to BigCorp', 'Friday', 0, 0], ['Confirm Ahmed’s booking and call him', 'Today', 2, 0], ['Change Priya’s dates to 19 April', '', 3, 1], ['Prepare Maldives honeymoon options', 'This week', 4, 0]]) {
+  run(`INSERT INTO tasks (workspace_id, message_id, title, due_text, source, assigned_to, done) VALUES (?,?,?,?, 'ai', ?, ?)`, ws, firstMsg + off, t, due || null, off === 2 ? uid : null, done);
+}
+for (let i = 0; i < 7; i++) run(`INSERT INTO ai_log (workspace_id, message_id, purpose, model, input_tokens, output_tokens, created_at) VALUES (?, ?, 'triage+draft', 'demo', 1800, 300, datetime('now', ?))`, ws, firstMsg + i, `-${i * 3} hours`);
+run(`INSERT INTO activity (workspace_id, type, detail, created_at) VALUES
+  (?, 'rule_fired', '{"rule":"Lead fast-lane","message":${firstMsg}}', datetime('now','-40 minutes')),
+  (?, 'tasks_extracted', '{"count":1,"subject":"Group trip to Bali for 25 people","message":${firstMsg}}', datetime('now','-39 minutes')),
+  (?, 'draft_created', '{"from":"carlos@mendez.es","subject":"¿Precio del paquete a Tailandia?","message":${firstMsg + 1}}', datetime('now','-20 minutes')),
+  (?, 'rule_fired', '{"rule":"Angry-customer rescue","message":${firstMsg + 2}}', datetime('now','-12 minutes'))`, ws, ws, ws, ws);
+run(`INSERT INTO replies (workspace_id, message_id, subject, body, source, status, scheduled_at) VALUES (?,?,?,?, 'ai', 'scheduled', ?)`, ws, firstMsg + 6, 'Re: Partnership with our wedding planning agency',
+  'Hi Emma, thanks for reaching out…', new Date(Date.now() + 3 * 60_000).toISOString());
+
 // A few more customers for the admin panel.
 for (const [e, plan, status, interval, amount, method] of [
   ['nora@bakery.co', 'starter', 'active', 'monthly', 19, 'stripe'], ['li@agency.cn', 'business', 'active', 'yearly', 1490, 'stripe'],

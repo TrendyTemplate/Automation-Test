@@ -56,10 +56,11 @@
 | Home | সেটআপ চেকলিস্ট, মূল সংখ্যাগুলো, হট লিড, সাম্প্রতিক কার্যক্রম | সবাই |
 | Inbox | দুই প্যানেলের ইনবক্স। ভিউ: আমার, কাউকে দেওয়া হয়নি, দেরি হয়েছে (overdue), উত্তরের অপেক্ষায়, সতর্কতা আছে, স্নুজ করা। একসাথে অনেক মেইলে কাজ (bulk) | সবাই |
 | Approvals | AI-এর ড্রাফট, ফলো-আপ, অটোপাইলটে পাঠানোর অপেক্ষায় থাকা রিপ্লাই (Undo) | সবাই |
+| Tasks (নতুন) | মেইল থেকে AI যেসব কাজ বের করেছে (যেমন "শুক্রবারের মধ্যে কোটেশন পাঠাও") + নিজের কাজ; টিমমেটকে দেওয়া যায় | সবাই |
+| Automation Center (নতুন) | ট্যাব: Live pipeline · Recipes · Rules · Autopilot & safety · Test lab | সবাই (সেটআপ ট্যাব Owner/Admin) |
 | Ask AI · Contacts & leads · Analytics | — | সবাই |
 | Email accounts | মেইলবক্স কানেক্ট (এক-ক্লিক বা IMAP), এডিট, সিগনেচার, মোড | Owner/Admin |
 | AI training | ট্যাব: Business & voice · Knowledge base · Templates | Owner/Admin |
-| Autopilot & rules | ট্যাব: Autopilot & safety · Rules · Test lab | Owner/Admin |
 | Alerts & API | Telegram/Slack অ্যালার্ট, ওয়েবহুক, API key | Owner/Admin |
 | Declutter | নিউজলেটার ও অটোমেটেড প্রেরক, এক ক্লিকে আনসাবস্ক্রাইব | সবাই |
 | Settings | ট্যাব: Profile · Team · Plan & billing · Security & privacy · Refer & earn | সবাই (বিলিং শুধু Owner/Admin) |

@@ -435,3 +435,22 @@ CREATE TABLE IF NOT EXISTS lifecycle_sent (     -- de-duplicates automatic custo
   sent_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (workspace_id, kind, ref)
 );
 `);
+
+// ---------------------------------------------------------------------------
+// Migrations (v5): automation center — rule performance, recipes, AI-extracted tasks.
+// ---------------------------------------------------------------------------
+addColumn('rules', 'hits', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('rules', 'last_hit_at', 'TEXT');
+addColumn('rules', 'recipe_key', 'TEXT');
+db.exec(`
+CREATE TABLE IF NOT EXISTS tasks (               -- to-dos the AI pulled out of emails (or added by hand)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+  title TEXT NOT NULL, due_text TEXT, source TEXT NOT NULL DEFAULT 'ai',
+  assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  done INTEGER NOT NULL DEFAULT 0, done_at TEXT, created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_ws ON tasks(workspace_id, done, id DESC);
+`);

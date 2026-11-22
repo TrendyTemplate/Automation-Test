@@ -4,6 +4,7 @@ import * as inbox from './views/inbox.js';
 import * as crm from './views/crm.js';
 import * as setup from './views/setup.js';
 import * as account from './views/account.js';
+import * as automation from './views/automation.js';
 
 const ctx = { me: null, view: $('#view'), counts: {} };
 const MANAGERS = ['owner', 'admin'];
@@ -13,13 +14,14 @@ const NAV = [
   { id: 'dashboard', label: 'Home', icon: 'home' },
   { id: 'inbox', label: 'Inbox', icon: 'inbox', count: 'inbox' },
   { id: 'approvals', label: 'Approvals', icon: 'checkCircle', count: 'approvals' },
+  { id: 'tasks', label: 'Tasks', icon: 'listCheck', count: 'tasks' },
+  { id: 'automation', label: 'Automation Center', icon: 'workflow' },
   { id: 'ask', label: 'Ask AI', icon: 'sparkles' },
   { id: 'contacts', label: 'Contacts & leads', icon: 'users' },
   { id: 'analytics', label: 'Analytics', icon: 'chart' },
   { group: 'Setup', roles: MANAGERS },
   { id: 'mailboxes', label: 'Email accounts', icon: 'mail', roles: MANAGERS },
   { id: 'brain', label: 'AI training', icon: 'brain', roles: MANAGERS },
-  { id: 'autopilot', label: 'Autopilot & rules', icon: 'shieldCheck', roles: MANAGERS },
   { id: 'integrations', label: 'Alerts & API', icon: 'plug', roles: MANAGERS },
   { group: 'Tools' },
   { id: 'declutter', label: 'Declutter', icon: 'archive' },
@@ -30,12 +32,12 @@ const NAV = [
 // Pages grouped under one sidebar entry, shown as tabs.
 const SECTIONS = {
   brain: [['brain', 'Business & voice', 'wand'], ['knowledge', 'Knowledge base', 'book'], ['templates', 'Templates', 'file']],
-  autopilot: [['autopilot', 'Autopilot & safety', 'shieldCheck'], ['rules', 'Rules', 'zap'], ['simulator', 'Test lab', 'flask']],
+  automation: [['automation', 'Live pipeline', 'activity'], ['recipes', 'Recipes', 'sparkles', MANAGERS], ['rules', 'Rules', 'zap', MANAGERS], ['autopilot', 'Autopilot & safety', 'shieldCheck', MANAGERS], ['simulator', 'Test lab', 'flask']],
   profile: [['profile', 'Profile', 'users'], ['team', 'Team', 'users'], ['billing', 'Plan & billing', 'card', MANAGERS], ['security', 'Security & privacy', 'lock'], ['referrals', 'Refer & earn', 'gift']],
 };
 const PARENT = { message: 'inbox', contact: 'contacts', ticket: 'support' };
 for (const [parent, tabs] of Object.entries(SECTIONS)) for (const [id] of tabs) PARENT[id] = parent;
-const ROLE_ONLY = { mailboxes: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, templates: MANAGERS, autopilot: MANAGERS, rules: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
+const ROLE_ONLY = { mailboxes: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, templates: MANAGERS, autopilot: MANAGERS, rules: MANAGERS, recipes: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
 
 const ROUTES = {
   dashboard: home.dashboard, ask: home.ask, approvals: home.approvals,
@@ -43,6 +45,7 @@ const ROUTES = {
   contacts: crm.contacts, contact: crm.contact, analytics: crm.analytics, declutter: crm.declutter, simulator: crm.simulator,
   mailboxes: setup.mailboxes, brain: setup.brain, autopilot: setup.autopilot, knowledge: setup.knowledge, templates: setup.templates,
   rules: setup.rules, integrations: setup.integrations,
+  automation: automation.automation, recipes: automation.recipes, tasks: automation.tasks,
   profile: account.profile, team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
 };
 const allowed = (roles) => !roles || roles.includes(ctx.me?.role);
@@ -61,8 +64,8 @@ function sectionTabs(name) {
 
 async function refreshCounts() {
   try {
-    const [q, c] = await Promise.all([api('/replies?status=queue'), api('/messages/counts')]);
-    ctx.counts = { approvals: q.length, inbox: c.unassigned || 0, ...c };
+    const [q, c, t] = await Promise.all([api('/replies?status=queue'), api('/messages/counts'), api('/tasks/counts')]);
+    ctx.counts = { approvals: q.length, inbox: c.unassigned || 0, ...c, tasks: t.open || 0 };
   } catch { /* ignore */ }
   renderNav(currentRoute().parent);
 }

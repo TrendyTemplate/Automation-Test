@@ -7,7 +7,8 @@ import { PROVIDERS, guessProvider } from '../services/providers.js';
 import { testConnection, fetchSentSamples, sendNew } from '../services/mail.js';
 import { syncMailbox } from '../services/worker.js';
 import { processMessage, sendStoredReply, recordCorrection, guardReply, deliverWebhook } from '../services/processor.js';
-import { askInbox, learnStyle, translate, aiEnabled, analyzeEmail, CATEGORIES, fallbackTriage } from '../services/ai.js';
+import { askInbox, learnStyle, translate, aiEnabled, analyzeEmail, CATEGORIES, fallbackTriage, ruleFromText } from '../services/ai.js';
+import { publicRecipes, buildRecipe } from '../services/recipes.js';
 import { sendTelegram, sendSlack, notifyAdmins } from '../services/notify.js';
 import { oauthAvailability, revokeMailboxGrant } from '../services/oauth.js';
 import { safeFetch } from '../services/net.js';
@@ -244,6 +245,7 @@ r.get('/messages/:id', (req, res) => {
   m.contact = m.contact_id ? one('SELECT * FROM contacts WHERE id = ?', m.contact_id) : null;
   m.notes = all(`SELECT n.id, n.body, n.created_at, u.name, u.email FROM message_notes n LEFT JOIN users u ON u.id = n.user_id WHERE n.message_id = ? ORDER BY n.id`, m.id);
   m.team = all('SELECT u.id, u.name, u.email FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = ?', wsId(req));
+  m.tasks = all('SELECT id, title, due_text, done, source FROM tasks WHERE message_id = ? AND workspace_id = ? ORDER BY id', m.id, wsId(req));
   touchViewer(m.id, req.user);
   m.viewers = currentViewers(m.id, req.user.id);
   res.json(m);
@@ -477,6 +479,145 @@ r.delete('/rules/:id', manage, (req, res) => {
   run('DELETE FROM rules WHERE id=? AND workspace_id=?', int(req.params.id), wsId(req));
   res.json({ ok: true });
 });
+// ---------- Automation Center: the live pipeline, upcoming sends, readiness ----------
+const RANGES = { '24h': '-1 day', '7d': '-7 days', '30d': '-30 days' };
+r.get('/automation/overview', (req, res) => {
+  const id = wsId(req);
+  const since = RANGES[req.query.range] || RANGES['7d'];
+  const c = (sql, ...a) => one(sql, ...a)?.n || 0;
+  const act = (type) => c(`SELECT COUNT(*) AS n FROM activity WHERE workspace_id = ? AND type = ? AND created_at > datetime('now', ?)`, id, type, since);
+  const inRange = `workspace_id = ? AND datetime(received_at) > datetime('now', ?)`;
+  const stages = {
+    received: c(`SELECT COUNT(*) AS n FROM messages WHERE ${inRange}`, id, since),
+    filtered: c(`SELECT COUNT(*) AS n FROM messages WHERE ${inRange} AND status = 'ignored' AND is_phishing = 0`, id, since),
+    phishing: c(`SELECT COUNT(*) AS n FROM messages WHERE ${inRange} AND is_phishing = 1`, id, since),
+    ai_read: c(`SELECT COUNT(*) AS n FROM ai_log WHERE workspace_id = ? AND purpose = 'triage+draft' AND created_at > datetime('now', ?)`, id, since),
+    rules_fired: act('rule_fired'),
+    drafted: c(`SELECT COUNT(*) AS n FROM replies WHERE workspace_id = ? AND created_at > datetime('now', ?)`, id, since),
+    held: c(`SELECT COUNT(*) AS n FROM replies WHERE workspace_id = ? AND guard_json IS NOT NULL AND created_at > datetime('now', ?)`, id, since),
+    auto_sent: act('auto_reply_sent') + act('followup_sent'),
+    approved_sent: act('reply_approved_sent'),
+    tasks: c(`SELECT COUNT(*) AS n FROM tasks WHERE workspace_id = ? AND created_at > datetime('now', ?)`, id, since),
+  };
+  const handled = stages.filtered + stages.phishing + stages.auto_sent;
+  const automationRate = stages.received ? Math.min(100, Math.round((handled / stages.received) * 100)) : 0;
+  const upcoming = all(`SELECT r.id, r.scheduled_at, r.subject, m.from_name, m.from_email, m.id AS message_id FROM replies r
+    JOIN messages m ON m.id = r.message_id WHERE r.workspace_id = ? AND r.status = 'scheduled' ORDER BY r.scheduled_at LIMIT 10`, id);
+  const rules = all('SELECT id, name, enabled, hits, last_hit_at, recipe_key FROM rules WHERE workspace_id = ? ORDER BY hits DESC, position LIMIT 20', id);
+  const feed = all('SELECT id, type, detail, created_at FROM activity WHERE workspace_id = ? AND id > ? ORDER BY id DESC LIMIT 40', id, int(req.query.after) || 0);
+  // Readiness: what is still keeping work from being automated, with the next best action.
+  const mb = one(`SELECT COUNT(*) AS n, SUM(enabled = 1 AND last_error IS NULL) AS ok, SUM(mode = 'auto') AS auto FROM mailboxes WHERE workspace_id = ?`, id);
+  const kb = c('SELECT COUNT(*) AS n FROM knowledge WHERE workspace_id = ?', id);
+  const ruleCount = rules.filter((x) => x.enabled).length;
+  const checks = [
+    { key: 'mailbox', ok: (mb.ok || 0) > 0, label: 'An email account is connected and healthy', href: '#mailboxes' },
+    { key: 'ai', ok: aiEnabled(), label: 'AI is switched on', href: '#support' },
+    { key: 'brain', ok: Boolean(req.workspace.business_description), label: 'The AI knows what your business does', href: '#brain' },
+    { key: 'kb', ok: kb >= 3, label: 'At least 3 knowledge-base facts (prices, policies, hours)', href: '#knowledge' },
+    { key: 'rules', ok: ruleCount >= 2, label: 'At least 2 automations running (try a recipe)', href: '#recipes' },
+    { key: 'voice', ok: Boolean(req.workspace.style_guide), label: 'AI learned your writing voice', href: '#brain' },
+    { key: 'autopilot', ok: (mb.auto || 0) > 0, label: 'Autopilot is on for at least one account', href: '#autopilot' },
+  ];
+  res.json({ range: Object.keys(RANGES).find((k) => RANGES[k] === since), stages, automationRate, upcoming, rules, feed,
+    readiness: { score: Math.round((checks.filter((x) => x.ok).length / checks.length) * 100), checks },
+    minutesSaved: Math.round(stages.auto_sent * 4 + stages.approved_sent * 3 + stages.filtered * 0.5 + stages.tasks * 1) });
+});
+
+// Send a scheduled autopilot reply right now (skip the human-like delay) or cancel it back to the approval queue.
+r.post('/automation/scheduled/:id/:action', async (req, res) => {
+  const rep = one(`SELECT * FROM replies WHERE id = ? AND workspace_id = ? AND status = 'scheduled'`, int(req.params.id), wsId(req));
+  if (!rep) return res.status(404).json({ error: 'This reply is no longer scheduled' });
+  if (req.params.action === 'cancel') {
+    run(`UPDATE replies SET status='pending', scheduled_at=NULL, error='Auto-send cancelled by a teammate' WHERE id = ?`, rep.id);
+    logActivity(wsId(req), 'auto_send_cancelled', { message: rep.message_id, by: req.user.name || req.user.email });
+    return res.json({ ok: true });
+  }
+  if (req.params.action !== 'now') return res.status(400).json({ error: 'Unknown action' });
+  try { await sendStoredReply(rep.id, req.user.id); res.json({ ok: true }); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// ---------- Recipes (one-click automations) ----------
+r.get('/recipes', (req, res) => {
+  const installed = new Set(all('SELECT recipe_key FROM rules WHERE workspace_id = ? AND recipe_key IS NOT NULL', wsId(req)).map((x) => x.recipe_key));
+  res.json(publicRecipes(installed));
+});
+r.post('/recipes/:key/install', manage, (req, res) => {
+  const plan = effectivePlan(req.workspace);
+  if (one('SELECT COUNT(*) AS n FROM rules WHERE workspace_id = ?', wsId(req)).n >= plan.rules) return res.status(402).json({ error: `Your plan allows ${plan.rules} rules` });
+  if (one('SELECT id FROM rules WHERE workspace_id = ? AND recipe_key = ?', wsId(req), str(req.params.key, 60))) return res.status(409).json({ error: 'This recipe is already installed' });
+  const rule = buildRecipe(str(req.params.key, 60), req.body?.params || {}, { userId: req.user.id });
+  if (!rule) return res.status(404).json({ error: 'Unknown recipe' });
+  const err = validateRule(rule);
+  if (err) return res.status(400).json({ error: err });
+  const pos = one('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM rules WHERE workspace_id = ?', wsId(req)).p;
+  const x = run(`INSERT INTO rules (workspace_id, name, enabled, position, conditions_json, actions_json, stop_processing, recipe_key) VALUES (?,?,?,?,?,?,?,?)`,
+    wsId(req), rule.name, 1, pos, JSON.stringify(rule.conditions), JSON.stringify(rule.actions), rule.stop_processing ? 1 : 0, rule.recipe_key);
+  logActivity(wsId(req), 'automation_installed', { rule: rule.name });
+  res.json({ id: Number(x.lastInsertRowid), rule });
+});
+
+// "Describe it": plain language → rule preview (not saved until the user confirms in the builder).
+r.post('/rules/from-text', manage, async (req, res) => {
+  const text = str(req.body?.text, 1500).trim();
+  if (text.length < 8) return res.status(400).json({ error: 'Describe the automation in a sentence, e.g. “When a customer is angry, assign it to me and draft an apology.”' });
+  if (!aiEnabled()) return res.status(400).json({ error: 'AI is not configured on this server' });
+  const plan = effectivePlan(req.workspace);
+  const usage = getUsage(wsId(req));
+  if (usage.ai_calls >= (plan.aiCalls || plan.aiRepliesPerMonth * 3)) return res.status(402).json({ error: 'Monthly AI limit reached — upgrade your plan' });
+  const templates = all('SELECT id, name FROM templates WHERE workspace_id = ?', wsId(req));
+  const team = all('SELECT u.id, u.name, u.email FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = ?', wsId(req));
+  try {
+    const out = await ruleFromText(req.workspace, text, { fields: FIELDS, ops: OPS, actions: ACTIONS, categories: CATEGORIES, templates, team });
+    // Never trust ids the model returns: they must belong to this workspace.
+    for (const a of out.rule.actions) {
+      if (a.type === 'template_reply' && !templates.some((t) => t.id === a.template_id)) { out.understood = false; out.question ||= 'Which template should be used? Create it under AI training → Templates first.'; }
+      if (a.type === 'assign' && !team.some((u) => u.id === a.user_id)) a.user_id = req.user.id;
+    }
+    const err = out.understood ? validateRule(out.rule) : null;
+    res.json({ ...out, error: err });
+  } catch (e) { res.status(502).json({ error: `Could not build the rule: ${e.message}` }); }
+});
+
+// ---------- Tasks (action items the AI pulled out of emails) ----------
+r.get('/tasks', (req, res) => {
+  const done = req.query.status === 'done' ? 1 : 0;
+  const mine = req.query.mine === '1';
+  res.json(all(`SELECT t.*, m.subject, m.from_name, m.from_email, u.name AS assignee FROM tasks t
+    LEFT JOIN messages m ON m.id = t.message_id LEFT JOIN users u ON u.id = t.assigned_to
+    WHERE t.workspace_id = ? AND t.done = ? ${mine ? 'AND t.assigned_to = ?' : ''} ORDER BY t.id DESC LIMIT 300`, wsId(req), done, ...(mine ? [req.user.id] : [])));
+});
+r.get('/tasks/counts', (req, res) => {
+  res.json(one(`SELECT SUM(done = 0) AS open, SUM(done = 1) AS done, SUM(done = 0 AND assigned_to = ?) AS mine FROM tasks WHERE workspace_id = ?`, req.user.id, wsId(req)));
+});
+r.post('/tasks', (req, res) => {
+  const title = str(req.body?.title, 200).trim();
+  if (!title) return res.status(400).json({ error: 'Task title is required' });
+  const msgId = int(req.body?.message_id) || null;
+  if (msgId && !one('SELECT id FROM messages WHERE id = ? AND workspace_id = ?', msgId, wsId(req))) return res.status(404).json({ error: 'Email not found' });
+  const x = run('INSERT INTO tasks (workspace_id, message_id, title, due_text, source, assigned_to, created_by) VALUES (?,?,?,?,?,?,?)',
+    wsId(req), msgId, title, str(req.body?.due_text, 80) || null, 'manual', req.user.id, req.user.id);
+  res.json({ id: Number(x.lastInsertRowid) });
+});
+r.patch('/tasks/:id', (req, res) => {
+  const t = one('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {};
+  let assignee = t.assigned_to;
+  if (b.assigned_to !== undefined) {
+    assignee = b.assigned_to ? int(b.assigned_to) : null;
+    if (assignee && !one('SELECT 1 AS x FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), assignee)) return res.status(400).json({ error: 'Not a teammate' });
+  }
+  const done = b.done === undefined ? t.done : (b.done ? 1 : 0);
+  run(`UPDATE tasks SET title = ?, due_text = ?, assigned_to = ?, done = ?, done_at = CASE WHEN ? = 1 AND done = 0 THEN datetime('now') WHEN ? = 0 THEN NULL ELSE done_at END WHERE id = ?`,
+    b.title !== undefined ? (str(b.title, 200).trim() || t.title) : t.title, b.due_text !== undefined ? (str(b.due_text, 80) || null) : t.due_text,
+    assignee, done, done, done, t.id);
+  res.json({ ok: true });
+});
+r.delete('/tasks/:id', (req, res) => {
+  run('DELETE FROM tasks WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  res.json({ ok: true });
+});
+
 
 // ---------- Templates & knowledge base (simple CRUD) ----------
 for (const [path, table, fields] of [['templates', 'templates', ['name', 'subject', 'body']], ['knowledge', 'knowledge', ['title', 'content']]]) {

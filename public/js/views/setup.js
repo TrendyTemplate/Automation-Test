@@ -161,7 +161,7 @@ export async function autopilot(ctx) {
   let bh = {}; try { bh = s.business_hours ? JSON.parse(s.business_hours) : {}; } catch { /* none */ }
   const alerts = String(s.alert_on || '').split(',');
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Autopilot & rules</h1><p>Decide exactly when the AI may send on its own. Every reply passes deterministic safety checks first — the AI can't talk its way past them.</p></div></div>
+    <div class="page-h"><div><h1>Autopilot & safety</h1><p>Decide exactly when the AI may send on its own. Every reply passes deterministic safety checks first — the AI can't talk its way past them.</p></div></div>
     <div class="callout info">${icon('shieldCheck')}<div><b>Always on, can't be disabled:</b> never replies to newsletters, robots or phishing · never sends to anyone except the original sender · blocks invented prices, unknown links, third-party email addresses, secrets and card numbers · detects hidden "prompt injection" instructions · max one auto-reply per person per day.</div></div>
     <form data-act="save" class="col" style="gap:16px">
       <div class="card"><h3>${icon('target')} Earned autopilot</h3>
@@ -240,27 +240,21 @@ export const knowledge = crudView('knowledge', 'Knowledge base',
 export const templates = crudView('templates', 'Templates', 'Canned replies for rules. Personalise with {{first_name}}, {{name}}, {{email}}, {{subject}}.',
   [['name', 'Name'], ['subject', 'Subject (blank = Re: original)'], ['body', 'Body', true]]);
 
-export async function rules(ctx) {
+export async function rules(ctx, params = {}) {
   const [list, meta, tpls, teamRes] = await Promise.all([api('/rules'), api('/rules/meta'), api('/templates'), api('/team')]);
   const team = teamRes.members;
   const describe = (r) => `<b>When</b> ${r.conditions.items.map((c) => `${esc(label(c.field))} ${esc(c.op.replace('_', ' '))} “${esc(c.value)}”`).join(r.conditions.match === 'any' ? ' <b>or</b> ' : ' <b>and</b> ') || 'any email arrives'} <b>then</b> ${r.actions.map((a) => esc(label(a.type)) + (a.to ? ` ${esc(a.to)}` : '') + (a.mode ? ` (${esc(a.mode)})` : '') + (a.hours ? ` ${a.hours}h` : '') + (a.user_id ? ` → ${esc(team.find((u) => u.id === a.user_id)?.name || 'teammate')}` : '')).join(', ')}`;
-  const recipes = [
-    { name: 'Complaints → careful apology draft', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'complaint' }] }, actions: [{ type: 'ai_reply', mode: 'draft', instructions: 'Apologize sincerely, acknowledge the problem, and say a manager will reply within 24 hours.' }] },
-    { name: 'Ignore receipts from your tools', conditions: { match: 'all', items: [{ field: 'subject', op: 'regex', value: '^(receipt|your invoice|payment received)' }] }, actions: [{ type: 'ignore' }] },
-    { name: 'Job applications → thank-you template', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'job_application' }] }, actions: [{ type: 'template_reply', mode: 'auto' }] },
-    { name: 'Sales leads → CRM webhook', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'sales_inquiry' }] }, actions: [{ type: 'webhook', url: '' }] },
-    { name: 'Billing → assign to finance', conditions: { match: 'all', items: [{ field: 'category', op: 'equals', value: 'billing' }] }, actions: [{ type: 'assign' }] },
-    { name: 'VIP domain → urgent alert', conditions: { match: 'any', items: [{ field: 'from_domain', op: 'equals', value: 'bigclient.com' }] }, actions: [{ type: 'ai_reply', mode: 'draft', instructions: 'This is a key client. Be extra attentive.' }] },
-  ];
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Autopilot & rules</h1><p>No-code automations that run on every new email, top to bottom. The first matching rule wins unless “continue” is ticked.</p></div>
-      <div class="actions"><button class="btn primary" data-act="new">${icon('plus')}New rule</button></div></div>
+    <div class="page-h"><div><h1>Rules</h1><p>No-code automations that run on every new email, top to bottom. The first matching rule wins unless “continue” is ticked.</p></div>
+      <div class="actions"><a class="btn" href="#recipes">${icon('sparkles')}Recipes</a><button class="btn primary" data-act="new">${icon('plus')}New rule</button></div></div>
+    <form class="card describe mb" data-act="describe"><div class="row nowrap">${icon('sparkles')}<b>Describe it — AI builds the rule</b></div>
+      <div class="row nowrap mt-s"><input name="text" maxlength="1500" placeholder="e.g. When a customer is angry, assign it to me and draft an apology" style="flex:1"><button class="btn primary" type="submit">${icon('wand')}Build</button></div>
+      <p class="hint" style="margin:6px 0 0">You always review the rule before it is saved.</p></form>
     <div class="card pad-0 mb">${list.map((r, i) => `<div class="row nowrap" style="padding:14px 20px;border-bottom:1px solid var(--border)">
       <div class="col" style="gap:2px"><button class="btn xs ghost icon-only" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move up" style="transform:rotate(180deg)">${icon('chevron', 'sm')}</button><button class="btn xs ghost icon-only" data-act="down" data-i="${i}" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">${icon('chevron', 'sm')}</button></div>
-      ${icon('zap')}<div style="flex:1;min-width:0"><b>${esc(r.name)}</b><div class="hint">${describe(r)}${r.stop_processing ? '' : ' · <i>continues to next rules</i>'}</div></div>
+      ${icon('zap')}<div style="flex:1;min-width:0"><b>${esc(r.name)}</b><div class="hint">${describe(r)}${r.stop_processing ? '' : ' · <i>continues to next rules</i>'}</div><div class="hint">${icon('activity', 'sm')} ran ${r.hits || 0}×${r.last_hit_at ? ` · last ${ago(r.last_hit_at)}` : ''}</div></div>
       <label class="switch" title="${r.enabled ? 'On' : 'Off'}"><input type="checkbox" data-act="toggle" data-id="${r.id}" ${r.enabled ? 'checked' : ''}><span></span></label>
-      <button class="btn sm" data-act="edit" data-id="${r.id}">Edit</button><button class="btn sm ghost danger" data-act="del" data-id="${r.id}" aria-label="Delete">${icon('trash')}</button></div>`).join('') || `<div style="padding:8px">${empty('zap', 'No rules yet', 'Start from a recipe below or create your own.')}</div>`}</div>
-    <div class="card"><h3>Recipes</h3><p class="hint">One click to pre-fill a common automation.</p><div class="chips">${recipes.map((x, i) => `<button class="chip" data-act="recipe" data-i="${i}">${esc(x.name)}</button>`).join('')}</div></div>`;
+      <button class="btn sm" data-act="edit" data-id="${r.id}">Edit</button><button class="btn sm ghost danger" data-act="del" data-id="${r.id}" aria-label="Delete">${icon('trash')}</button></div>`).join('') || `<div style="padding:8px">${empty('zap', 'No rules yet', 'Turn on a <a href="#recipes">recipe</a>, describe one above, or create your own.')}</div>`}</div>`;
 
   const condRow = (c = { field: 'category', op: 'equals', value: '' }) => `<div class="row nowrap cond" style="margin-bottom:8px"><select data-k="field">${meta.fields.map((f) => `<option value="${f}" ${c.field === f ? 'selected' : ''}>${esc(label(f))}</option>`).join('')}</select>
     <select data-k="op">${meta.ops.map((o) => `<option value="${o}" ${c.op === o ? 'selected' : ''}>${esc(o.replace('_', ' '))}</option>`).join('')}</select>
@@ -315,10 +309,20 @@ export async function rules(ctx) {
     [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
     await api('/rules/reorder', { method: 'POST', body: { ids } }); ctx.route();
   };
+  if (params.draft) {
+    let draft = null;
+    try { draft = JSON.parse(sessionStorage.getItem('mp:draft-rule') || 'null'); sessionStorage.removeItem('mp:draft-rule'); } catch { /* none */ }
+    if (draft) setTimeout(() => openBuilder({ ...draft, stop_processing: draft.stop_processing ? 1 : 0, enabled: 1 }), 0);
+  }
   bind({
     new: () => openBuilder(null),
     edit: (b) => openBuilder(list.find((r) => String(r.id) === b.dataset.id)),
-    recipe: (b) => openBuilder({ ...recipes[Number(b.dataset.i)], stop_processing: 1, enabled: 1 }),
+    describe: async (f) => {
+      const out = await api('/rules/from-text', { method: 'POST', body: { text: formData(f).text } });
+      if (!out.understood) { toast(out.question || 'Could you describe it a bit more specifically?', true); return; }
+      if (out.error) toast(`Please check: ${out.error}`, true);
+      openBuilder({ ...out.rule, stop_processing: out.rule.stop_processing ? 1 : 0, enabled: 1 });
+    },
     toggle: async (c) => { await api(`/rules/${c.dataset.id}`, { method: 'PATCH', body: { enabled: c.checked } }); toast(c.checked ? 'Rule on' : 'Rule off'); },
     up: (b) => move(Number(b.dataset.i), -1),
     down: (b) => move(Number(b.dataset.i), 1),

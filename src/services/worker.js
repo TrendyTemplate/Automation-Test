@@ -32,9 +32,10 @@ export async function syncMailbox(mailboxId) {
     for (const id of ids) await processMessage(id);
     return { fetched: messages.length, stored: ids.length };
   } catch (e) {
+    const mb = one('SELECT workspace_id, last_error FROM mailboxes WHERE id = ?', mailboxId);
     run(`UPDATE mailboxes SET last_error=?, last_sync_at=datetime('now') WHERE id=?`, e.message, mailboxId);
-    const mb = one('SELECT workspace_id FROM mailboxes WHERE id = ?', mailboxId);
-    if (mb) logActivity(mb.workspace_id, 'sync_error', { mailbox: mailboxId, error: e.message });
+    // Log a problem once (not on every retry) so the activity feed stays readable.
+    if (mb && mb.last_error !== e.message) logActivity(mb.workspace_id, 'sync_error', { mailbox: mailboxId, error: e.message });
     return { error: e.message };
   } finally {
     busy.delete(mailboxId);
