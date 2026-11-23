@@ -14,7 +14,7 @@ Stop “Where is my order?” emails before they start. Delaywise spots stalled,
 ## Details
 Late parcels create angry emails, bad reviews and chargebacks, usually because the customer heard nothing. Delaywise checks your shipped orders every hour. When a parcel stops moving, passes its expected date, hits a carrier problem or looks lost, Delaywise drafts a short, honest update to your customer, written in their language and in your brand's tone. Approve each email with one click, edit it, or switch on Autopilot. For parcels that are days late, add a single-use apology discount automatically. A carrier scorecard shows which carriers keep their promises, and the dashboard shows how much order value is at risk right now.
 
-## Key features (3–5 bullets)
+## Key features (pick 5 for the listing form)
 - Early warning for stalled parcels, before the delivery date passes
 - Emails in your customer's language and your brand's tone, ready to approve or sent on Autopilot
 - Optional single-use apology discount for late or lost orders
