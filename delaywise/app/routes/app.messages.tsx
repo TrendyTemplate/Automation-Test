@@ -122,10 +122,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return { ...result, intent };
 };
 
+const KIND_WHY: Record<string, string> = {
+  stalled: "No tracking update for a few days",
+  delayed: "Later than promised",
+  exception: "The carrier reported a problem",
+  lost: "Probably lost",
+  delivered: "Arrived after a delay: a short thank-you",
+};
+
 export default function Messages() {
   const { pending, recent } = useLoaderData<typeof loader>();
   const bulk = useFetcher<typeof action>();
   const shopify = useAppBridge();
+  const [showHistory, setShowHistory] = useState(false);
   const waiting = pending.filter((m) => m.status === "pending_approval").length;
 
   useEffect(() => {
@@ -136,8 +145,11 @@ export default function Messages() {
     shopify.toast.show(d.ok ? `${d.done} email(s) ${verb}${more}` : (d.error ?? "Some emails failed"), { isError: !d.ok });
   }, [bulk.data, shopify]);
 
+  const title =
+    waiting === 0 ? "No emails waiting" : waiting === 1 ? "1 email is ready" : `${waiting} emails are ready`;
+
   return (
-    <s-page heading="Customer messages">
+    <s-page heading="Emails">
       {waiting > 1 && (
         <>
           <s-button
@@ -153,54 +165,50 @@ export default function Messages() {
             onClick={() => bulk.submit({ intent: "skip_all" }, { method: "post" })}
             {...(bulk.state !== "idle" ? { disabled: true } : {})}
           >
-            Skip all
+            Don&apos;t send any
           </s-button>
         </>
       )}
-      <s-section heading={`Waiting (${pending.length})`}>
-        {pending.length === 0 ? (
+      <s-section>
+        <s-stack direction="block" gap="small">
+          <s-heading>{title}</s-heading>
           <s-paragraph color="subdued">
-            No messages waiting. When a parcel runs into trouble, its draft appears here.
+            {pending.length === 0
+              ? "When a parcel runs into trouble, a short email to that customer appears here, written in their language."
+              : "Each one is written in the customer's language. Read it, change anything you like, then send."}
           </s-paragraph>
-        ) : (
-          <s-stack direction="block" gap="base">
-            {pending.map((m) => (
-              <PendingMessage key={m.id} message={m} />
-            ))}
-          </s-stack>
-        )}
+        </s-stack>
       </s-section>
 
-      <s-section heading="History">
-        {recent.length === 0 ? (
-          <s-paragraph color="subdued">Nothing sent yet.</s-paragraph>
-        ) : (
-          <s-table>
-            <s-table-header-row>
-              <s-table-header listSlot="primary">Order</s-table-header>
-              <s-table-header>Type</s-table-header>
-              <s-table-header>Language</s-table-header>
-              <s-table-header>Subject</s-table-header>
-              <s-table-header>Status</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {recent.map((m) => (
-                <s-table-row key={m.id}>
-                  <s-table-cell>{m.orderName}</s-table-cell>
-                  <s-table-cell>{KIND_LABEL[m.kind] ?? m.kind}</s-table-cell>
-                  <s-table-cell>{m.language}</s-table-cell>
-                  <s-table-cell>{m.subject}</s-table-cell>
-                  <s-table-cell>
+      {pending.map((m) => (
+        <PendingMessage key={m.id} message={m} />
+      ))}
+
+      <s-section>
+        <s-stack direction="block" gap="base">
+          <s-stack direction="inline" gap="base" alignItems="center">
+            <s-button variant="tertiary" onClick={() => setShowHistory((v) => !v)}>
+              {showHistory ? "Hide sent emails" : `See sent emails (${recent.length})`}
+            </s-button>
+          </s-stack>
+          {showHistory &&
+            (recent.length === 0 ? (
+              <s-paragraph color="subdued">Nothing sent yet.</s-paragraph>
+            ) : (
+              <s-stack direction="block" gap="small">
+                {recent.map((m) => (
+                  <s-stack key={m.id} direction="inline" gap="small" alignItems="center">
+                    <s-text type="strong">{m.orderName}</s-text>
+                    <s-text color="subdued">{`${m.subject} · ${m.language}`}</s-text>
                     <s-badge tone={m.status === "sent" ? "success" : "neutral"}>
-                      {m.status === "sent" ? `Sent ${m.sentAt ?? ""} UTC` : "Skipped"}
+                      {m.status === "sent" ? `Sent ${m.sentAt ?? ""} UTC` : "Not sent"}
                     </s-badge>
-                    {m.discountRedeemed && <s-badge tone="success">Discount used</s-badge>}
-                  </s-table-cell>
-                </s-table-row>
-              ))}
-            </s-table-body>
-          </s-table>
-        )}
+                    {m.discountRedeemed && <s-badge tone="success">Code used</s-badge>}
+                  </s-stack>
+                ))}
+              </s-stack>
+            ))}
+        </s-stack>
       </s-section>
     </s-page>
   );
@@ -212,6 +220,7 @@ function PendingMessage({ message: m }: { message: MessageView }) {
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const busy = fetcher.state !== "idle";
+  const [editing, setEditing] = useState(false);
   const [subject, setSubject] = useState(m.subject);
   const [body, setBody] = useState(m.body);
   const valueOf = (e: Event) => (e.currentTarget as HTMLInputElement).value;
@@ -221,43 +230,54 @@ function PendingMessage({ message: m }: { message: MessageView }) {
   useEffect(() => {
     if (!fetcher.data) return;
     if (fetcher.data.ok) {
-      shopify.toast.show("intent" in fetcher.data && fetcher.data.intent === "skip" ? "Message skipped" : "Email sent");
+      shopify.toast.show("intent" in fetcher.data && fetcher.data.intent === "skip" ? "Not sent" : "Email sent");
     } else {
       shopify.toast.show(fetcher.data.error ?? "Could not send", { isError: true });
     }
   }, [fetcher.data, shopify]);
 
   return (
-    <s-box padding="base" border="base" borderRadius="base">
+    <s-section>
       <s-stack direction="block" gap="base">
+        <s-stack direction="block" gap="small-300">
           <s-stack direction="inline" gap="small" alignItems="center">
-            <s-text type="strong">{m.orderName}</s-text>
-            <s-badge tone="warning">{KIND_LABEL[m.kind] ?? m.kind}</s-badge>
-            <s-badge>{m.language}</s-badge>
-            {m.discountCode && <s-badge tone="success">Discount {m.discountCode}</s-badge>}
-            {m.generatedBy === "template" && <s-badge tone="neutral">Template</s-badge>}
+            <s-text type="strong">{`${m.orderName} · in ${m.language}`}</s-text>
+            {m.status === "scheduled" && m.scheduledFor && <s-badge tone="info">{`Goes out ${m.scheduledFor} UTC`}</s-badge>}
             {m.status === "sending" && <s-badge tone="info">Sending…</s-badge>}
-            {m.status === "scheduled" && m.scheduledFor && (
-              <s-badge tone="info">{`Autopilot sends at ${m.scheduledFor} UTC`}</s-badge>
-            )}
           </s-stack>
-          {m.status === "failed" && m.error && (
-            <s-banner tone="critical" heading="Last attempt failed">
-              {m.error}
-            </s-banner>
-          )}
-          <s-text-field label="Subject" value={subject} onInput={(e) => setSubject(valueOf(e))}></s-text-field>
-          <s-text-area label="Email" rows={8} value={body} onInput={(e) => setBody(valueOf(e))}></s-text-area>
-          <s-stack direction="inline" gap="base">
-            <s-button variant="primary" onClick={() => submit("send")} {...(busy ? { loading: true } : {})}>
-              Send to customer
-            </s-button>
-            <s-button onClick={() => submit("skip")} {...(busy ? { disabled: true } : {})}>
-              Skip
-            </s-button>
-          </s-stack>
+          <s-text color="subdued">{`Why: ${KIND_WHY[m.kind] ?? KIND_LABEL[m.kind] ?? m.kind}`}</s-text>
         </s-stack>
-    </s-box>
+        {m.status === "failed" && m.error && (
+          <s-banner tone="critical" heading="This email didn't go out">
+            {m.error}
+          </s-banner>
+        )}
+        {editing ? (
+          <s-stack direction="block" gap="base">
+            <s-text-field label="Subject" value={subject} onInput={(e) => setSubject(valueOf(e))}></s-text-field>
+            <s-text-area label="Email" rows={8} value={body} onInput={(e) => setBody(valueOf(e))}></s-text-area>
+          </s-stack>
+        ) : (
+          <s-box padding="base" background="subdued" borderRadius="base">
+            <s-stack direction="block" gap="small">
+              <s-text type="strong">{subject}</s-text>
+              {body.split(/\n{2,}/).map((p, i) => (
+                <s-paragraph key={i}>{p}</s-paragraph>
+              ))}
+            </s-stack>
+          </s-box>
+        )}
+        <s-stack direction="inline" gap="base">
+          <s-button variant="primary" onClick={() => submit("send")} {...(busy ? { loading: true } : {})}>
+            Send
+          </s-button>
+          <s-button onClick={() => setEditing((v) => !v)}>{editing ? "Done editing" : "Edit"}</s-button>
+          <s-button variant="tertiary" onClick={() => submit("skip")} {...(busy ? { disabled: true } : {})}>
+            Don&apos;t send
+          </s-button>
+        </s-stack>
+      </s-stack>
+    </s-section>
   );
 }
 

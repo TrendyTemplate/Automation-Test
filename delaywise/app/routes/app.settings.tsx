@@ -207,10 +207,11 @@ export default function SettingsPage() {
         Save
       </s-button>
 
-      <s-section heading="Style">
+      <s-section heading="The basics">
         <s-stack direction="block" gap="base">
           <s-select
-            label="How proactive should Delaywise be?"
+            label="How often customers hear from you"
+            details={isPresetId(s.preset) ? PRESETS[s.preset].description : "You've fine-tuned the timing under “When to email”."}
             value={isPresetId(s.preset) ? s.preset : "custom"}
             onChange={(e) => {
               const id = text(e);
@@ -223,23 +224,38 @@ export default function SettingsPage() {
               </s-option>
             ))}
             <s-option value="custom" disabled>
-              Custom (changed below)
+              Custom
             </s-option>
           </s-select>
-          <s-text color="subdued">
-            {isPresetId(s.preset) ? PRESETS[s.preset].description : "You've fine-tuned the thresholds below."}
-          </s-text>
+          <s-select
+            label="How emails go out"
+            details="VIP customers always wait for you."
+            value={s.mode}
+            onChange={(e) => set("mode", text(e))}
+          >
+            <s-option value="approval">I approve each one</s-option>
+            <s-option value="autopilot" {...(data.plan.autopilot ? {} : { disabled: true })}>
+              {`Send automatically${data.plan.autopilot ? "" : " (paid plans)"}`}
+            </s-option>
+          </s-select>
+          <s-text-field label="Store name shown to customers" value={s.brandName} onInput={(e) => set("brandName", text(e))}></s-text-field>
+          <s-text-field label="Sign emails as" placeholder="The Acme team" value={s.signature} onInput={(e) => set("signature", text(e))}></s-text-field>
+          <s-email-field
+            label="Send my daily summary to"
+            details="Only on days when something needs you. Leave empty to turn it off."
+            value={s.digestEmail}
+            onInput={(e) => {
+              const v = text(e);
+              setS((prev) => ({ ...prev, digestEmail: v, merchantDigest: v.trim() !== "" }));
+            }}
+          ></s-email-field>
         </s-stack>
       </s-section>
 
-      <s-section heading="Sending">
+      <s-heading>More options</s-heading>
+
+      <More title="Sending hours and tone" summary={`${hourLabel(s.sendWindowStart)} to ${hourLabel(s.sendWindowEnd)} · ${s.tone}`}>
         <s-stack direction="block" gap="base">
-          <s-select label="How should emails go out?" value={s.mode} onChange={(e) => set("mode", text(e))}>
-            <s-option value="approval">I approve each email first (recommended to start)</s-option>
-            <s-option value="autopilot" {...(data.plan.autopilot ? {} : { disabled: true })}>
-              Autopilot: send automatically{data.plan.autopilot ? "" : " (paid plans)"}
-            </s-option>
-          </s-select>
           <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
             <s-select label="Send emails from" value={String(s.sendWindowStart)} onChange={(e) => set("sendWindowStart", Number(text(e)))}>
               {HOURS.map((h) => (
@@ -253,34 +269,31 @@ export default function SettingsPage() {
             </s-select>
           </s-grid>
           <s-text color="subdued">
-            Your store&apos;s time zone ({data.timezone}). Autopilot emails found outside these hours wait until the
-            window opens. Pick the same hour twice to send any time.
+            Your store&apos;s time zone ({data.timezone}). Pick the same hour twice to send any time.
           </s-text>
           <s-select label="Tone of voice" value={s.tone} onChange={(e) => set("tone", text(e))}>
             <s-option value="friendly">Friendly</s-option>
             <s-option value="professional">Professional</s-option>
             <s-option value="playful">Playful</s-option>
           </s-select>
-          <s-text-field label="Store name shown to customers" value={s.brandName} onInput={(e) => set("brandName", text(e))}></s-text-field>
           <s-email-field
             label="Reply-to email"
             details="Customer replies go here."
             value={s.replyToEmail}
             onInput={(e) => set("replyToEmail", text(e))}
           ></s-email-field>
-          <s-text-field label="Sign-off" placeholder="The Acme team" value={s.signature} onInput={(e) => set("signature", text(e))}></s-text-field>
           <s-text-area
-            label="Extra guidance for the writer (optional)"
-            details="For example: “Mention that we offer free returns for 30 days.” Up to 500 characters."
+            label="Anything the emails should always mention (optional)"
+            details="For example: “We offer free returns for 30 days.” Up to 500 characters."
             rows={3}
             maxLength={500}
             value={s.brandInstructions}
             onInput={(e) => set("brandInstructions", text(e))}
           ></s-text-area>
         </s-stack>
-      </s-section>
+      </More>
 
-      <s-section heading="When to tell the customer">
+      <More title="When to email" summary={`Usual delivery ${s.defaultTransitDays} business days${s.extraTransitDays ? ` + ${s.extraTransitDays} holiday days` : ""}`}>
         <s-stack direction="block" gap="base">
           <s-checkbox label="Parcel has stalled (no carrier scans for a while)" checked={s.notifyOnStall} onChange={(e) => { set("notifyOnStall", checked(e)); set("preset", "custom"); }}></s-checkbox>
           <s-checkbox label="Parcel is late or probably lost" checked={s.notifyOnDelay} onChange={(e) => { set("notifyOnDelay", checked(e)); set("preset", "custom"); }}></s-checkbox>
@@ -311,9 +324,9 @@ export default function SettingsPage() {
             onInput={(e) => set("extraTransitDays", Number(text(e)))}
           ></s-number-field>
         </s-stack>
-      </s-section>
+      </More>
 
-      <s-section heading="VIP orders and carrier incidents">
+      <More title="VIP customers and carrier problems" summary={s.vipTags || s.vipMinOrderValue ? `VIP: ${[s.vipTags, s.vipMinOrderValue ? `orders over ${s.vipMinOrderValue}` : ""].filter(Boolean).join(" or ")}` : "No VIP rule yet"}>
         <s-stack direction="block" gap="base">
           <s-paragraph color="subdued">
             VIP orders always wait for your approval, even on Autopilot, so a person handles your best customers.
@@ -335,9 +348,9 @@ export default function SettingsPage() {
             onInput={(e) => set("incidentThreshold", Number(text(e)))}
           ></s-number-field>
         </s-stack>
-      </s-section>
+      </More>
 
-      <s-section heading="Never email these orders">
+      <More title="Never email these orders" summary={[s.excludedTags, s.excludedCountries].filter(Boolean).join(" · ") || "None"}>
         <s-stack direction="block" gap="base">
           <s-text-field
             label="Order tags"
@@ -361,9 +374,9 @@ export default function SettingsPage() {
           </s-grid>
           <s-text color="subdued">Excluded orders still show on the dashboard, but customers get no emails.</s-text>
         </s-stack>
-      </s-section>
+      </More>
 
-      <s-section heading="Say sorry with a discount">
+      <More title="Sorry discount" summary={s.compensationEnabled ? `${s.compensationPercent}% off, once per order` : "Off"}>
         <s-stack direction="block" gap="base">
           <s-paragraph color="subdued">
             For late or lost parcels, Delaywise can add a single-use discount code to the email. The dashboard shows how
@@ -381,16 +394,10 @@ export default function SettingsPage() {
             <s-number-field label="Only when at least this many days late" min={1} max={30} value={String(s.compensationMinDaysLate)} onInput={(e) => set("compensationMinDaysLate", Number(text(e)))}></s-number-field>
           </s-grid>
         </s-stack>
-      </s-section>
+      </More>
 
-      <s-section heading="Daily summary and automations">
+      <More title="Shopify Flow and the order page" summary={[s.flowTriggerEnabled ? "Flow on" : "Flow off", s.orderStatusNotice ? "order page notice on" : "order page notice off"].join(" · ")}>
         <s-stack direction="block" gap="base">
-          <s-checkbox
-            label="Email me a daily summary when orders need attention"
-            checked={s.merchantDigest}
-            onChange={(e) => set("merchantDigest", checked(e))}
-          ></s-checkbox>
-          <s-email-field label="Summary email address" value={s.digestEmail} onInput={(e) => set("digestEmail", text(e))}></s-email-field>
           <s-checkbox
             label="Start Shopify Flow workflows when a shipment becomes at risk"
             details="In Shopify Flow, choose the trigger “Shipment at risk” to tag orders, alert your team on Slack or open a help-desk ticket."
@@ -404,9 +411,9 @@ export default function SettingsPage() {
             onChange={(e) => set("orderStatusNotice", checked(e))}
           ></s-checkbox>
         </s-stack>
-      </s-section>
+      </More>
 
-      <s-section heading="Klaviyo (optional)">
+      <More title="Klaviyo" summary={data.klaviyo.connected ? "Connected" : "Not connected"}>
         <s-stack direction="block" gap="base">
           <s-paragraph color="subdued">
             Send “Delaywise Shipment At Risk” and “Delaywise Delayed Shipment Delivered” events to your Klaviyo
@@ -451,9 +458,9 @@ export default function SettingsPage() {
             <s-text color="subdued">Klaviyo connection isn’t available yet on this server.</s-text>
           )}
         </s-stack>
-      </s-section>
+      </More>
 
-      <s-section heading="Preview and test">
+      <More title="See an example email" summary={"Any language, or send a test to yourself"}>
         <s-stack direction="block" gap="base">
           <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
             <s-select label="Customer language" value={previewLang} onChange={(e) => setPreviewLang(text(e))}>
@@ -495,8 +502,33 @@ export default function SettingsPage() {
             </s-box>
           )}
         </s-stack>
+      </More>
+
+      <s-section>
+        <s-link href="/app/activity">See who changed what (activity log)</s-link>
       </s-section>
     </s-page>
+  );
+}
+
+/** A collapsed settings group: one line with the current value, opens on click. */
+function More({ title, summary, children }: { title: string; summary: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <s-section>
+      <s-stack direction="block" gap="base">
+        <s-clickable onClick={() => setOpen((v) => !v)} accessibilityLabel={`${open ? "Close" : "Change"} ${title}`}>
+          <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="center">
+            <s-stack direction="block" gap="small-300">
+              <s-text type="strong">{title}</s-text>
+              <s-text color="subdued">{summary}</s-text>
+            </s-stack>
+            <s-text color="subdued">{open ? "Close" : "Change"}</s-text>
+          </s-grid>
+        </s-clickable>
+        {open && children}
+      </s-stack>
+    </s-section>
   );
 }
 

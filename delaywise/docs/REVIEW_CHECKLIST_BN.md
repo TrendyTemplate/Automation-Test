@@ -14,7 +14,7 @@
 - ✅ বাধ্যতামূলক ৩টা প্রাইভেসি ওয়েবহুক: `customers/data_request`, `customers/redact`, `shop/redact` (`webhooks.compliance.tsx`)
 - ✅ ভুল HMAC স্বাক্ষর হলে 401 ফেরত দেয়, সঠিক হলে 200 (পরীক্ষা করা হয়েছে)
 - ✅ কাস্টমারের নাম, ইমেইল বা ঠিকানা ডেটাবেসে রাখা হয় না। ইমেইল শুধু পাঠানোর মুহূর্তে আনা হয় (টেস্টে যাচাই করা)
-- ✅ ন্যূনতম স্কোপ: `read_orders`, `write_discounts`
+- ✅ ন্যূনতম স্কোপ: `read_orders`, `write_discounts`, `write_app_proxy` (দোকানের ট্র্যাকিং পেজের জন্য)
 - ⚠️ Partner Dashboard-এ **Protected customer data → Email**-এর অনুমতি চাইতে হবে (SETUP_BN ধাপ ২)
 - ⚠️ হোস্টিংয়ে `COMPANY_NAME`, `COMPANY_ADDRESS` আর `SUPPORT_EMAIL` দিন। প্রাইভেসি পেজ এগুলো দেখায়, কোডে কোনো `[PLACEHOLDER]` নেই
 - ⚠️ হোস্টিংয়ের ডিস্ক encrypted কিনা দেখুন (Render আর Fly.io-তে ডিফল্টে encrypted)

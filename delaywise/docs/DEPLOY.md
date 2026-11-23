@@ -6,7 +6,9 @@ Delaywise is one Node.js process (React Router server) plus a SQLite database fi
 
 1. **Run exactly one instance.** The scan lock and the daily rate limits live in this one process and its database. Don't scale horizontally on SQLite.
 2. **Put the database on a persistent disk.** If the file is lost, the app forgets which customers were already emailed and would warn them again. Mount a volume (Render Disk, Fly volume, Railway volume) and point `DATABASE_URL` at it, e.g. `DATABASE_URL=file:/data/delaywise.sqlite`. Back the file up daily.
-3. **Set every variable in `.env.example`** on the host. In production the app refuses to "send" emails without `RESEND_API_KEY` rather than pretending.
+3. **Turn on the IP allowlist (required).** Since 20 November 2026 Shopify delists public apps without one and blocks new installs. In the Dev Dashboard, open the app → **IP allowlist** and add the server's outgoing IP address (or CIDR range). If the host's outgoing IPs change (Render, Railway, Fly, most serverless hosts), allow the host's ASN and the countries it runs in instead. Check it: an Admin API call from any other machine must fail with 403. If the app's own calls start failing, the logs show "Shopify refused the Admin API request (403)", which means an address is missing from the list.
+4. **Expiring offline tokens are already on** (`future.expiringOfflineAccessTokens` in `app/shopify.server.ts`, required for all public apps from 1 January 2027). The refresh token is stored encrypted like the access token. Don't turn this off.
+5. **Set every variable in `.env.example`** on the host. In production the app refuses to "send" emails without `RESEND_API_KEY` rather than pretending.
 
 ## Docker
 
@@ -16,7 +18,7 @@ docker run -p 3000:3000 \
   -v delaywise-data:/data \
   -e DATABASE_URL=file:/data/delaywise.sqlite \
   -e SHOPIFY_API_KEY=... -e SHOPIFY_API_SECRET=... -e SHOPIFY_APP_URL=https://your-app.example.com \
-  -e SCOPES=read_orders,write_discounts -e SHOPIFY_APP_HANDLE=delaywise \
+  -e SCOPES=read_orders,write_discounts,write_app_proxy -e SHOPIFY_APP_HANDLE=delaywise \
   -e ANTHROPIC_API_KEY=... -e RESEND_API_KEY=... -e EMAIL_FROM_ADDRESS=updates@your-domain.com \
   -e JOB_SECRET=$(openssl rand -hex 24) -e APP_ENCRYPTION_KEY=$(openssl rand -hex 32) \
   -e COMPANY_NAME="..." -e COMPANY_ADDRESS="..." -e SUPPORT_EMAIL=support@your-domain.com \

@@ -76,6 +76,8 @@ model ShopSettings {
   flowTriggerEnabled       Boolean  @default(true)
   // U1: when the one-click setup was completed.
   setupDoneAt              DateTime?
+  /// Setup guide steps the merchant finished or hid (comma list).
+  guideDone                String?
   // U1: style preset (gentle | balanced | proactive | custom).
   preset                   String   @default("balanced")
   // U4: VIP orders always wait for approval, even on Autopilot.

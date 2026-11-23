@@ -14,8 +14,8 @@ export interface PresetValues {
 
 export const PRESETS: Record<PresetId, PresetValues & { label: string; description: string }> = {
   gentle: {
-    label: "Gentle",
-    description: "Only email when a parcel is clearly late or the carrier reports a problem. Fewest emails.",
+    label: "Only when it's clearly late",
+    description: "Fewest emails: when a parcel is clearly late or the carrier reports a problem.",
     stallHours: 96,
     graceHours: 48,
     notifyOnStall: false,
@@ -24,7 +24,7 @@ export const PRESETS: Record<PresetId, PresetValues & { label: string; descripti
   },
   balanced: {
     label: "Balanced (recommended)",
-    description: "Email when a parcel stops moving for 3 days, runs a day late, or hits a problem.",
+    description: "When a parcel stops moving for 3 days or runs a day late.",
     stallHours: 72,
     graceHours: 24,
     notifyOnStall: true,
@@ -32,8 +32,8 @@ export const PRESETS: Record<PresetId, PresetValues & { label: string; descripti
     notifyOnException: true,
   },
   proactive: {
-    label: "Proactive",
-    description: "Tell customers early: after 2 quiet days or a few hours past the expected date.",
+    label: "Early",
+    description: "At the first sign of trouble: 2 quiet days or a few hours late.",
     stallHours: 48,
     graceHours: 8,
     notifyOnStall: true,

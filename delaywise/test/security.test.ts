@@ -97,3 +97,15 @@ describe("S4 + S5 webhook dedupe and audit log", () => {
     expect(rows[0]).toMatchObject({ actor: "Staff 42", action: "Settings changed", detail: "tone, mode" });
   });
 });
+
+describe("IP allowlist: Admin API 403", () => {
+  it("fails fast with a clear message and no retries", async () => {
+    const { gql, AdminForbiddenError } = await import("../app/services/admin-types");
+    let calls = 0;
+    const admin = { graphql: async () => { calls++; return new Response("{}", { status: 403 }); } };
+    await expect(gql(admin, "{ shop { id } }")).rejects.toBeInstanceOf(AdminForbiddenError);
+    const thrower = { graphql: async () => { calls++; throw Object.assign(new Error("Forbidden"), { response: { code: 403 } }); } };
+    await expect(gql(thrower, "{ shop { id } }")).rejects.toThrow(/IP allowlist/);
+    expect(calls).toBe(2);
+  });
+});

@@ -16,10 +16,13 @@ import { actorFrom, audit } from "../services/audit.server";
 import { z } from "zod";
 import { PRESETS, type PresetId } from "../lib/presets";
 import { runQuickSetup } from "../services/quick-setup.server";
+import { headlineFor } from "../lib/headline";
+import { addGuideDone, guideSteps, guideVisible } from "../lib/guide";
 
 /** S6: dashboard actions and their inputs. */
 const DashboardAction = z.object({
-  intent: z.enum(["scan", "export", "handle", "unhandle", "incident_send", "quick_setup"]),
+  intent: z.enum(["scan", "export", "handle", "unhandle", "incident_send", "quick_setup", "guide_done", "guide_hide"]),
+  step: z.enum(["summary", "notice", "test", "tracking"]).optional(),
   preset: z.enum(["gentle", "balanced", "proactive"]).optional().default("balanced"),
   autopilot: z.enum(["true", "false"]).optional().default("false"),
   ids: z
@@ -43,7 +46,7 @@ const RISK_LABEL: Record<string, string> = {
   exception: "Carrier problem",
   delayed: "Late",
   stalled: "Stalled",
-  watch: "Check manually",
+  watch: "Check it yourself",
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -112,6 +115,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       lastScanAt: settings.lastScanAt ? settings.lastScanAt.toISOString() : null,
       lastScanError: settings.lastScanError,
     },
+    guide: {
+      visible: guideVisible(settings),
+      steps: guideSteps({ ...settings, trackUrl: `https://${shop}/apps/track` }).map(({ id, title, detail, action, done }) => ({ id, title, detail, action, done })),
+    },
     roi,
     plan: {
       label: plan.label,
@@ -156,6 +163,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       actor,
     });
     return { setup: { ...result, atRisk: result.summary?.atRisk ?? 0, seen: result.summary?.shipmentsSeen ?? 0 } };
+  }
+
+  // Setup guide: tick a step, or hide the whole guide.
+  if (intent === "guide_done" || intent === "guide_hide") {
+    const current = await db.shopSettings.findUnique({ where: { shop: session.shop }, select: { guideDone: true } });
+    const id = intent === "guide_hide" ? "hidden" : parsed.data.step;
+    if (!id) return { scanError: "Invalid request" };
+    await db.shopSettings.update({
+      where: { shop: session.shop },
+      data: { guideDone: addGuideDone(current?.guideDone ?? null, id) },
+    });
+    return { guide: id };
   }
 
   // U5: mark orders handled (or undo).
@@ -266,35 +285,71 @@ export default function Dashboard() {
 
   useEffect(() => {
     const s = fetcher.data && "summary" in fetcher.data ? fetcher.data.summary : null;
-    if (s) {
-      shopify.toast.show(
-        `Checked ${s.shipmentsSeen} shipments · ${s.atRisk} at risk · ${s.messagesCreated} new messages`,
-      );
-    }
+    if (s) shopify.toast.show(`Checked ${s.shipmentsSeen} parcels. ${s.atRisk} need attention.`);
   }, [fetcher.data, shopify]);
 
   const scan = () => fetcher.submit({ intent: "scan" }, { method: "POST" });
   const { stats, usage, plan } = data;
   const nearLimit = usage.shipmentsTracked >= plan.shipmentLimit * 0.9;
+  const open = data.atRisk.filter((s) => !s.handled);
+  const headline = headlineFor(stats, open.length, data.settings.mode === "autopilot");
+
+  if (!data.settings.setupDone) {
+    return (
+      <s-page heading="Welcome to Delaywise">
+        <QuickSetup autopilotAllowed={data.plan.autopilot} />
+      </s-page>
+    );
+  }
 
   return (
-    <s-page heading="Delaywise">
-      <s-button slot="primary-action" variant="primary" onClick={scan} {...(scanning ? { loading: true } : {})}>
-        Scan shipments now
+    <s-page heading="Home">
+      <s-button slot="secondary-actions" onClick={scan} {...(scanning ? { loading: true } : {})}>
+        Check again now
       </s-button>
       <s-button
         slot="secondary-actions"
         onClick={() => exporter.submit({ intent: "export" }, { method: "POST" })}
         {...(exporter.state !== "idle" ? { loading: true } : {})}
       >
-        Export at-risk orders (CSV)
+        Download late orders (CSV)
       </s-button>
 
+      {data.settings.lastScanError && (
+        <s-banner heading="The last check didn't finish" tone="critical">
+          {data.settings.lastScanError} Delaywise tries again on its own within the hour.
+        </s-banner>
+      )}
+      {nearLimit && (
+        <s-banner heading="You're close to this month's limit" tone="warning">
+          {`${usage.shipmentsTracked} of ${plan.shipmentLimit} parcels used on the ${plan.label} plan. `}
+          <s-link href="/app/plans">See plans</s-link>
+        </s-banner>
+      )}
+
+      {/* One sentence that says what's going on, and the one thing to do next. */}
+      <s-section>
+        <s-stack direction="block" gap="base">
+          <s-text color="subdued">{`Checked ${timeAgo(data.settings.lastScanAt)}`}</s-text>
+          <s-heading>{headline.title}</s-heading>
+          <s-paragraph color="subdued">{headline.detail}</s-paragraph>
+          {stats.pendingCount > 0 && (
+            <s-stack direction="inline" gap="base">
+              <s-button variant="primary" href="/app/messages">
+                {stats.pendingCount === 1 ? "Review 1 email" : `Review ${stats.pendingCount} emails`}
+              </s-button>
+            </s-stack>
+          )}
+        </s-stack>
+      </s-section>
+
+      {data.guide.visible && <SetupGuide steps={data.guide.steps} />}
+
       {data.incidents.map((i) => (
-        <s-banner key={i.key} tone="critical" heading={`Possible carrier incident: ${i.carrier} → ${i.country}`}>
-          <s-stack direction="block" gap="small">
+        <s-banner key={i.key} tone="critical" heading={`${i.carrier} is slow to ${i.country} right now`}>
+          <s-stack direction="block" gap="base">
             <s-text>
-              {`${i.count} parcels with ${i.carrier} to ${i.country} ran into trouble at the same time (worth ${i.orderValue.toFixed(2)} ${data.stats.currency}). This usually means a strike, weather or a hub problem, not ${i.count} separate issues.`}
+              {`${i.count} of your parcels got stuck at the same time, so it's one carrier problem, not ${i.count} separate ones. Updates for these customers are ready.`}
             </s-text>
             <s-stack direction="inline" gap="base">
               <s-button
@@ -302,221 +357,199 @@ export default function Dashboard() {
                 onClick={() => actions.submit({ intent: "incident_send", ids: i.ids }, { method: "POST" })}
                 {...(actions.state !== "idle" ? { loading: true } : {})}
               >
-                Send the waiting updates to these customers
+                {`Send update to all ${i.count}`}
               </s-button>
               <s-button onClick={() => actions.submit({ intent: "handle", ids: i.ids }, { method: "POST" })}>
-                Mark all as handled
+                I&apos;ll handle it myself
               </s-button>
             </s-stack>
           </s-stack>
         </s-banner>
       ))}
 
-      {data.settings.lastScanError && (
-        <s-banner heading="The last scan ran into a problem" tone="critical">
-          {data.settings.lastScanError} We will try again automatically within the hour.
-        </s-banner>
-      )}
-
-      {!data.settings.setupDone && <QuickSetup autopilotAllowed={data.plan.autopilot} />}
-
-      {nearLimit && (
-        <s-banner heading="You're close to your monthly shipment limit" tone="warning">
-          {usage.shipmentsTracked} of {plan.shipmentLimit} shipments used on the {plan.label} plan.{" "}
-          <s-link href="/app/plans">See plans</s-link>
-        </s-banner>
-      )}
-
-      <s-section heading="Today">
-        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(170px, 1fr))" gap="base">
-          <Metric label="Shipments in transit" value={String(stats.watching)} />
-          <Metric label="Orders at risk" value={String(stats.atRiskOrders)} />
-          <Metric label="Order value at risk" value={`${stats.atRiskValue} ${stats.currency}`} />
-          <Metric label="Waiting for your approval" value={String(stats.pendingCount)} href="/app/messages" />
-        </s-grid>
-      </s-section>
-
-      <s-section heading="Shipments that need attention">
-        {data.atRisk.length === 0 ? (
-          <s-paragraph color="subdued">
-            {stats.totalShipments === 0
-              ? "No shipments yet. Click “Scan shipments now” to start."
-              : "Nothing needs attention. Every parcel is on track."}
-          </s-paragraph>
-        ) : (
-          <s-table>
-            <s-table-header-row>
-              <s-table-header listSlot="primary">Order</s-table-header>
-              <s-table-header>Risk</s-table-header>
-              <s-table-header>Why</s-table-header>
-              <s-table-header>Carrier</s-table-header>
-              <s-table-header>Status</s-table-header>
-              <s-table-header format="currency">Value</s-table-header>
-              <s-table-header>Action</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {data.atRisk.map((s) => (
-                <s-table-row key={s.id}>
-                  <s-table-cell>
-                    <s-link href={`shopify://admin/orders/${s.orderId}`} target="_top">
-                      {s.orderName}
-                    </s-link>
-                  </s-table-cell>
-                  <s-table-cell>
-                    <s-stack direction="inline" gap="small-200">
-                      <s-badge tone={RISK_TONE[s.risk] ?? "info"}>{RISK_LABEL[s.risk] ?? s.risk}</s-badge>
-                      {s.excluded && <s-badge tone="neutral">{`No emails: ${s.excludedReason ?? "excluded"}`}</s-badge>}
-                      {s.vip && <s-badge tone="info">VIP · you approve</s-badge>}
-                      {s.handled && <s-badge tone="success">Handled</s-badge>}
+      {data.atRisk.length > 0 && (
+        <s-section heading="Needs you">
+          <s-stack direction="block" gap="none">
+            {data.atRisk.map((s, index) => (
+              <s-box key={s.id}>
+                {index > 0 && <s-divider />}
+                <s-box paddingBlock="base">
+                  <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="center">
+                    <s-stack direction="block" gap="small-300">
+                      <s-stack direction="inline" gap="small" alignItems="center">
+                        <s-link href={`shopify://admin/orders/${s.orderId}`} target="_top">
+                          {s.orderName}
+                        </s-link>
+                        <s-badge tone={RISK_TONE[s.risk] ?? "info"}>{RISK_LABEL[s.risk] ?? s.risk}</s-badge>
+                        {s.vip && <s-badge>VIP</s-badge>}
+                        {s.handled && <s-badge tone="success">Handled</s-badge>}
+                      </s-stack>
+                      <s-text color="subdued">
+                        {[s.reason, s.carrier !== "Unknown" ? s.carrier : null, s.excluded ? "No emails for this order" : null]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </s-text>
                     </s-stack>
-                  </s-table-cell>
-                  <s-table-cell>{s.reason}</s-table-cell>
-                  <s-table-cell>{s.carrier}</s-table-cell>
-                  <s-table-cell>
-                    {s.trackingUrl ? (
-                      <s-link href={s.trackingUrl} target="_blank">
-                        {s.status}
-                      </s-link>
-                    ) : (
-                      s.status
-                    )}
-                  </s-table-cell>
-                  <s-table-cell>{s.value}</s-table-cell>
-                  <s-table-cell>
-                    <s-button
-                      variant="tertiary"
-                      onClick={() => actions.submit({ intent: s.handled ? "unhandle" : "handle", ids: s.id }, { method: "POST" })}
-                    >
-                      {s.handled ? "Undo handled" : "Mark handled"}
-                    </s-button>
-                  </s-table-cell>
-                </s-table-row>
-              ))}
-            </s-table-body>
-          </s-table>
-        )}
-      </s-section>
+                    <s-stack direction="inline" gap="small">
+                      {s.trackingUrl && (
+                        <s-button variant="tertiary" href={s.trackingUrl} target="_blank">
+                          Track
+                        </s-button>
+                      )}
+                      <s-button
+                        onClick={() => actions.submit({ intent: s.handled ? "unhandle" : "handle", ids: s.id }, { method: "POST" })}
+                      >
+                        {s.handled ? "Undo" : "Mark handled"}
+                      </s-button>
+                    </s-stack>
+                  </s-grid>
+                </s-box>
+              </s-box>
+            ))}
+          </s-stack>
+        </s-section>
+      )}
 
-      <s-section slot="aside" heading="Results so far">
-        <s-stack direction="block" gap="small">
-          <s-text>Customer updates sent: {data.roi.emailsSent}</s-text>
-          <s-text>
-            Apology discounts used: {data.roi.discountsRedeemed} of {data.roi.discountsSent}
-          </s-text>
-          <s-text>
-            Revenue from those orders: <s-text type="strong">{`${data.roi.revenueRecovered.toFixed(2)} ${stats.currency}`}</s-text>
-          </s-text>
-          <s-text color="subdued">Last scan: {timeAgo(data.settings.lastScanAt)}</s-text>
-        </s-stack>
-      </s-section>
-
-      <s-section slot="aside" heading="This month">
-        <s-stack direction="block" gap="small">
-          <s-text>
-            Plan: <s-text type="strong">{plan.label}</s-text> (<s-link href="/app/plans">change</s-link>)
-          </s-text>
-          <s-text>
-            Shipments watched: {usage.shipmentsTracked} / {plan.shipmentLimit}
-          </s-text>
-          <s-text>
-            Extra carrier lookups: {usage.paidLookups} / {plan.includedPaidLookups}
-          </s-text>
-          <s-text>Customer emails sent: {usage.messagesSent}</s-text>
-          <s-text>Mode: {data.settings.mode === "autopilot" ? "Autopilot" : "Approve each email"}</s-text>
-        </s-stack>
-      </s-section>
-
-      <s-section slot="aside" heading="How Delaywise works">
-        <s-paragraph>
-          Every hour Delaywise checks your shipped orders. When a parcel stalls, runs late, hits a carrier problem or
-          looks lost, it writes a short, friendly update to your customer in their own language, before they have
-          to ask “where is my order?”.
-        </s-paragraph>
-      </s-section>
+      <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
+        <Metric label="Parcels on the way" value={String(stats.watching)} />
+        <Metric label="Customers updated" value={String(data.roi.emailsSent)} />
+        <Metric label="Earned back from sorry codes" value={`${data.roi.revenueRecovered.toFixed(2)} ${stats.currency}`} />
+      </s-grid>
     </s-page>
   );
 }
 
-/** U1: the whole setup on one card: pick a style, pick how emails go out, done. */
+type GuideView = ReturnType<typeof useLoaderData<typeof loader>>["guide"]["steps"];
+
+function SetupGuide({ steps }: { steps: GuideView }) {
+  const fetcher = useFetcher<typeof action>();
+  const left = steps.filter((s) => !s.done).length;
+  return (
+    <s-section heading={`Finish setting up · ${steps.length - left} of ${steps.length} done`}>
+      <s-stack direction="block" gap="none">
+        {steps.map((step, index) => (
+          <s-box key={step.id}>
+            {index > 0 && <s-divider />}
+            <s-box paddingBlock="base">
+              <s-grid gridTemplateColumns="auto 1fr auto" gap="base" alignItems="center">
+                <s-icon type={step.done ? "check-circle-filled" : "circle"} tone={step.done ? "success" : "neutral"} />
+                <s-stack direction="block" gap="small-300">
+                  <s-text type="strong">{step.title}</s-text>
+                  {!step.done && <s-text color="subdued">{step.detail}</s-text>}
+                </s-stack>
+                {!step.done && (
+                  <s-stack direction="inline" gap="small">
+                    <s-button href={step.action.href} {...(step.action.external ? { target: "_top" } : {})}>
+                      {step.action.label}
+                    </s-button>
+                    {step.id !== "summary" && (
+                      <s-button
+                        variant="tertiary"
+                        onClick={() => fetcher.submit({ intent: "guide_done", step: step.id }, { method: "POST" })}
+                      >
+                        Done
+                      </s-button>
+                    )}
+                  </s-stack>
+                )}
+              </s-grid>
+            </s-box>
+          </s-box>
+        ))}
+        <s-box paddingBlockStart="small">
+          <s-button variant="tertiary" onClick={() => fetcher.submit({ intent: "guide_hide" }, { method: "POST" })}>
+            Hide this list
+          </s-button>
+        </s-box>
+      </s-stack>
+    </s-section>
+  );
+}
+
+/** U1: the whole setup in one question. */
 function QuickSetup({ autopilotAllowed }: { autopilotAllowed: boolean }) {
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const [preset, setPreset] = useState<PresetId>("balanced");
-  const [autopilot, setAutopilot] = useState(false);
+  const [approve, setApprove] = useState(true);
   const busy = fetcher.state !== "idle";
 
   useEffect(() => {
     const setup = fetcher.data && "setup" in fetcher.data ? fetcher.data.setup : undefined;
     if (!setup) return;
-    const learned = setup.learnedCarriers.length ? ` Learned delivery times for ${setup.learnedCarriers.join(", ")}.` : "";
     shopify.toast.show(
       setup.scanned
-        ? `You're all set. Checked ${setup.seen} shipments; ${setup.atRisk} need attention.${learned}`
-        : `You're all set. Your first scan is already running.${learned}`,
+        ? `You're all set. Checked ${setup.seen} parcels; ${setup.atRisk} need attention.`
+        : "You're all set. Your first check is running.",
     );
   }, [fetcher.data, shopify]);
 
   return (
-    <s-section heading="Set up Delaywise in one click">
-      <s-stack direction="block" gap="base">
-        <s-paragraph>
-          Pick a style and how emails go out. Delaywise does the rest: it checks your shipped orders, learns how long
-          your carriers really take, and turns on the daily summary and the delivery notice on your customers&apos;
-          order page. You can change anything later in Settings.
-        </s-paragraph>
-        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
+    <s-section>
+      <s-stack direction="block" gap="large">
+        <s-stack direction="block" gap="small">
+          <s-heading>Tell late-parcel customers before they ask</s-heading>
+          <s-paragraph color="subdued">
+            Pick how often customers should hear from you. Everything else is set up for you, and you can change it
+            later.
+          </s-paragraph>
+        </s-stack>
+        <s-choice-list
+          label="How often"
+          labelAccessibilityVisibility="exclusive"
+          onChange={(e) => {
+            const values = (e.currentTarget as unknown as { values: string[] }).values;
+            if (values[0] && values[0] in PRESETS) setPreset(values[0] as PresetId);
+          }}
+        >
           {(Object.keys(PRESETS) as PresetId[]).map((id) => (
-            <s-clickable
-              key={id}
-              onClick={() => setPreset(id)}
-              padding="base"
-              borderRadius="base"
-              border="base"
-              background={preset === id ? "subdued" : "transparent"}
-              accessibilityLabel={`Choose ${PRESETS[id].label}`}
-            >
-              <s-stack direction="block" gap="small-200">
-                <s-text type="strong">{`${preset === id ? "● " : "○ "}${PRESETS[id].label}`}</s-text>
-                <s-text color="subdued">{PRESETS[id].description}</s-text>
-              </s-stack>
-            </s-clickable>
+            <s-choice key={id} value={id} {...(preset === id ? { selected: true } : {})}>
+              {PRESETS[id].label}
+              <s-text slot="details">{PRESETS[id].description}</s-text>
+            </s-choice>
           ))}
-        </s-grid>
-        <s-checkbox
-          label={autopilotAllowed ? "Send emails automatically (Autopilot)" : "Send emails automatically (Autopilot, on paid plans)"}
-          details="Off: every email waits for your approval in Messages. VIP orders always wait for you."
-          checked={autopilot}
-          onChange={(e) => setAutopilot(Boolean((e.currentTarget as unknown as { checked: boolean }).checked))}
+        </s-choice-list>
+        <s-switch
+          label="Let me approve each email first"
+          details={
+            autopilotAllowed
+              ? "Turn this off to send emails automatically. VIP orders always wait for you."
+              : "Automatic sending is on paid plans. VIP orders always wait for you."
+          }
+          checked={approve}
+          onChange={(e) => setApprove(Boolean((e.currentTarget as unknown as { checked: boolean }).checked))}
           {...(autopilotAllowed ? {} : { disabled: true })}
-        ></s-checkbox>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            variant="primary"
-            onClick={() => fetcher.submit({ intent: "quick_setup", preset, autopilot: String(autopilot) }, { method: "POST" })}
-            {...(busy ? { loading: true } : {})}
-          >
-            Set it up for me
-          </s-button>
+        ></s-switch>
+        <s-stack direction="block" gap="small-200">
+          <s-stack direction="inline" gap="base">
+            <s-button
+              variant="primary"
+              onClick={() =>
+                fetcher.submit(
+                  { intent: "quick_setup", preset, autopilot: String(autopilotAllowed && !approve) },
+                  { method: "POST" },
+                )
+              }
+              {...(busy ? { loading: true } : {})}
+            >
+              Start Delaywise
+            </s-button>
+          </s-stack>
+          <s-text color="subdued">Nothing is sent to customers until a parcel is actually late.</s-text>
         </s-stack>
       </s-stack>
     </s-section>
   );
 }
 
-function Metric({ label, value, href }: { label: string; value: string; href?: string }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <s-box padding="base" background="subdued" borderRadius="base">
+    <s-section>
       <s-stack direction="block" gap="small-200">
         <s-text color="subdued">{label}</s-text>
-        {href ? (
-          <s-link href={href}>
-            <s-heading>{value}</s-heading>
-          </s-link>
-        ) : (
-          <s-heading>{value}</s-heading>
-        )}
+        <s-heading>{value}</s-heading>
       </s-stack>
-    </s-box>
+    </s-section>
   );
 }
 

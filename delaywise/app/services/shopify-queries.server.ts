@@ -106,6 +106,20 @@ export const ORDER_CONTACT_QUERY = `#graphql
     }
   }`;
 
+/** T1: find an order by its name for the public tracking page. */
+export const TRACK_ORDER_LOOKUP_QUERY = `#graphql
+  query DelaywiseTrackLookup($q: String!) {
+    orders(first: 3, query: $q) {
+      nodes {
+        id
+        name
+        email
+        customerLocale
+        displayFulfillmentStatus
+      }
+    }
+  }`;
+
 export const CREATE_DISCOUNT_MUTATION = `#graphql
   mutation DelaywiseCreateSorryDiscount($basicCodeDiscount: DiscountCodeBasicInput!) {
     discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
@@ -152,6 +166,7 @@ export const ALL_OPERATIONS = {
   SHIPPED_ORDERS_QUERY,
   REFRESH_FULFILLMENTS_QUERY,
   ORDER_CONTACT_QUERY,
+  TRACK_ORDER_LOOKUP_QUERY,
   CREATE_DISCOUNT_MUTATION,
   DISCOUNT_REDEMPTIONS_QUERY,
   FLOW_TRIGGER_MUTATION,

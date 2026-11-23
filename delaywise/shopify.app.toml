@@ -14,9 +14,16 @@ include_config_on_deploy = true
 [access_scopes]
 # read_orders: shipped orders and fulfillment tracking status.
 # write_discounts: optional single-use apology discount codes.
+# write_app_proxy: the store's "Track your order" page (yourstore.com/apps/track).
 # The customer email (protected customer data, level 2) must also be
 # requested in the Partner Dashboard → API access → Protected customer data.
-scopes = "read_orders,write_discounts"
+scopes = "read_orders,write_discounts,write_app_proxy"
+
+# T1: "Track your order" page inside the store's theme.
+[app_proxy]
+url = "/proxy/track"
+prefix = "apps"
+subpath = "track"
 
 [auth]
 redirect_urls = ["https://example.com/auth/callback"]

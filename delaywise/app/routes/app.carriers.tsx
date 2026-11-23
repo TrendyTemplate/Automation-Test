@@ -63,93 +63,73 @@ export default function Carriers() {
     if (apply.data?.applied) shopify.toast.show("Delivery times updated");
   }, [apply.data, shopify]);
 
+  const sentence = changes
+    .slice(0, 3)
+    .map((s) => `${s.carrier} usually takes ${s.suggestedBusinessDays} business days (you say ${s.current})`)
+    .join(". ");
+
   return (
-    <s-page heading="Carrier scorecard">
-      <s-section heading="Which carriers keep their promises?">
-        <s-paragraph color="subdued">
-          Based on {total} shipments from the last 90 days. On-time means delivered within your grace period of the
-          expected date. Use this to choose carriers, set honest delivery promises, or renegotiate rates.
-        </s-paragraph>
-        {scores.length === 0 ? (
-          <s-paragraph>No shipments yet. Run a scan from the dashboard.</s-paragraph>
-        ) : (
-          <s-table>
-            <s-table-header-row>
-              <s-table-header listSlot="primary">Carrier</s-table-header>
-              <s-table-header format="numeric">Shipments</s-table-header>
-              <s-table-header format="numeric">Delivered</s-table-header>
-              <s-table-header format="numeric">On time</s-table-header>
-              <s-table-header format="numeric">Avg. days late</s-table-header>
-              <s-table-header format="numeric">Problems</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {scores.map((s) => (
-                <s-table-row key={s.carrier}>
-                  <s-table-cell>{s.carrier}</s-table-cell>
-                  <s-table-cell>{s.shipments}</s-table-cell>
-                  <s-table-cell>{s.delivered}</s-table-cell>
-                  <s-table-cell>
-                    {s.onTimeRate === null ? (
-                      "–"
-                    ) : (
-                      <s-badge tone={s.onTimeRate >= 95 ? "success" : s.onTimeRate >= 85 ? "warning" : "critical"}>
-                        {`${s.onTimeRate}%`}
-                      </s-badge>
-                    )}
-                  </s-table-cell>
-                  <s-table-cell>{s.avgDaysLate ?? "–"}</s-table-cell>
-                  <s-table-cell>{s.problems}</s-table-cell>
-                </s-table-row>
-              ))}
-            </s-table-body>
-          </s-table>
-        )}
+    <s-page heading="Carriers">
+      <s-section>
+        <s-stack direction="block" gap="small">
+          <s-heading>How your carriers are doing</s-heading>
+          <s-paragraph color="subdued">{`Based on your own ${total} parcels from the last 90 days.`}</s-paragraph>
+        </s-stack>
       </s-section>
 
-      <s-section heading="Real delivery times">
-        <s-paragraph color="subdued">
-          Learned from your own deliveries (carriers with at least 5). The suggestion covers 80% of parcels, so
-          Delaywise only warns customers when a parcel is genuinely late.
-        </s-paragraph>
-        {suggestions.length === 0 ? (
-          <s-paragraph>Not enough delivered parcels yet. Check back after a few weeks of shipping.</s-paragraph>
-        ) : (
+      {changes.length > 0 && (
+        <s-banner
+          tone="info"
+          heading={changes.length === 1 ? "1 delivery promise is too short" : `${changes.length} delivery promises are too short`}
+        >
           <s-stack direction="block" gap="base">
-            <s-table>
-              <s-table-header-row>
-                <s-table-header listSlot="primary">Carrier</s-table-header>
-                <s-table-header format="numeric">Deliveries</s-table-header>
-                <s-table-header format="numeric">Median days</s-table-header>
-                <s-table-header format="numeric">Your setting (business days)</s-table-header>
-                <s-table-header format="numeric">Suggested (business days)</s-table-header>
-              </s-table-header-row>
-              <s-table-body>
-                {suggestions.map((s) => (
-                  <s-table-row key={s.carrier}>
-                    <s-table-cell>{s.carrier}</s-table-cell>
-                    <s-table-cell>{s.deliveries}</s-table-cell>
-                    <s-table-cell>{s.medianDays}</s-table-cell>
-                    <s-table-cell>{s.current}</s-table-cell>
-                    <s-table-cell>
-                      {s.suggestedBusinessDays === s.current ? (
-                        s.suggestedBusinessDays
-                      ) : (
-                        <s-badge tone="info">{String(s.suggestedBusinessDays)}</s-badge>
-                      )}
-                    </s-table-cell>
-                  </s-table-row>
-                ))}
-              </s-table-body>
-            </s-table>
-            {changes.length > 0 && (
+            <s-text>{`${sentence}. Fixing this means fewer false alarms and earlier warnings when a parcel really is late.`}</s-text>
+            <s-stack direction="inline" gap="base">
               <s-button
                 variant="primary"
                 onClick={() => apply.submit({}, { method: "post" })}
                 {...(apply.state !== "idle" ? { loading: true } : {})}
               >
-                {`Use suggested times for ${changes.length} carrier(s)`}
+                {changes.length === 1 ? "Fix it" : `Fix all ${changes.length}`}
               </s-button>
-            )}
+            </s-stack>
+          </s-stack>
+        </s-banner>
+      )}
+
+      <s-section>
+        {scores.length === 0 ? (
+          <s-paragraph color="subdued">No parcels yet. Carriers appear here after your first shipped orders.</s-paragraph>
+        ) : (
+          <s-stack direction="block" gap="none">
+            {scores.map((s, index) => (
+              <s-box key={s.carrier}>
+                {index > 0 && <s-divider />}
+                <s-box paddingBlock="base">
+                  <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="center">
+                    <s-stack direction="block" gap="small-300">
+                      <s-text type="strong">{s.carrier}</s-text>
+                      <s-text color="subdued">
+                        {[
+                          `${s.shipments} parcels`,
+                          s.avgDaysLate ? `late ones arrive ${s.avgDaysLate} days late on average` : null,
+                          s.problems ? `${s.problems} with problems` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </s-text>
+                    </s-stack>
+                    {s.onTimeRate === null ? (
+                      <s-text color="subdued">Not enough deliveries yet</s-text>
+                    ) : (
+                      <s-badge tone={s.onTimeRate >= 95 ? "success" : s.onTimeRate >= 85 ? "warning" : "critical"}>
+                        {`${s.onTimeRate}% on time`}
+                      </s-badge>
+                    )}
+                  </s-grid>
+                </s-box>
+              </s-box>
+            ))}
           </s-stack>
         )}
       </s-section>
