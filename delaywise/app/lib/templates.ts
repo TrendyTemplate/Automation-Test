@@ -217,3 +217,9 @@ export function renderTemplate(args: TemplateArgs): {
 
   return { subject: fill(c.subject[args.kind]), body: parts.join("\n"), language };
 }
+
+/** R4: the one-paragraph situation line, for the customer's order-status page. */
+export function noticeLine(kind: MessageKind, language: string): { text: string; language: string } {
+  const lang = COPY[language] ? language : "en";
+  return { text: COPY[lang].line[kind], language: lang };
+}

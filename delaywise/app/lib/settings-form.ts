@@ -58,5 +58,6 @@ export function parseSettingsForm(form: FormLike, plan: Plan) {
     merchantDigest: bool(form, "merchantDigest"),
     digestEmail: cleanEmail(form.get("digestEmail")),
     flowTriggerEnabled: bool(form, "flowTriggerEnabled"),
+    orderStatusNotice: bool(form, "orderStatusNotice"),
   };
 }

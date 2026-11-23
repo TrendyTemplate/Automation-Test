@@ -1,0 +1,9 @@
+{
+  "heading": {
+    "stalled": "Een update over je levering",
+    "delayed": "Je levering heeft vertraging",
+    "exception": "Je levering heeft aandacht nodig",
+    "lost": "We zoeken je levering uit"
+  },
+  "track": "Volg je pakket"
+}

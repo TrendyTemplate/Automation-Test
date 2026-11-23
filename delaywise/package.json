@@ -19,7 +19,8 @@
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
     "test": "vitest run",
-    "validate:graphql": "node scripts/validate-graphql.mjs"
+    "validate:graphql": "node scripts/validate-graphql.mjs",
+    "typecheck:extensions": "tsc -p extensions/order-status-notice/tsconfig.json"
   },
   "type": "module",
   "engines": {

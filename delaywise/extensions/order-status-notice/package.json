@@ -1,0 +1,10 @@
+{
+  "name": "order-status-notice",
+  "private": true,
+  "version": "1.0.0",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@shopify/ui-extensions": "2026.10.0",
+    "preact": "^10.27.0"
+  }
+}

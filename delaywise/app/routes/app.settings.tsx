@@ -50,6 +50,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       merchantDigest: settings.merchantDigest,
       digestEmail: settings.digestEmail ?? "",
       flowTriggerEnabled: settings.flowTriggerEnabled,
+      orderStatusNotice: settings.orderStatusNotice,
     },
     timezone: settings.timezone ?? "UTC",
     klaviyo: {
@@ -337,6 +338,12 @@ export default function SettingsPage() {
             details="In Shopify Flow, choose the trigger “Shipment at risk” to tag orders, alert your team on Slack or open a help-desk ticket."
             checked={s.flowTriggerEnabled}
             onChange={(e) => set("flowTriggerEnabled", checked(e))}
+          ></s-checkbox>
+          <s-checkbox
+            label="Show a delivery update on the customer's order page"
+            details="Add the “Delivery update” block in Settings → Customer accounts → Customize. It appears only when a parcel is confirmed late, stalled, stuck or lost."
+            checked={s.orderStatusNotice}
+            onChange={(e) => set("orderStatusNotice", checked(e))}
           ></s-checkbox>
         </s-stack>
       </s-section>

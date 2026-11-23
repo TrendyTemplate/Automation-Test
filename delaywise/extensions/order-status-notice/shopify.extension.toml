@@ -1,0 +1,17 @@
+# R4: "Delivery update" block on the customer's order-status page.
+# Merchants add it in the customer accounts editor; it shows only when a parcel
+# of that order is confirmed late, stalled, stuck with the carrier or lost.
+api_version = "2026-10"
+
+[[extensions]]
+name = "Delivery update"
+handle = "order-status-notice"
+type = "ui_extension"
+
+  [extensions.capabilities]
+  # Calls the Delaywise backend (/api/order-status) with a session token.
+  network_access = true
+
+  [[extensions.targeting]]
+  module = "./src/OrderStatusBlock.tsx"
+  target = "customer-account.order-status.block.render"

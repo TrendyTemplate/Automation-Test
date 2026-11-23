@@ -57,6 +57,10 @@ Claude আপনার সাথে এই ধাপটা ধাপে ধা�
    ```
    `shopify.app.toml`-এর `application_url` আর `redirect_urls`-এ `https://example.com` বদলে হোস্টিংয়ের ঠিকানা দিন।
 
+### ধাপ ৩খ: কাস্টমারের অর্ডার পেজের "Delivery update" ব্লক
+
+`extensions/order-status-notice/src/config.ts` ফাইলে `APP_URL` বদলে হোস্টিংয়ের ঠিকানা দিন, তারপর `shopify app deploy` চালান। দোকানদাররা ব্লকটা যোগ করবে **Settings → Customer accounts → Customize**-এ গিয়ে। পার্সেল নিশ্চিতভাবে দেরি হলে কাস্টমার নিজের অর্ডার পেজেই তার ভাষায় নোটিশ দেখবে। শুধু ওই অর্ডারের মালিকই এটা দেখতে পায়।
+
 ## ধাপ ৪: প্রতি ঘণ্টায় স্ক্যান চালু করা
 
 অ্যাপ নিজে থেকে ঘুম থেকে ওঠে না, প্রতি ঘণ্টায় একবার ডাকতে হয়। ফ্রি সমাধান হলো [cron-job.org](https://cron-job.org)-এ একটা job বানানো:

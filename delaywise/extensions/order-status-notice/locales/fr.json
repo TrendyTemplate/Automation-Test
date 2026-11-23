@@ -1,0 +1,9 @@
+{
+  "heading": {
+    "stalled": "Des nouvelles de votre livraison",
+    "delayed": "Votre livraison a du retard",
+    "exception": "Votre livraison nécessite votre attention",
+    "lost": "Nous enquêtons sur votre livraison"
+  },
+  "track": "Suivre votre colis"
+}
