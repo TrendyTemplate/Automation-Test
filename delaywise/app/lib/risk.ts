@@ -81,7 +81,7 @@ export function assessRisk(
   const msLate = expected ? now.getTime() - expected.getTime() : 0;
   const daysLate = msLate > 0 ? Math.floor(msLate / DAY) : 0;
 
-  if (expected && msLate > LOST_AFTER_DAYS * DAY) {
+  if (expected && msLate > LOST_AFTER_DAYS * DAY && hasCarrierSignal(status)) {
     return {
       risk: "lost",
       reason: `Not delivered ${daysLate} days after the expected date`,
@@ -98,6 +98,23 @@ export function assessRisk(
           : "Carrier reported a problem with this parcel",
       daysLate,
     };
+  }
+
+  // H1: without real carrier scans we cannot tell a late parcel from a
+  // delivered one (or a digital / untracked order). Never tell the customer
+  // it is late or lost; flag it for the merchant to check instead.
+  if (!hasCarrierSignal(status)) {
+    if (expected && msLate > settings.graceHours * HOUR) {
+      return {
+        risk: "watch",
+        reason: "Past the expected date, but the carrier has sent no tracking updates. Check this one manually.",
+        daysLate,
+      };
+    }
+    if (expected && expected.getTime() - now.getTime() < DAY) {
+      return { risk: "watch", reason: "Due within a day; no carrier tracking updates yet", daysLate };
+    }
+    return { risk: "none", reason: "Waiting for carrier tracking updates", daysLate };
   }
 
   if (status === "CARRIER_DELAYED") {

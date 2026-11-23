@@ -17,6 +17,9 @@ const NOW = new Date("2026-11-20T15:00:00Z"); // 10:00 in New York
 
 interface FakeFulfillment {
   id: string;
+  requiresShipping?: boolean;
+  noTracking?: boolean;
+  fulfillmentStatus?: string;
   createdAt: string;
   displayStatus: string;
   deliveredAt: string | null;
@@ -39,6 +42,8 @@ interface FakeShop {
   redeemedCodes: string[];
   calls: { op: string; variables?: Record<string, unknown> }[];
   throttleFirst?: number;
+  /** Orders the order search no longer returns (H4), still reachable by ID. */
+  hidden?: FakeOrder[];
 }
 
 function fakeAdmin(shop: FakeShop): AdminApi {
@@ -76,8 +81,27 @@ function fakeAdmin(shop: FakeShop): AdminApi {
           data = { discountCodeBasicCreate: { codeDiscountNode: { id: "gid://shopify/DiscountCodeNode/9" }, userErrors: [] } };
           break;
         case "DelaywiseOrderContact":
-          data = { order: { id: options?.variables?.id, email: "buyer@example.test" } };
+          data = { order: { id: options?.variables?.id, email: "buyer@example.test", customer: { id: "gid://shopify/Customer/77" } } };
           break;
+        case "DelaywiseRefreshFulfillments": {
+          const ids = (options?.variables?.ids ?? []) as string[];
+          data = {
+            nodes: ids.map((id) => {
+              const o = shop.orders.find((x) => x.f.id === id) ?? shop.hidden?.find((x) => x.f.id === id);
+              if (!o) return null;
+              return {
+                id,
+                status: o.f.fulfillmentStatus ?? "SUCCESS",
+                displayStatus: o.f.displayStatus,
+                deliveredAt: o.f.deliveredAt,
+                estimatedDeliveryAt: null,
+                events: { nodes: o.f.events },
+                order: { cancelledAt: null },
+              };
+            }),
+          };
+          break;
+        }
         case "DelaywiseFlowTrigger":
           data = { flowTriggerReceive: { userErrors: [] } };
           break;
@@ -114,12 +138,14 @@ function toNode(o: FakeOrder) {
     fulfillments: [
       {
         id: o.f.id,
+        status: o.f.fulfillmentStatus ?? "SUCCESS",
+        requiresShipping: o.f.requiresShipping ?? true,
         createdAt: o.f.createdAt,
         inTransitAt: null,
         deliveredAt: o.f.deliveredAt,
         estimatedDeliveryAt: null,
         displayStatus: o.f.displayStatus,
-        trackingInfo: [{ company: o.f.carrier, number: `TRK${o.n}`, url: `https://track.test/${o.n}` }],
+        trackingInfo: o.f.noTracking ? [] : [{ company: o.f.carrier, number: `TRK${o.n}`, url: `https://track.test/${o.n}` }],
         events: { nodes: o.f.events },
       },
     ],
@@ -154,10 +180,15 @@ afterAll(async () => {
 
 describe("core pipeline (approval mode, Growth plan)", () => {
   const shop = newShop("Growth", [
-    { n: "1001", locale: "de-DE", country: "DE", f: { id: "gid://shopify/Fulfillment/1", createdAt: ago(20), displayStatus: "FULFILLED", deliveredAt: null, events: [], carrier: "DHL Express" } },
+    { n: "1001", locale: "de-DE", country: "DE", f: { id: "gid://shopify/Fulfillment/1", createdAt: ago(20), displayStatus: "IN_TRANSIT", deliveredAt: null, events: [{ status: "IN_TRANSIT", happenedAt: ago(2) }], carrier: "DHL Express" } },
     { n: "1002", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/2", createdAt: ago(6), displayStatus: "DELIVERED", deliveredAt: ago(2), events: [{ status: "DELIVERED", happenedAt: ago(2) }], carrier: "UPS" } },
     { n: "1003", locale: "fr", country: "US", f: { id: "gid://shopify/Fulfillment/3", createdAt: ago(5), displayStatus: "IN_TRANSIT", deliveredAt: null, events: [{ status: "IN_TRANSIT", happenedAt: ago(4) }], carrier: "UPS" } },
     { n: "1004", locale: "en", country: "US", tags: ["Wholesale"], f: { id: "gid://shopify/Fulfillment/4", createdAt: ago(20), displayStatus: "IN_TRANSIT", deliveredAt: null, events: [{ status: "IN_TRANSIT", happenedAt: ago(19) }], carrier: "USPS" } },
+    // H1: no carrier scans at all → never emailed, only flagged for a manual check.
+    { n: "1005", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/5", createdAt: ago(20), displayStatus: "FULFILLED", deliveredAt: null, events: [], carrier: "USPS" } },
+    // H1: digital product / no tracking number → not tracked at all.
+    { n: "1006", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/6", createdAt: ago(20), displayStatus: "FULFILLED", deliveredAt: null, events: [], carrier: "", requiresShipping: false } },
+    { n: "1007", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/7", createdAt: ago(20), displayStatus: "FULFILLED", deliveredAt: null, events: [], carrier: "", noTracking: true } },
   ]);
 
   beforeAll(async () => {
@@ -168,8 +199,9 @@ describe("core pipeline (approval mode, Growth plan)", () => {
 
   it("finds late and stalled parcels and drafts messages in the customer's language", async () => {
     const summary = await syncShop(fakeAdmin(shop), shop.domain, NOW);
-    expect(summary.shipmentsSeen).toBe(4);
-    expect(summary.newShipments).toBe(4);
+    expect(summary.shipmentsSeen).toBe(5);
+    expect(summary.newShipments).toBe(5);
+    expect(summary.skippedNoTracking).toBe(2);
 
     const settings = await db.shopSettings.findUniqueOrThrow({ where: { shop: shop.domain } });
     expect(settings.plan).toBe("growth");
@@ -181,6 +213,10 @@ describe("core pipeline (approval mode, Growth plan)", () => {
     expect(late.risk).toBe("delayed");
     const stalled = await db.shipment.findFirstOrThrow({ where: { shop: shop.domain, orderName: "#1003" } });
     expect(stalled.risk).toBe("stalled");
+
+    const untracked = await db.shipment.findFirstOrThrow({ where: { shop: shop.domain, orderName: "#1005" } });
+    expect(untracked.risk).toBe("watch");
+    expect(untracked.riskReason).toContain("Check this one manually");
 
     const messages = await db.message.findMany({ where: { shop: shop.domain } });
     expect(messages).toHaveLength(2);
@@ -230,13 +266,37 @@ describe("core pipeline (approval mode, Growth plan)", () => {
     expect(JSON.stringify(await db.shipment.findMany({ where: { shop: shop.domain } }))).not.toContain("buyer@example.test");
   });
 
+  it("M4: creates the discount in Shopify only when the email is sent, for that customer", async () => {
+    const creates = shop.calls.filter((c) => c.op === "DelaywiseCreateSorryDiscount");
+    expect(creates).toHaveLength(1); // the German email was sent above; the French one has no discount
+    const input = creates[0].variables!.basicCodeDiscount as { code: string; context: unknown };
+    const message = await db.message.findFirstOrThrow({ where: { shop: shop.domain, language: "de" } });
+    expect(input.code).toBe(message.discountCode);
+    expect(input.context).toEqual({ customers: { add: ["gid://shopify/Customer/77"] } });
+    expect(message.discountCreated).toBe(true);
+  });
+
+  it("H2: a message can only be sent once, even if two requests race", async () => {
+    const message = await db.message.findFirstOrThrow({ where: { shop: shop.domain, language: "fr" } });
+    const [a, b] = await Promise.all([sendMessage(fakeAdmin(shop), message.id), sendMessage(fakeAdmin(shop), message.id)]);
+    expect(a.ok || b.ok).toBe(true); // the loser sees "sending" or "sent", never sends again
+    const contacts = shop.calls.filter((c) => c.op === "DelaywiseOrderContact" && c.variables?.id === "gid://shopify/Order/1003");
+    expect(contacts).toHaveLength(1);
+  });
+
+  it("H2: a second scan can't start while one is running", async () => {
+    await db.shopSettings.update({ where: { shop: shop.domain }, data: { scanLockUntil: new Date(Date.now() + 60_000) } });
+    await expect(syncShop(fakeAdmin(shop), shop.domain, NOW)).rejects.toThrow(/already running/);
+    await db.shopSettings.update({ where: { shop: shop.domain }, data: { scanLockUntil: null } });
+  });
+
   it("F11: records when an apology discount turns into an order", async () => {
     const message = await db.message.findFirstOrThrow({ where: { shop: shop.domain, language: "de" } });
     shop.redeemedCodes = [message.discountCode!];
     const summary = await syncShop(fakeAdmin(shop), shop.domain, new Date(NOW.getTime() + 2 * 3_600_000));
     expect(summary.discountsRedeemed).toBe(1);
     const roi = await roiSummary(shop.domain);
-    expect(roi).toMatchObject({ emailsSent: 1, discountsSent: 1, discountsRedeemed: 1, revenueRecovered: 80 });
+    expect(roi).toMatchObject({ emailsSent: 2, discountsSent: 1, discountsRedeemed: 1, revenueRecovered: 80 });
   });
 
   it("F2: sends a follow-up after a warned-about parcel is delivered, once", async () => {
@@ -254,20 +314,20 @@ describe("core pipeline (approval mode, Growth plan)", () => {
     expect(followUp.discountCode).toBeNull();
     const second = await syncShop(fakeAdmin(shop), shop.domain, new Date(at.getTime() + 3_600_000));
     expect(second.followUps).toBe(0);
-    // The French customer was never actually emailed (still pending), so no follow-up for them.
+    // Only customers who were actually emailed get a follow-up.
   });
 
   it("records monthly usage", async () => {
     const usage = await db.usageMonth.findFirstOrThrow({ where: { shop: shop.domain } });
-    expect(usage.shipmentsTracked).toBe(4);
-    expect(usage.messagesSent).toBe(1);
+    expect(usage.shipmentsTracked).toBe(5);
+    expect(usage.messagesSent).toBe(2); // German + French; the follow-up is a draft in approval mode
   });
 });
 
 describe("autopilot, send window and carrier transit days", () => {
   const shop = newShop("Starter", [
     // Shipped 4 days ago by "Speedy": late only if Speedy promises 2 days.
-    { n: "2001", locale: "es", country: "US", f: { id: "gid://shopify/Fulfillment/21", createdAt: ago(4), displayStatus: "FULFILLED", deliveredAt: null, events: [], carrier: "Speedy Post" } },
+    { n: "2001", locale: "es", country: "US", f: { id: "gid://shopify/Fulfillment/21", createdAt: ago(4), displayStatus: "IN_TRANSIT", deliveredAt: null, events: [{ status: "IN_TRANSIT", happenedAt: ago(1) }], carrier: "Speedy Post" } },
   ]);
 
   beforeAll(async () => {
@@ -335,7 +395,7 @@ describe("F13: retention", () => {
 
 describe("R3: Klaviyo events", () => {
   const shop = newShop("Growth", [
-    { n: "3001", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/31", createdAt: ago(20), displayStatus: "FULFILLED", deliveredAt: null, events: [], carrier: "UPS" } },
+    { n: "3001", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/31", createdAt: ago(9), displayStatus: "IN_TRANSIT", deliveredAt: null, events: [{ status: "IN_TRANSIT", happenedAt: ago(1) }], carrier: "UPS" } },
   ]);
   const sent: { url: string; body: string; auth: string }[] = [];
 
@@ -369,5 +429,34 @@ describe("R3: Klaviyo events", () => {
   it("stores the key encrypted, never in plain text", async () => {
     const settings = await db.shopSettings.findUniqueOrThrow({ where: { shop: shop.domain } });
     expect(settings.klaviyoApiKeyEnc).not.toContain("pk_testkey");
+  });
+});
+
+describe("H4 + H5: shipments outside the order search are still refreshed, and resolved drafts are dropped", () => {
+  const order = { n: "4001", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/41", createdAt: ago(9), displayStatus: "IN_TRANSIT", deliveredAt: null as string | null, events: [{ status: "IN_TRANSIT", happenedAt: ago(1) }], carrier: "UPS" } };
+  const shop = newShop("Growth", [order]);
+
+  beforeAll(async () => {
+    await db.shopSettings.create({ data: { shop: shop.domain } });
+  });
+
+  it("drafts a late email, then skips it when the parcel arrives", async () => {
+    await syncShop(fakeAdmin(shop), shop.domain, NOW);
+    const draft = await db.message.findFirstOrThrow({ where: { shop: shop.domain } });
+    expect(draft.status).toBe("pending_approval");
+
+    // The order search no longer returns this order (big store / older order)…
+    shop.hidden = [order];
+    shop.orders = [];
+    order.f.displayStatus = "DELIVERED";
+    order.f.deliveredAt = ago(0);
+    const summary = await syncShop(fakeAdmin(shop), shop.domain, new Date(NOW.getTime() + 3_600_000));
+    expect(summary.refreshed).toBe(1); // …but it is re-checked by ID.
+    const s = await db.shipment.findFirstOrThrow({ where: { shop: shop.domain } });
+    expect(s.status).toBe("DELIVERED");
+    const after = await db.message.findUniqueOrThrow({ where: { id: draft.id } });
+    expect(after.status).toBe("skipped");
+    const send = await sendMessage(fakeAdmin(shop), draft.id);
+    expect(send.ok).toBe(false);
   });
 });

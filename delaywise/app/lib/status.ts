@@ -19,7 +19,9 @@ const SHOPIFY_MAP: Record<string, ShipmentStatus> = {
   CONFIRMED: "PRE_TRANSIT",
   SUBMITTED: "PRE_TRANSIT",
   CARRIER_PICKED_UP: "IN_TRANSIT",
-  PICKED_UP: "IN_TRANSIT",
+  // M8: PICKED_UP means the customer collected a local-pickup order (final).
+  // The carrier collecting a parcel is CARRIER_PICKED_UP.
+  PICKED_UP: "DELIVERED",
   IN_TRANSIT: "IN_TRANSIT",
   OUT_FOR_DELIVERY: "OUT_FOR_DELIVERY",
   DELIVERED: "DELIVERED",
@@ -57,6 +59,26 @@ const SHIP24_MAP: Record<string, ShipmentStatus> = {
 export function fromShip24(value: string | null | undefined): ShipmentStatus {
   if (!value) return "UNKNOWN";
   return SHIP24_MAP[value.toLowerCase()] ?? "UNKNOWN";
+}
+
+/**
+ * M8: one status for a fulfillment. Cancelled/failed fulfillments and orders are
+ * final, a delivery timestamp wins, then the newest carrier event, then the
+ * display status.
+ */
+export function resolveFulfillmentStatus(f: {
+  orderCancelled: boolean;
+  fulfillmentStatus: string | null | undefined;
+  deliveredAt: string | null | undefined;
+  latestEventStatus: string | null | undefined;
+  displayStatus: string | null | undefined;
+}): ShipmentStatus {
+  if (f.orderCancelled) return "CANCELED";
+  if (["CANCELLED", "FAILURE", "ERROR"].includes((f.fulfillmentStatus ?? "").toUpperCase())) return "CANCELED";
+  if (f.deliveredAt) return "DELIVERED";
+  const fromDisplay = fromShopify(f.displayStatus);
+  if (fromDisplay === "DELIVERED" || fromDisplay === "CANCELED") return fromDisplay;
+  return fromShopify(f.latestEventStatus ?? f.displayStatus);
 }
 
 /** True when the status came from real carrier scans (not just "fulfilled"). */

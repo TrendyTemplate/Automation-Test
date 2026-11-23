@@ -48,6 +48,8 @@ export const SHIPPED_ORDERS_QUERY = `#graphql
         }
         fulfillments(first: 10) {
           id
+          status
+          requiresShipping
           createdAt
           inTransitAt
           deliveredAt
@@ -69,12 +71,38 @@ export const SHIPPED_ORDERS_QUERY = `#graphql
     }
   }`;
 
+/** H4: re-check open shipments directly, however old their order is. */
+export const REFRESH_FULFILLMENTS_QUERY = `#graphql
+  query DelaywiseRefreshFulfillments($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Fulfillment {
+        id
+        status
+        displayStatus
+        deliveredAt
+        estimatedDeliveryAt
+        events(first: 1, sortKey: HAPPENED_AT, reverse: true) {
+          nodes {
+            status
+            happenedAt
+          }
+        }
+        order {
+          cancelledAt
+        }
+      }
+    }
+  }`;
+
 /** Fetched only at send time; the email is never stored. */
 export const ORDER_CONTACT_QUERY = `#graphql
   query DelaywiseOrderContact($id: ID!) {
     order(id: $id) {
       id
       email
+      customer {
+        id
+      }
     }
   }`;
 
@@ -122,6 +150,7 @@ export const FLOW_TRIGGER_MUTATION = `#graphql
 export const ALL_OPERATIONS = {
   SHOP_INFO_QUERY,
   SHIPPED_ORDERS_QUERY,
+  REFRESH_FULFILLMENTS_QUERY,
   ORDER_CONTACT_QUERY,
   CREATE_DISCOUNT_MUTATION,
   DISCOUNT_REDEMPTIONS_QUERY,

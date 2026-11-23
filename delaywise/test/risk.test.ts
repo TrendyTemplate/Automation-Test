@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assessRisk, estimateExpectedBy, shouldNotify, type RiskSettings } from "../app/lib/risk";
+import { resolveFulfillmentStatus } from "../app/lib/status";
 
 const settings: RiskSettings = {
   defaultTransitDays: 5,
@@ -46,9 +47,19 @@ describe("assessRisk", () => {
     expect(r.risk).toBe("none");
   });
   it("flags delayed after expected date plus grace", () => {
-    const r = assessRisk({ status: "UNKNOWN", shippedAt, expectedBy, lastEventAt: null }, settings, new Date(expectedBy.getTime() + 2 * D));
+    const now = new Date(expectedBy.getTime() + 2 * D);
+    const r = assessRisk({ status: "IN_TRANSIT", shippedAt, expectedBy, lastEventAt: new Date(now.getTime() - 5 * H) }, settings, now);
     expect(r.risk).toBe("delayed");
     expect(r.daysLate).toBe(2);
+  });
+  it("H1: never calls a parcel late or lost without carrier scans", () => {
+    for (const status of ["UNKNOWN", "PRE_TRANSIT"] as const) {
+      const late = assessRisk({ status, shippedAt, expectedBy, lastEventAt: null }, settings, new Date(expectedBy.getTime() + 2 * D));
+      expect(late.risk).toBe("watch");
+      expect(late.reason).toContain("Check this one manually");
+      const veryLate = assessRisk({ status, shippedAt, expectedBy, lastEventAt: null }, settings, new Date(expectedBy.getTime() + 30 * D));
+      expect(veryLate.risk).toBe("watch");
+    }
   });
   it("respects the carrier's own delay signal", () => {
     const r = assessRisk({ status: "CARRIER_DELAYED", shippedAt, expectedBy, lastEventAt: shippedAt }, settings, new Date(shippedAt.getTime() + D));
@@ -85,5 +96,21 @@ describe("shouldNotify", () => {
     expect(shouldNotify("stalled", null, { ...settings, notifyOnStall: false })).toBe(false);
     expect(shouldNotify("lost", null, { ...settings, notifyOnDelay: false })).toBe(false);
     expect(shouldNotify("exception", null, { ...settings, notifyOnException: false })).toBe(false);
+  });
+});
+
+describe("M8 resolveFulfillmentStatus", () => {
+  const base = { orderCancelled: false, fulfillmentStatus: "SUCCESS", deliveredAt: null, latestEventStatus: null, displayStatus: "IN_TRANSIT" };
+  it("treats cancelled orders and fulfillments as final", () => {
+    expect(resolveFulfillmentStatus({ ...base, orderCancelled: true })).toBe("CANCELED");
+    expect(resolveFulfillmentStatus({ ...base, fulfillmentStatus: "CANCELLED", latestEventStatus: "IN_TRANSIT" })).toBe("CANCELED");
+  });
+  it("lets a delivery timestamp or local pickup win over old events", () => {
+    expect(resolveFulfillmentStatus({ ...base, deliveredAt: "2026-11-01T00:00:00Z", latestEventStatus: "IN_TRANSIT" })).toBe("DELIVERED");
+    expect(resolveFulfillmentStatus({ ...base, displayStatus: "PICKED_UP", latestEventStatus: "IN_TRANSIT" })).toBe("DELIVERED");
+  });
+  it("prefers the newest carrier event otherwise", () => {
+    expect(resolveFulfillmentStatus({ ...base, latestEventStatus: "OUT_FOR_DELIVERY" })).toBe("OUT_FOR_DELIVERY");
+    expect(resolveFulfillmentStatus({ ...base, displayStatus: "FULFILLED" })).toBe("UNKNOWN");
   });
 });

@@ -12,6 +12,15 @@ export interface GraphqlResult<T> {
 }
 
 const MAX_ATTEMPTS = 4;
+
+export class GraphqlError extends Error {
+  readonly accessDenied: boolean;
+  constructor(readonly errors: unknown) {
+    const text = JSON.stringify(errors ?? "").slice(0, 300);
+    super(`Shopify GraphQL error: ${text}`);
+    this.accessDenied = /ACCESS_DENIED|access denied|not approved to access/i.test(text);
+  }
+}
 let sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Tests replace the delay so retries run instantly. */
@@ -39,9 +48,9 @@ export async function gql<T>(
       const res = await admin.graphql(query, variables ? { variables } : undefined);
       if (res.status === 429) throw new Error("429 Too Many Requests");
       const json = (await res.json()) as GraphqlResult<T>;
+      // M2: any top-level error fails the call (no silent partial data).
       if (json.data && !json.errors) return json.data;
-      if (json.data && !isThrottle(json.errors)) return json.data;
-      throw new Error(`Shopify GraphQL error: ${JSON.stringify(json.errors).slice(0, 300)}`);
+      throw new GraphqlError(json.errors);
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);

@@ -12,11 +12,21 @@ export interface OutgoingEmail {
   text: string;
 }
 
+/** M3: a quoted display name, so "Acme, Inc." stays one sender. */
+export function formatFrom(name: string, address: string): string {
+  const clean = name.replace(/["\\<>\r\n]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || "Store updates";
+  return `"${clean}" <${address}>`;
+}
+
 export async function sendEmail(email: OutgoingEmail): Promise<{ id: string }> {
   const fromAddress = process.env.EMAIL_FROM_ADDRESS || "updates@example.com";
-  const from = `${email.fromName.replace(/[<>"]/g, "")} <${fromAddress}>`;
+  const from = formatFrom(email.fromName, fromAddress);
 
   if (!process.env.RESEND_API_KEY) {
+    // L3: never pretend an email went out in production.
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("Email sending is not configured (RESEND_API_KEY missing)");
+    }
     console.log(`[email:dev] to=<redacted> from="${from}" subject="${email.subject}"`);
     return { id: `dev-${Date.now()}` };
   }

@@ -1,16 +1,16 @@
 import db from "../db.server";
 import { assessRisk, estimateExpectedBy, isAtRisk, riskRank, shouldNotify } from "../lib/risk";
 import { exclusionReason, parseCarrierTransit, transitDaysFor } from "../lib/rules";
-import { fromShopify, type ShipmentStatus } from "../lib/status";
+import { resolveFulfillmentStatus, type ShipmentStatus } from "../lib/status";
 import { gql, type AdminApi } from "./admin-types";
 import { fireShipmentAtRisk } from "./flow.server";
 import { pushKlaviyoShipmentEvent } from "./klaviyo-events.server";
 import { KLAVIYO_METRICS } from "./klaviyo.server";
-import { createNotification, sendDueScheduled } from "./notifier.server";
+import { createNotification, sendDueScheduled, skipResolvedMessages } from "./notifier.server";
 import { trackRedemptions } from "./roi.server";
 import { getSettings, getUsage, planFor, refreshShopInfo } from "./settings.server";
 import { fetchResults, registerAndTrack, ship24Enabled } from "./ship24.server";
-import { SHIPPED_ORDERS_QUERY } from "./shopify-queries.server";
+import { REFRESH_FULFILLMENTS_QUERY, SHIPPED_ORDERS_QUERY } from "./shopify-queries.server";
 
 /** Orders older than this are not watched. */
 export const WINDOW_DAYS = 45;
@@ -30,6 +30,8 @@ interface OrderNode {
   shippingAddress: { countryCodeV2: string | null } | null;
   fulfillments: {
     id: string;
+    status: string;
+    requiresShipping: boolean;
     createdAt: string;
     inTransitAt: string | null;
     deliveredAt: string | null;
@@ -58,7 +60,28 @@ export interface SyncSummary {
   scheduledSent: number;
   discountsRedeemed: number;
   klaviyoEvents: number;
+  refreshed: number;
+  skippedNoTracking: number;
   limitReached: boolean;
+}
+
+/** H2: how long a scan may hold the shop's lock before another can take over. */
+export const SCAN_LOCK_MS = 15 * 60 * 1000;
+
+export class ScanInProgressError extends Error {
+  constructor() {
+    super("A scan is already running for this store. Try again in a minute.");
+  }
+}
+
+interface RefreshNode {
+  id?: string;
+  status: string;
+  displayStatus: string | null;
+  deliveredAt: string | null;
+  estimatedDeliveryAt: string | null;
+  events: { nodes: { status: string; happenedAt: string }[] };
+  order: { cancelledAt: string | null } | null;
 }
 
 /** F2: follow up only on recent deliveries. */
@@ -67,6 +90,15 @@ const FOLLOW_UP_WITHIN_DAYS = 3;
 const toDate = (v: string | null | undefined) => (v ? new Date(v) : null);
 
 export async function syncShop(admin: AdminApi, shop: string, now = new Date()): Promise<SyncSummary> {
+  // H2: take the shop's lease (or fail fast) so scans never overlap.
+  await getSettings(shop);
+  const clock = new Date();
+  const lock = await db.shopSettings.updateMany({
+    where: { shop, OR: [{ scanLockUntil: null }, { scanLockUntil: { lt: clock } }] },
+    data: { scanLockUntil: new Date(clock.getTime() + SCAN_LOCK_MS) },
+  });
+  if (lock.count !== 1) throw new ScanInProgressError();
+
   try {
     const summary = await runSync(admin, shop, now);
     await db.shopSettings.update({ where: { shop }, data: { lastScanAt: now, lastScanError: null } });
@@ -75,6 +107,8 @@ export async function syncShop(admin: AdminApi, shop: string, now = new Date()):
     const message = error instanceof Error ? error.message : String(error);
     await db.shopSettings.updateMany({ where: { shop }, data: { lastScanAt: now, lastScanError: message.slice(0, 300) } });
     throw error;
+  } finally {
+    await db.shopSettings.updateMany({ where: { shop }, data: { scanLockUntil: null } });
   }
 }
 
@@ -99,18 +133,32 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
     scheduledSent: 0,
     discountsRedeemed: 0,
     klaviyoEvents: 0,
+    refreshed: 0,
+    skippedNoTracking: 0,
     limitReached: false,
   };
+  const redacted = new Set(
+    (await db.redactedOrder.findMany({ where: { shop }, select: { orderId: true } })).map((r) => r.orderId),
+  );
+  const seen = new Set<string>();
   const transitTable = parseCarrierTransit(settings.carrierTransitDays);
 
   // 1. Pull shipped orders from Shopify and upsert one row per fulfillment.
   const since = new Date(now.getTime() - WINDOW_DAYS * 24 * HOUR).toISOString().slice(0, 10);
-  const search = `(fulfillment_status:shipped OR fulfillment_status:partial) AND created_at:>=${since}`;
+  // L9: updated_at, so pre-orders placed long ago but shipped recently are included.
+  const search = `(fulfillment_status:shipped OR fulfillment_status:partial) AND updated_at:>=${since}`;
   let after: string | null = null;
   for (let page = 0; page < MAX_PAGES; page++) {
     const data: OrdersPage = await gql<OrdersPage>(admin, SHIPPED_ORDERS_QUERY, { query: search, after });
     for (const order of data.orders.nodes) {
+      if (redacted.has(order.id)) continue; // M7
       for (const f of order.fulfillments) {
+        // H1: digital, local-delivery and untracked fulfillments can't be followed.
+        if (!f.requiresShipping || !f.trackingInfo[0]?.number) {
+          summary.skippedNoTracking++;
+          continue;
+        }
+        seen.add(f.id);
         summary.shipmentsSeen++;
         const existing = await db.shipment.findUnique({
           where: { shop_fulfillmentId: { shop, fulfillmentId: f.id } },
@@ -121,9 +169,13 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
         }
 
         const event = f.events.nodes[0];
-        const shopifyStatus: ShipmentStatus = order.cancelledAt
-          ? "CANCELED"
-          : fromShopify(event?.status ?? f.displayStatus);
+        const shopifyStatus: ShipmentStatus = resolveFulfillmentStatus({
+          orderCancelled: Boolean(order.cancelledAt),
+          fulfillmentStatus: f.status,
+          deliveredAt: f.deliveredAt,
+          latestEventStatus: event?.status,
+          displayStatus: f.displayStatus,
+        });
         const keepExternal =
           existing?.source === "ship24" && (shopifyStatus === "UNKNOWN" || shopifyStatus === "PRE_TRANSIT");
         const shippedAt = toDate(f.inTransitAt) ?? new Date(f.createdAt);
@@ -186,6 +238,41 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
     }
     if (!data.orders.pageInfo.hasNextPage) break;
     after = data.orders.pageInfo.endCursor;
+  }
+
+  // 1b. H4: open shipments the order search didn't return (big stores, old
+  // orders) are re-checked directly, so deliveries are never missed.
+  const stale = await db.shipment.findMany({
+    where: { shop, status: { notIn: ["DELIVERED", "CANCELED"] }, source: "shopify" },
+    select: { id: true, fulfillmentId: true, deliveredAt: true },
+  });
+  const toRefresh = stale.filter((s) => !seen.has(s.fulfillmentId));
+  for (let i = 0; i < toRefresh.length; i += 50) {
+    const batch = toRefresh.slice(i, i + 50);
+    const data = await gql<{ nodes: (RefreshNode | null)[] }>(admin, REFRESH_FULFILLMENTS_QUERY, {
+      ids: batch.map((b) => b.fulfillmentId),
+    });
+    for (const node of data.nodes) {
+      const row = node?.id ? batch.find((b) => b.fulfillmentId === node.id) : undefined;
+      if (!node || !row) continue;
+      const event = node.events.nodes[0];
+      await db.shipment.update({
+        where: { id: row.id },
+        data: {
+          status: resolveFulfillmentStatus({
+            orderCancelled: Boolean(node.order?.cancelledAt),
+            fulfillmentStatus: node.status,
+            deliveredAt: node.deliveredAt,
+            latestEventStatus: event?.status,
+            displayStatus: node.displayStatus,
+          }),
+          lastEventAt: toDate(event?.happenedAt),
+          deliveredAt: toDate(node.deliveredAt) ?? row.deliveredAt,
+          ...(node.estimatedDeliveryAt ? { expectedBy: new Date(node.estimatedDeliveryAt) } : {}),
+        },
+      });
+      summary.refreshed++;
+    }
   }
 
   // 2. Fill gaps with external tracking where Shopify has no carrier scans.
@@ -288,7 +375,7 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
 
     if (shouldNotify(result.risk, s.notifiedRisk, settings)) {
       try {
-        await createNotification({
+        const created = await createNotification({
           admin,
           shipment: updated,
           kind: result.risk,
@@ -297,18 +384,19 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
           plan,
           now,
         });
-        summary.messagesCreated++;
+        if (created) summary.messagesCreated++;
       } catch (error) {
         console.error(`[sync] ${shop}: could not create message for ${s.id}`, error);
       }
     }
   }
 
-  // Delivered parcels no longer carry risk.
+  // Delivered parcels no longer carry risk, and H5: their unsent drafts are dropped.
   await db.shipment.updateMany({
     where: { shop, status: { in: ["DELIVERED", "CANCELED"] }, risk: { not: "none" } },
     data: { risk: "none", riskReason: "Delivered or canceled" },
   });
+  await skipResolvedMessages(shop);
 
   // 4. F2: a short "it arrived" note for customers we warned about a delay.
   if (settings.deliveredFollowUp) {
@@ -327,7 +415,8 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
     });
     for (const s of delivered) {
       try {
-        await createNotification({ admin, shipment: s, kind: "delivered", daysLate: 0, settings, plan, now });
+        const created = await createNotification({ admin, shipment: s, kind: "delivered", daysLate: 0, settings, plan, now });
+        if (!created) continue;
         summary.followUps++;
         if (
           await pushKlaviyoShipmentEvent({

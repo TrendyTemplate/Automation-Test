@@ -37,17 +37,39 @@ export async function refreshShopInfo(admin: AdminApi, shop: string): Promise<Sh
     (s) => s.status === "ACTIVE",
   );
   const plan = planFromBillingName(active?.name);
-  return db.shopSettings.update({
+  if (active && plan.id === "free" && active.name !== "Free") {
+    // M10: a paid subscription whose name doesn't match a plan means the
+    // Partner Dashboard plan names drifted. Don't silently downgrade quietly.
+    console.error(`[plans] ${shop}: unknown subscription name "${active.name}"; treating as Free`);
+  }
+  // L1: contact emails are seeded once (first scan); after that, an empty
+  // field means the merchant cleared it on purpose.
+  const firstRun = current.lastScanAt === null;
+  const updated = await db.shopSettings.update({
     where: { shop },
     data: {
       shopName: data.shop.name,
       shopCountry: data.shop.billingAddress.countryCodeV2 ?? current.shopCountry,
-      replyToEmail: current.replyToEmail ?? data.shop.contactEmail,
-      digestEmail: current.digestEmail ?? data.shop.contactEmail,
+      ...(firstRun
+        ? {
+            replyToEmail: current.replyToEmail ?? data.shop.contactEmail,
+            digestEmail: current.digestEmail ?? data.shop.contactEmail,
+          }
+        : {}),
       timezone: data.shop.ianaTimezone || current.timezone,
       plan: plan.id,
+      // M10: paid-only features switch off when the plan no longer includes them.
+      ...(plan.autopilot ? {} : { mode: "approval" }),
+      ...(plan.compensation ? {} : { compensationEnabled: false }),
     },
   });
+  if (!plan.autopilot) {
+    await db.message.updateMany({
+      where: { shop, status: "scheduled" },
+      data: { status: "pending_approval", scheduledFor: null },
+    });
+  }
+  return updated;
 }
 
 export async function getUsage(shop: string, now = new Date()) {
@@ -65,6 +87,7 @@ export async function deleteShopData(shop: string): Promise<void> {
     db.message.deleteMany({ where: { shop } }),
     db.shipment.deleteMany({ where: { shop } }),
     db.usageMonth.deleteMany({ where: { shop } }),
+    db.redactedOrder.deleteMany({ where: { shop } }),
     db.shopSettings.deleteMany({ where: { shop } }),
     db.session.deleteMany({ where: { shop } }),
   ]);

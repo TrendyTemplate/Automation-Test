@@ -77,6 +77,8 @@ model ShopSettings {
   // R3: Klaviyo integration. Private key encrypted with APP_ENCRYPTION_KEY.
   klaviyoEnabled           Boolean  @default(false)
   klaviyoApiKeyEnc         String?
+  // H2: per-shop lease so two scans never run at once.
+  scanLockUntil            DateTime?
   // F12
   lastScanAt               DateTime?
   lastScanError            String?
@@ -131,8 +133,11 @@ model Message {
   subject      String
   body         String
   generatedBy  String    @default("ai") // ai | template
-  discountCode String?
-  status       String    @default("pending_approval") // pending_approval | scheduled | sent | skipped | failed
+  discountCode String? // M4: chosen when drafted, created in Shopify only when sent
+  discountPercent Int?
+  discountCreated Boolean  @default(false)
+  attempts     Int       @default(0) // L2: send attempts
+  status       String    @default("pending_approval") // pending_approval | scheduled | sending | sent | skipped | failed
   scheduledFor DateTime? // F6: autopilot emails waiting for the send window
   // F11: discount redemption
   discountRedeemedAt DateTime?
@@ -142,7 +147,18 @@ model Message {
   createdAt    DateTime  @default(now())
   sentAt       DateTime?
 
+  @@unique([shipmentId, kind]) // H2: one email per shipment per situation
   @@index([shop, status])
+}
+
+/// M7: orders whose customer data Shopify asked us to erase; never re-imported.
+model RedactedOrder {
+  id      String   @id @default(cuid())
+  shop    String
+  orderId String
+  createdAt DateTime @default(now())
+
+  @@unique([shop, orderId])
 }
 
 model UsageMonth {

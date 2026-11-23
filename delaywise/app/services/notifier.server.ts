@@ -1,49 +1,60 @@
 import type { Shipment, ShopSettings } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import db from "../db.server";
 import { baseLanguage } from "../lib/language";
-import type { Plan } from "../lib/plans";
+import { getPlan, type Plan } from "../lib/plans";
 import type { MessageKind } from "../lib/risk";
 import { inSendWindow, nextSendTime } from "../lib/rules";
-import { gql, type AdminApi } from "./admin-types";
+import { isFinal, type ShipmentStatus } from "../lib/status";
+import { GraphqlError, gql, type AdminApi } from "./admin-types";
 import { writeDelayEmail } from "./ai-writer.server";
 import { sendEmail } from "./email.server";
 import { getUsage } from "./settings.server";
 import { CREATE_DISCOUNT_MUTATION, ORDER_CONTACT_QUERY } from "./shopify-queries.server";
 
 const DISCOUNT_VALID_DAYS = 60;
+/** L2: autopilot retries failed sends up to this many attempts in total. */
+export const MAX_SEND_ATTEMPTS = 3;
+/** Statuses a message can be claimed for sending from. */
+const SENDABLE = ["pending_approval", "failed", "scheduled"];
 
-/** Creates a single-use "sorry" discount code in the merchant's store. */
+export function newDiscountCode(): string {
+  return `SORRY-${randomBytes(3).toString("hex").toUpperCase()}`;
+}
+
+/**
+ * Creates the single-use apology code in the merchant's store. M4: only called
+ * when the email is actually being sent, and limited to that order's customer
+ * when Shopify gives us the customer.
+ */
 export async function createSorryDiscount(
   admin: AdminApi,
-  orderName: string,
-  percent: number,
+  args: { code: string; orderName: string; percent: number; customerId: string | null },
   now = new Date(),
-): Promise<string | null> {
-  const code = `SORRY-${randomBytes(3).toString("hex").toUpperCase()}`;
+): Promise<void> {
   const data = await gql<{
-    discountCodeBasicCreate: { userErrors: { message: string }[] } | null;
+    discountCodeBasicCreate: { codeDiscountNode: { id: string } | null; userErrors: { message: string }[] } | null;
   }>(admin, CREATE_DISCOUNT_MUTATION, {
     basicCodeDiscount: {
-      title: `Delaywise apology for ${orderName}`,
-      code,
+      title: `Delaywise apology for ${args.orderName}`,
+      code: args.code,
       startsAt: now.toISOString(),
       endsAt: new Date(now.getTime() + DISCOUNT_VALID_DAYS * 86_400_000).toISOString(),
-      context: { all: "ALL" },
+      context: args.customerId ? { customers: { add: [args.customerId] } } : { all: "ALL" },
       customerGets: {
-        value: { percentage: Math.min(50, Math.max(1, percent)) / 100 },
+        value: { percentage: Math.min(50, Math.max(1, args.percent)) / 100 },
         items: { all: true },
       },
       usageLimit: 1,
       appliesOncePerCustomer: true,
     },
   });
-  const errors = data.discountCodeBasicCreate?.userErrors ?? [];
-  if (errors.length) {
-    console.error("[notifier] discount errors", errors.map((e) => e.message).join("; "));
-    return null;
+  const result = data.discountCodeBasicCreate;
+  const errors = result?.userErrors ?? [];
+  if (errors.length || !result?.codeDiscountNode?.id) {
+    throw new Error(`Could not create the discount code: ${errors.map((e) => e.message).join("; ") || "no discount returned"}`);
   }
-  return code;
 }
 
 export async function createNotification(args: {
@@ -54,21 +65,24 @@ export async function createNotification(args: {
   settings: ShopSettings;
   plan: Plan;
   now?: Date;
-}): Promise<string> {
+}): Promise<string | null> {
   const { admin, shipment, kind, daysLate, settings, plan } = args;
   const now = args.now ?? new Date();
   const storeName = settings.brandName || settings.shopName || "Our store";
 
-  let discount: { code: string; percent: number } | null = null;
+  // H2: never draft the same situation twice for a shipment.
+  const existing = await db.message.findUnique({ where: { shipmentId_kind: { shipmentId: shipment.id, kind } } });
+  if (existing) return null;
+
+  // M4: choose the code now (it goes into the text), create it in Shopify at send time.
   const wantsDiscount =
     plan.compensation &&
     settings.compensationEnabled &&
     (kind === "delayed" || kind === "lost") &&
-    daysLate >= settings.compensationMinDaysLate;
-  if (wantsDiscount) {
-    const code = await createSorryDiscount(admin, shipment.orderName, settings.compensationPercent);
-    if (code) discount = { code, percent: settings.compensationPercent };
-  }
+    daysLate >= settings.compensationMinDaysLate &&
+    // One apology code per shipment, even if it escalates from late to lost.
+    (await db.message.count({ where: { shipmentId: shipment.id, discountCode: { not: null } } })) === 0;
+  const discount = wantsDiscount ? { code: newDiscountCode(), percent: settings.compensationPercent } : null;
 
   const email = await writeDelayEmail({
     kind,
@@ -84,18 +98,27 @@ export async function createNotification(args: {
     brandInstructions: settings.brandInstructions,
   });
 
-  const message = await db.message.create({
-    data: {
-      shop: shipment.shop,
-      shipmentId: shipment.id,
-      kind,
-      language: email.language,
-      subject: email.subject,
-      body: email.body,
-      generatedBy: email.generatedBy,
-      discountCode: discount?.code ?? null,
-    },
-  });
+  let messageId: string;
+  try {
+    const message = await db.message.create({
+      data: {
+        shop: shipment.shop,
+        shipmentId: shipment.id,
+        kind,
+        language: email.language,
+        subject: email.subject,
+        body: email.body,
+        generatedBy: email.generatedBy,
+        discountCode: discount?.code ?? null,
+        discountPercent: discount?.percent ?? null,
+      },
+    });
+    messageId = message.id;
+  } catch (error) {
+    // Another scan drafted it first (unique shipmentId + kind).
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return null;
+    throw error;
+  }
   await db.shipment.update({
     where: { id: shipment.id },
     data: kind === "delivered" ? { followUpSent: true } : { notifiedRisk: kind },
@@ -104,10 +127,10 @@ export async function createNotification(args: {
   if (settings.mode === "autopilot" && plan.autopilot) {
     // F6: respect the send window; otherwise queue until it opens.
     if (inSendWindow(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd)) {
-      await sendMessage(admin, message.id);
+      await sendMessage(admin, messageId);
     } else {
       await db.message.update({
-        where: { id: message.id },
+        where: { id: messageId },
         data: {
           status: "scheduled",
           scheduledFor: nextSendTime(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd),
@@ -115,33 +138,57 @@ export async function createNotification(args: {
       });
     }
   }
-  return message.id;
+  return messageId;
+}
+
+/** Plain-language reason for a failed send, shown to the merchant. */
+function describeSendError(error: unknown): string {
+  if (error instanceof GraphqlError && error.accessDenied) {
+    return "Shopify hasn't approved this app to read customer emails yet (Partner Dashboard → API access → Protected customer data).";
+  }
+  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }
 
 /**
- * Sends a stored message. The customer's email is read from Shopify just
- * for this send and never written to our database.
+ * Sends a stored message. H2: the message is claimed first, so two requests
+ * can never send it twice. H5: messages about a parcel that has since arrived
+ * or been cancelled are skipped. The customer's email is read from Shopify
+ * just for this send and never written to our database.
  */
 export async function sendMessage(
   admin: AdminApi,
   messageId: string,
   edits?: { subject?: string; body?: string },
 ): Promise<{ ok: boolean; error?: string }> {
-  const message = await db.message.findUnique({
-    where: { id: messageId },
-    include: { shipment: true },
+  const claimed = await db.message.updateMany({
+    where: { id: messageId, status: { in: SENDABLE } },
+    data: { status: "sending", attempts: { increment: 1 } },
   });
-  if (!message) return { ok: false, error: "Message not found" };
-  if (message.status === "sent") return { ok: true };
+  if (claimed.count !== 1) {
+    const current = await db.message.findUnique({ where: { id: messageId }, select: { status: true } });
+    if (current?.status === "sent") return { ok: true };
+    return { ok: false, error: current ? `This message is already ${current.status}` : "Message not found" };
+  }
 
+  const message = await db.message.findUniqueOrThrow({ where: { id: messageId }, include: { shipment: true } });
   const settings = await db.shopSettings.findUnique({ where: { shop: message.shop } });
   const subject = edits?.subject?.trim() || message.subject;
   const body = edits?.body?.trim() || message.body;
 
-  try {
-    const data = await gql<{ order: { email: string | null } | null }>(admin, ORDER_CONTACT_QUERY, {
-      id: message.shipment.orderId,
+  if (message.kind !== "delivered" && isFinal(message.shipment.status as ShipmentStatus)) {
+    await db.message.update({
+      where: { id: messageId },
+      data: { status: "skipped", error: "Parcel already delivered or the order was cancelled" },
     });
+    return { ok: false, error: "This parcel has already arrived or the order was cancelled, so the email was not sent." };
+  }
+
+  try {
+    const data = await gql<{ order: { email: string | null; customer: { id: string } | null } | null }>(
+      admin,
+      ORDER_CONTACT_QUERY,
+      { id: message.shipment.orderId },
+    );
     const to = data.order?.email;
     if (!to) {
       await db.message.update({
@@ -149,6 +196,16 @@ export async function sendMessage(
         data: { status: "failed", error: "This order has no customer email", subject, body },
       });
       return { ok: false, error: "This order has no customer email" };
+    }
+
+    if (message.discountCode && !message.discountCreated) {
+      await createSorryDiscount(admin, {
+        code: message.discountCode,
+        orderName: message.shipment.orderName,
+        percent: message.discountPercent ?? settings?.compensationPercent ?? 10,
+        customerId: data.order?.customer?.id ?? null,
+      });
+      await db.message.update({ where: { id: messageId }, data: { discountCreated: true } });
     }
 
     await sendEmail({
@@ -163,25 +220,43 @@ export async function sendMessage(
       data: { status: "sent", sentAt: new Date(), error: null, subject, body },
     });
     const usage = await getUsage(message.shop);
-    await db.usageMonth.update({
-      where: { id: usage.id },
-      data: { messagesSent: { increment: 1 } },
-    });
+    await db.usageMonth.update({ where: { id: usage.id }, data: { messagesSent: { increment: 1 } } });
     return { ok: true };
   } catch (error) {
-    const text = error instanceof Error ? error.message : String(error);
+    const text = describeSendError(error);
     await db.message.update({
       where: { id: messageId },
-      data: { status: "failed", error: text.slice(0, 500), subject, body },
+      data: { status: "failed", error: text, subject, body },
     });
     return { ok: false, error: text };
   }
 }
 
-/** F6: send queued autopilot emails whose send window has opened. */
+/**
+ * F6 + L2 + M10: sends autopilot emails whose send window has opened and
+ * retries failed autopilot sends. If the shop is no longer on a plan with
+ * Autopilot, queued emails go back to the approval queue instead.
+ */
 export async function sendDueScheduled(admin: AdminApi, shop: string, now = new Date()): Promise<number> {
+  const settings = await db.shopSettings.findUnique({ where: { shop } });
+  const plan = getPlan(settings?.plan);
+  if (!settings || settings.mode !== "autopilot" || !plan.autopilot) {
+    await db.message.updateMany({
+      where: { shop, status: "scheduled" },
+      data: { status: "pending_approval", scheduledFor: null },
+    });
+    return 0;
+  }
+  if (!inSendWindow(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd)) return 0;
+
   const due = await db.message.findMany({
-    where: { shop, status: "scheduled", scheduledFor: { lte: now } },
+    where: {
+      shop,
+      OR: [
+        { status: "scheduled", scheduledFor: { lte: now } },
+        { status: "failed", attempts: { lt: MAX_SEND_ATTEMPTS }, error: { not: "This order has no customer email" } },
+      ],
+    },
     take: 100,
   });
   let sent = 0;
@@ -192,9 +267,23 @@ export async function sendDueScheduled(admin: AdminApi, shop: string, now = new 
   return sent;
 }
 
+/** H5: drafts about a parcel that has since arrived or was cancelled are dropped. */
+export async function skipResolvedMessages(shop: string): Promise<number> {
+  const result = await db.message.updateMany({
+    where: {
+      shop,
+      kind: { not: "delivered" },
+      status: { in: SENDABLE },
+      shipment: { status: { in: ["DELIVERED", "CANCELED"] } },
+    },
+    data: { status: "skipped", error: "Parcel arrived or the order was cancelled before this was sent" },
+  });
+  return result.count;
+}
+
 export async function skipMessage(shop: string, messageId: string): Promise<void> {
   await db.message.updateMany({
-    where: { id: messageId, shop, status: { in: ["pending_approval", "failed", "scheduled"] } },
+    where: { id: messageId, shop, status: { in: SENDABLE } },
     data: { status: "skipped" },
   });
 }
