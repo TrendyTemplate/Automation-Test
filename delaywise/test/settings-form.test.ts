@@ -24,6 +24,7 @@ describe("settings form", () => {
         minOrderValue: "-5",
         sendWindowStart: "30",
         carrierTransit: "USPS: 5",
+        extraTransitDays: "40",
       }),
       PLANS.growth,
     );
@@ -39,6 +40,7 @@ describe("settings form", () => {
     expect(s.minOrderValue).toBe(0);
     expect(s.sendWindowStart).toBe(23);
     expect(JSON.parse(s.carrierTransitDays!)).toEqual({ usps: 5 });
+    expect(s.extraTransitDays).toBe(14);
   });
 
   it("keeps paid features off on the free plan", () => {

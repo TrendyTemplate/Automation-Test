@@ -66,6 +66,8 @@ model ShopSettings {
   sendWindowEnd            Int      @default(20)
   // F7: per-carrier transit days, JSON object {"usps": 5, "dhl express": 2}.
   carrierTransitDays       String?
+  // R1: extra business days added to every estimate (peak season / holidays).
+  extraTransitDays         Int      @default(0)
   // F2 / F3 / F1
   deliveredFollowUp        Boolean  @default(true)
   merchantDigest           Boolean  @default(true)

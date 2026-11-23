@@ -81,3 +81,55 @@ export function revenueAtRisk(rows: ScoreInput[]): { orders: number; value: numb
   }
   return { orders, value: Math.round(value * 100) / 100 };
 }
+
+export interface TransitInput {
+  carrier: string | null;
+  status: string;
+  shippedAt: Date;
+  deliveredAt: Date | null;
+}
+
+export interface TransitSuggestion {
+  carrier: string;
+  deliveries: number;
+  /** Median calendar days from shipping to delivery. */
+  medianDays: number;
+  /** Business days that cover 80% of deliveries: a safe promise. */
+  suggestedBusinessDays: number;
+}
+
+/** Minimum deliveries before we trust a carrier's numbers. */
+export const MIN_DELIVERIES_FOR_SUGGESTION = 5;
+
+function percentile(sorted: number[], p: number): number {
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+  return sorted[idx];
+}
+
+/**
+ * R2: learns real delivery times per carrier from this store's own deliveries
+ * and suggests transit days (80th percentile, in business days).
+ */
+export function suggestTransitDays(rows: TransitInput[]): TransitSuggestion[] {
+  const byCarrier = new Map<string, number[]>();
+  for (const r of rows) {
+    if (r.status !== "DELIVERED" || !r.deliveredAt || !r.carrier?.trim()) continue;
+    const days = (r.deliveredAt.getTime() - r.shippedAt.getTime()) / 86_400_000;
+    if (days <= 0 || days > 60) continue;
+    const key = r.carrier.trim();
+    byCarrier.set(key, [...(byCarrier.get(key) ?? []), days]);
+  }
+  const out: TransitSuggestion[] = [];
+  for (const [carrier, days] of byCarrier) {
+    if (days.length < MIN_DELIVERIES_FOR_SUGGESTION) continue;
+    const sorted = [...days].sort((a, b) => a - b);
+    const p80Calendar = percentile(sorted, 0.8);
+    out.push({
+      carrier,
+      deliveries: days.length,
+      medianDays: Math.round(percentile(sorted, 0.5) * 10) / 10,
+      suggestedBusinessDays: Math.max(1, Math.min(60, Math.ceil((p80Calendar * 5) / 7))),
+    });
+  }
+  return out.sort((a, b) => b.deliveries - a.deliveries);
+}

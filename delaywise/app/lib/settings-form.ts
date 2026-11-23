@@ -54,6 +54,7 @@ export function parseSettingsForm(form: FormLike, plan: Plan) {
     sendWindowStart: clampInt(form.get("sendWindowStart"), 0, 23, 8),
     sendWindowEnd: clampInt(form.get("sendWindowEnd"), 0, 23, 20),
     carrierTransitDays: carrierTransitFromText(String(form.get("carrierTransit") ?? "")),
+    extraTransitDays: clampInt(form.get("extraTransitDays"), 0, 14, 0),
     merchantDigest: bool(form, "merchantDigest"),
     digestEmail: cleanEmail(form.get("digestEmail")),
     flowTriggerEnabled: bool(form, "flowTriggerEnabled"),

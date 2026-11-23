@@ -285,6 +285,16 @@ describe("autopilot, send window and carrier transit days", () => {
     expect(m.scheduledFor?.toISOString()).toBe("2026-11-20T13:00:00.000Z");
   });
 
+  it("R1: the holiday buffer pushes the expected date back", async () => {
+    const before = await db.shipment.findFirstOrThrow({ where: { shop: shop.domain } });
+    await db.shopSettings.update({ where: { shop: shop.domain }, data: { extraTransitDays: 2 } });
+    await syncShop(fakeAdmin(shop), shop.domain, new Date("2026-11-20T08:10:00Z"));
+    const after = await db.shipment.findFirstOrThrow({ where: { shop: shop.domain } });
+    // 1 → 3 business days: ceil(3 * 7 / 5) - ceil(1 * 7 / 5) = 5 - 2 = 3 more calendar days
+    expect(after.expectedBy!.getTime() - before.expectedBy!.getTime()).toBe(3 * 86_400_000);
+    await db.shopSettings.update({ where: { shop: shop.domain }, data: { extraTransitDays: 0 } });
+  });
+
   it("F6: sends the queued email once the window opens", async () => {
     const summary = await syncShop(fakeAdmin(shop), shop.domain, new Date("2026-11-20T13:30:00Z"));
     expect(summary.scheduledSent).toBe(1);

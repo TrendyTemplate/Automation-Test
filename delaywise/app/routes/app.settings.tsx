@@ -42,6 +42,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       sendWindowStart: settings.sendWindowStart,
       sendWindowEnd: settings.sendWindowEnd,
       carrierTransit: carrierTransitToText(settings.carrierTransitDays),
+      extraTransitDays: settings.extraTransitDays,
       merchantDigest: settings.merchantDigest,
       digestEmail: settings.digestEmail ?? "",
       flowTriggerEnabled: settings.flowTriggerEnabled,
@@ -219,6 +220,14 @@ export default function SettingsPage() {
             value={s.carrierTransit}
             onInput={(e) => set("carrierTransit", text(e))}
           ></s-text-field>
+          <s-number-field
+            label="Holiday buffer (extra business days)"
+            details="Add 1–3 days during peak season or carrier strikes so normal seasonal slowness doesn't trigger warnings. Set back to 0 afterwards."
+            min={0}
+            max={14}
+            value={String(s.extraTransitDays)}
+            onInput={(e) => set("extraTransitDays", Number(text(e)))}
+          ></s-number-field>
         </s-stack>
       </s-section>
 

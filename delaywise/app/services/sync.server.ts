@@ -159,7 +159,9 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
           expectedBy: estimateExpectedBy({
             shippedAt,
             carrierEstimate: carrierEstimate ?? (keepExternal ? existing?.expectedBy : null),
-            defaultTransitDays: transitDaysFor(tracking?.company, transitTable, settings.defaultTransitDays),
+            defaultTransitDays:
+              transitDaysFor(tracking?.company, transitTable, settings.defaultTransitDays) +
+              settings.extraTransitDays,
             international,
           }),
         };
