@@ -75,7 +75,12 @@
   ],
   "overrides": {
     "p-map": "^4.0.0",
-    "qs": "^6.16.0"
+    "qs": "^6.16.0",
+    "deepmerge-ts": "^8.0.2",
+    "effect": "3.22.5",
+    "@ts-morph/common": {
+      "minimatch": "^11.0.9"
+    }
   },
   "resolutions": {
     "qs": "^6.16.0"

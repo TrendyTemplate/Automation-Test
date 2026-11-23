@@ -74,6 +74,13 @@ model ShopSettings {
   digestEmail              String?
   lastDigestAt             DateTime?
   flowTriggerEnabled       Boolean  @default(true)
+  // U1: style preset (gentle | balanced | proactive | custom).
+  preset                   String   @default("balanced")
+  // U4: VIP orders always wait for approval, even on Autopilot.
+  vipMinOrderValue         Float    @default(0)
+  vipTags                  String?  @default("vip")
+  // U3: same carrier + country problems that count as an incident.
+  incidentThreshold        Int      @default(5)
   // R4: show a delay notice on the customer's order-status page.
   orderStatusNotice        Boolean  @default(true)
   // R3: Klaviyo integration. Private key encrypted with APP_ENCRYPTION_KEY.
@@ -116,6 +123,9 @@ model Shipment {
   notifiedRisk     String? // highest risk level the customer was already told about
   followUpSent     Boolean   @default(false) // F2
   importedOverdue  Boolean   @default(false) // V-H2: already long overdue when first seen
+  vip              Boolean   @default(false) // U4
+  handledAt        DateTime? // U5: merchant took care of it; no more emails or workflows
+  handledBy        String?
   excluded         Boolean   @default(false) // F5
   excludedReason   String?
   createdAt        DateTime  @default(now())
@@ -176,4 +186,27 @@ model UsageMonth {
   overageBilled    Int    @default(0) // paid lookups already reported as usage charges
 
   @@unique([shop, month])
+}
+
+/// S4: webhook deliveries already processed (Shopify may deliver more than once).
+model ProcessedWebhook {
+  id        String   @id @default(cuid())
+  webhookId String   @unique
+  shop      String
+  topic     String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+/// S5: who did what, for the merchant's activity log.
+model AuditLog {
+  id        String   @id @default(cuid())
+  shop      String
+  actor     String // staff user id, "Autopilot" or "System"
+  action    String
+  detail    String?
+  createdAt DateTime @default(now())
+
+  @@index([shop, createdAt])
 }

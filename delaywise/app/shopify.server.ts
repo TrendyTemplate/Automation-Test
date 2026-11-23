@@ -6,6 +6,11 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
+import { EncryptedSessionStorage } from "./services/encrypted-session-storage.server";
+import { assertProductionConfig } from "./services/config.server";
+
+// S8: refuse to start in production with missing or weak security settings.
+assertProductionConfig();
 import { syncShop } from "./services/sync.server";
 
 const shopify = shopifyApp({
@@ -15,7 +20,8 @@ const shopify = shopifyApp({
   scopes: process.env.SCOPES?.split(","),
   appUrl: process.env.SHOPIFY_APP_URL || "",
   authPathPrefix: "/auth",
-  sessionStorage: new PrismaSessionStorage(prisma),
+  // S1: Shopify access/refresh tokens are encrypted at rest.
+  sessionStorage: new EncryptedSessionStorage(new PrismaSessionStorage(prisma)),
   distribution: AppDistribution.AppStore,
   hooks: {
     // F12: run the first scan right after install so the dashboard is useful

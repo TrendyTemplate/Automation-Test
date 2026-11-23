@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { audit, firstDelivery } from "../services/audit.server";
 import { deleteShopData } from "../services/settings.server";
 
 /**
@@ -12,7 +13,8 @@ import { deleteShopData } from "../services/settings.server";
  * order/fulfillment IDs, shipping status and the text of emails sent.
  */
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { topic, shop, payload } = await authenticate.webhook(request);
+  const { topic, shop, payload, webhookId } = await authenticate.webhook(request);
+  if (!(await firstDelivery(webhookId, shop, topic))) return new Response(); // S4
   const body = payload as {
     orders_requested?: number[];
     orders_to_redact?: number[];
@@ -38,6 +40,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // Messages cascade with their shipments. M7: remember the orders so
         // the next scan never imports them again.
         await db.shipment.deleteMany({ where: { shop, orderId: { in: ids } } });
+        await audit(shop, "Shopify", "Customer data erased", `${ids.length} order(s)`);
         for (const orderId of ids) {
           await db.redactedOrder.upsert({
             where: { shop_orderId: { shop, orderId } },
@@ -50,6 +53,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     case "SHOP_REDACT": {
       await deleteShopData(shop);
+      await db.auditLog.deleteMany({ where: { shop } });
       break;
     }
     default:

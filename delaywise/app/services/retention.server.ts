@@ -13,5 +13,8 @@ export async function applyRetention(now = new Date()): Promise<{ shipments: num
   const shipments = await db.shipment.deleteMany({
     where: { shippedAt: { lt: new Date(now.getTime() - SHIPMENT_RETENTION_DAYS * day) } },
   });
+  // S4/S5: webhook ids are only needed for a few days; audit entries 180 days.
+  await db.processedWebhook.deleteMany({ where: { createdAt: { lt: new Date(now.getTime() - 30 * day) } } });
+  await db.auditLog.deleteMany({ where: { createdAt: { lt: new Date(now.getTime() - MESSAGE_RETENTION_DAYS * day) } } });
   return { shipments: shipments.count, messages: messages.count };
 }

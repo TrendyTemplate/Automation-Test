@@ -8,6 +8,7 @@ import db from "../db.server";
 import { getSettings } from "../services/settings.server";
 import { carrierScorecard, suggestTransitDays } from "../lib/scorecard";
 import { parseCarrierTransit, transitDaysFor } from "../lib/rules";
+import { actorFrom, audit } from "../services/audit.server";
 
 async function loadRows(shop: string) {
   return db.shipment.findMany({
@@ -39,7 +40,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 /** R2: save the learned delivery times as per-carrier transit days. */
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, sessionToken } = await authenticate.admin(request);
   const settings = await getSettings(session.shop);
   const rows = await loadRows(session.shop);
   const table = parseCarrierTransit(settings.carrierTransitDays);
@@ -48,6 +49,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     where: { shop: session.shop },
     data: { carrierTransitDays: Object.keys(table).length ? JSON.stringify(table) : null },
   });
+  await audit(session.shop, actorFrom(sessionToken), "Learned delivery times applied", Object.keys(table).join(", "));
   return { applied: true };
 };
 

@@ -4,6 +4,8 @@ import db from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import { applyRetention } from "../services/retention.server";
 import { runScheduledScans, startBackgroundRun } from "../services/scheduler.server";
+import { secureJson } from "../lib/security-headers";
+import { allowDaily } from "../lib/rate-limit";
 
 /**
  * Scheduled scan of every installed shop. Call from an external scheduler
@@ -42,12 +44,18 @@ async function runJob() {
 }
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  if (!authorized(request)) return new Response("Unauthorized", { status: 401 });
+  if (!authorized(request)) {
+    // S3: slow down secret guessing; log the attempt without the secret.
+    const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+    if (!allowDaily(`job-auth-fail:${ip}`, 20)) return secureJson({ error: "Too many attempts" }, { status: 429 });
+    console.warn(`[job] unauthorized call from ${ip}`);
+    return secureJson({ error: "Unauthorized" }, { status: 401 });
+  }
   if (new URL(request.url).searchParams.get("wait") === "1") {
-    return Response.json(await runJob());
+    return secureJson(await runJob());
   }
   const started = startBackgroundRun(runJob);
-  return Response.json({ started, alreadyRunning: !started }, { status: 202 });
+  return secureJson({ started, alreadyRunning: !started }, { status: 202 });
 };
 
 export const loader = () => new Response("Method Not Allowed", { status: 405 });

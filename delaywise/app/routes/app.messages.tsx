@@ -7,6 +7,16 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { languageName } from "../lib/language";
 import { sendMessage, skipMessage } from "../services/notifier.server";
+import { actorFrom, audit } from "../services/audit.server";
+import { z } from "zod";
+
+/** S6: every field the action accepts, validated before use. */
+const MessageAction = z.object({
+  intent: z.enum(["send", "skip", "send_all", "skip_all"]),
+  id: z.string().max(40).regex(/^[a-z0-9]*$/i).optional().default(""),
+  subject: z.string().max(200).optional(),
+  body: z.string().max(5000).optional(),
+});
 
 const BULK_SEND_BATCH = 25;
 
@@ -55,10 +65,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-  const form = await request.formData();
-  const id = String(form.get("id") ?? "");
-  const intent = String(form.get("intent") ?? "");
+  const { admin, session, sessionToken } = await authenticate.admin(request);
+  const actor = actorFrom(sessionToken);
+  const parsed = MessageAction.safeParse(Object.fromEntries(await request.formData()));
+  if (!parsed.success) return { ok: false, error: "Invalid request" };
+  const { id, intent } = parsed.data;
 
   // F9: bulk actions on everything waiting for approval.
   if (intent === "send_all" || intent === "skip_all") {
@@ -84,6 +95,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         else failed++;
       }
     }
+    await audit(session.shop, actor, intent === "send_all" ? "Sent all drafts" : "Skipped all drafts", `${done} done, ${failed} failed`);
     return {
       ok: failed === 0,
       intent,
@@ -99,12 +111,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "skip") {
     await skipMessage(session.shop, id);
+    await audit(session.shop, actor, "Email skipped", message.kind);
     return { ok: true, intent };
   }
   const result = await sendMessage(admin, session.shop, id, {
-    subject: String(form.get("subject") ?? ""),
-    body: String(form.get("body") ?? ""),
+    subject: parsed.data.subject ?? "",
+    body: parsed.data.body ?? "",
   });
+  await audit(session.shop, actor, result.ok ? "Email sent" : "Email send failed", message.kind);
   return { ...result, intent };
 };
 

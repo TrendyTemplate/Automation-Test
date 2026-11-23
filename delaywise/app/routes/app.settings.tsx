@@ -15,6 +15,7 @@ import { PREVIEW_DAILY_LIMIT, TEST_EMAIL_DAILY_LIMIT, allowDaily } from "../lib/
 import { encryptSecret, encryptionAvailable, maskSecret } from "../lib/crypto";
 import { klaviyoKeyFor } from "../services/klaviyo-events.server";
 import { looksLikeKlaviyoPrivateKey } from "../services/klaviyo.server";
+import { actorFrom, audit, changedKeys } from "../services/audit.server";
 
 const KINDS: MessageKind[] = ["stalled", "delayed", "exception", "lost", "delivered"];
 
@@ -65,7 +66,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, sessionToken } = await authenticate.admin(request);
+  const actor = actorFrom(sessionToken);
   const form = await request.formData();
   const settings = await getSettings(session.shop);
   const plan = planFor(settings);
@@ -80,6 +82,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       where: { shop: session.shop },
       data: { klaviyoEnabled: true, klaviyoApiKeyEnc: encryptSecret(key, session.shop) },
     });
+    await audit(session.shop, actor, "Klaviyo connected");
     return { klaviyoConnected: true };
   }
   if (intent === "klaviyo_disconnect") {
@@ -87,6 +90,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       where: { shop: session.shop },
       data: { klaviyoEnabled: false, klaviyoApiKeyEnc: null },
     });
+    await audit(session.shop, actor, "Klaviyo disconnected");
     return { klaviyoDisconnected: true };
   }
 
@@ -135,10 +139,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  await db.shopSettings.update({
-    where: { shop: session.shop },
-    data: parseSettingsForm(form, plan),
-  });
+  const next = parseSettingsForm(form, plan);
+  await db.shopSettings.update({ where: { shop: session.shop }, data: next });
+  const changed = changedKeys(settings as unknown as Record<string, unknown>, next);
+  if (changed.length) await audit(session.shop, actor, "Settings changed", changed.join(", "));
   return { saved: true };
 };
 

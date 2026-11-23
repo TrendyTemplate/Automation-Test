@@ -11,6 +11,7 @@ import { GraphqlError, gql, type AdminApi } from "./admin-types";
 import { writeDelayEmail } from "./ai-writer.server";
 import { sendEmail } from "./email.server";
 import { getUsage } from "./settings.server";
+import { audit } from "./audit.server";
 import { CREATE_DISCOUNT_MUTATION, ORDER_CONTACT_QUERY } from "./shopify-queries.server";
 
 const DISCOUNT_VALID_DAYS = 60;
@@ -132,7 +133,8 @@ export async function createNotification(args: {
   if (settings.mode === "autopilot" && plan.autopilot) {
     // F6: respect the send window; otherwise queue until it opens.
     if (inSendWindow(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd)) {
-      await sendMessage(admin, shipment.shop, messageId);
+      const r = await sendMessage(admin, shipment.shop, messageId);
+      await audit(shipment.shop, "Autopilot", r.ok ? "Email sent" : "Email send failed", `${kind} · ${shipment.orderName}`);
     } else {
       await db.message.update({
         where: { id: messageId },
@@ -304,6 +306,7 @@ export async function sendDueScheduled(admin: AdminApi, shop: string, now = new 
   for (const m of due) {
     const result = await sendMessage(admin, shop, m.id);
     if (result.ok) sent++;
+    await audit(shop, "Autopilot", result.ok ? "Scheduled email sent" : "Scheduled email failed", m.kind);
   }
   return sent;
 }

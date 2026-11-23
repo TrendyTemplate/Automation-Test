@@ -1,9 +1,11 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { audit, firstDelivery } from "../services/audit.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { shop, session, topic } = await authenticate.webhook(request);
+  const { shop, session, topic, webhookId } = await authenticate.webhook(request);
+  if (!(await firstDelivery(webhookId, shop, topic))) return new Response(); // S4
   console.log(`Received ${topic} webhook for ${shop}`);
 
   // Webhooks can arrive more than once, and after the app is already uninstalled.
@@ -22,5 +24,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     data: { plan: "free", mode: "approval", lastScanAt: null, scanLockUntil: null },
   });
 
+  await audit(shop, "Shopify", "App uninstalled", "Queued emails cancelled");
   return new Response();
 };
