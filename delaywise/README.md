@@ -25,6 +25,8 @@ Delaywise checks a store's shipped orders every hour. When a parcel stalls, runs
 | Rules | Exclude by order tag, country or minimum value; per-carrier transit days; send window in the shop's time zone |
 | Results | Apology discount redemptions and the revenue they brought back |
 | Bulk actions & CSV | Send/skip all drafts; export at-risk orders for carrier claims |
+| Learned delivery times | Suggests per-carrier transit days from the store's own deliveries; holiday buffer for peak season |
+| Klaviyo events | Optional: push "shipment at risk" / "delivered after delay" events to the merchant's Klaviyo (key encrypted) |
 
 ## How it works
 

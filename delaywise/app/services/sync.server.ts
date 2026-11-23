@@ -4,6 +4,8 @@ import { exclusionReason, parseCarrierTransit, transitDaysFor } from "../lib/rul
 import { fromShopify, type ShipmentStatus } from "../lib/status";
 import { gql, type AdminApi } from "./admin-types";
 import { fireShipmentAtRisk } from "./flow.server";
+import { pushKlaviyoShipmentEvent } from "./klaviyo-events.server";
+import { KLAVIYO_METRICS } from "./klaviyo.server";
 import { createNotification, sendDueScheduled } from "./notifier.server";
 import { trackRedemptions } from "./roi.server";
 import { getSettings, getUsage, planFor, refreshShopInfo } from "./settings.server";
@@ -55,6 +57,7 @@ export interface SyncSummary {
   flowTriggers: number;
   scheduledSent: number;
   discountsRedeemed: number;
+  klaviyoEvents: number;
   limitReached: boolean;
 }
 
@@ -95,6 +98,7 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
     flowTriggers: 0,
     scheduledSent: 0,
     discountsRedeemed: 0,
+    klaviyoEvents: 0,
     limitReached: false,
   };
   const transitTable = parseCarrierTransit(settings.carrierTransitDays);
@@ -267,6 +271,20 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
         summary.flowTriggers++;
       }
     }
+    // R3: same moment, pushed to the merchant's Klaviyo account if connected.
+    if (settings.klaviyoEnabled && changed && isAtRisk(result.risk) && riskRank(result.risk) > riskRank(s.risk)) {
+      const pushed = await pushKlaviyoShipmentEvent({
+        admin,
+        settings,
+        shipment: updated,
+        metric: KLAVIYO_METRICS.atRisk,
+        risk: result.risk,
+        reason: result.reason,
+        daysLate: result.daysLate,
+        now,
+      });
+      if (pushed) summary.klaviyoEvents++;
+    }
 
     if (shouldNotify(result.risk, s.notifiedRisk, settings)) {
       try {
@@ -311,6 +329,20 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
       try {
         await createNotification({ admin, shipment: s, kind: "delivered", daysLate: 0, settings, plan, now });
         summary.followUps++;
+        if (
+          await pushKlaviyoShipmentEvent({
+            admin,
+            settings,
+            shipment: s,
+            metric: KLAVIYO_METRICS.delivered,
+            risk: "delivered",
+            reason: "Delivered after a delay",
+            daysLate: 0,
+            now,
+          })
+        ) {
+          summary.klaviyoEvents++;
+        }
       } catch (error) {
         console.error(`[sync] ${shop}: follow-up failed for ${s.id}`, error);
       }

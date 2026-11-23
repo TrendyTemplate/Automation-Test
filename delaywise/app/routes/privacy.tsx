@@ -37,6 +37,11 @@ export default function Privacy() {
           <li>Anthropic (Claude API), to write the text of shipping-update emails. No customer contact details are sent.</li>
           <li>Ship24, to look up carrier tracking status using tracking numbers, when Shopify has no tracking data.</li>
           <li>Our email delivery provider, to send the emails the merchant approves or enables.</li>
+          <li>
+            Klaviyo, only if the merchant connects their own Klaviyo account: shipment events, including the
+            customer&apos;s email address, are sent to the merchant&apos;s Klaviyo account. The merchant&apos;s API key is
+            stored encrypted.
+          </li>
           <li>Our hosting and database provider.</li>
         </ul>
         <h2>Retention and deletion</h2>

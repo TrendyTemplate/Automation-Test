@@ -74,6 +74,9 @@ model ShopSettings {
   digestEmail              String?
   lastDigestAt             DateTime?
   flowTriggerEnabled       Boolean  @default(true)
+  // R3: Klaviyo integration. Private key encrypted with APP_ENCRYPTION_KEY.
+  klaviyoEnabled           Boolean  @default(false)
+  klaviyoApiKeyEnc         String?
   // F12
   lastScanAt               DateTime?
   lastScanError            String?

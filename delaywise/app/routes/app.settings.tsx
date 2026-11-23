@@ -11,6 +11,9 @@ import { sendEmail } from "../services/email.server";
 import type { MessageKind } from "../lib/risk";
 import { carrierTransitToText } from "../lib/rules";
 import { cleanEmail, cleanText, parseSettingsForm } from "../lib/settings-form";
+import { encryptSecret, encryptionAvailable, maskSecret } from "../lib/crypto";
+import { klaviyoKeyFor } from "../services/klaviyo-events.server";
+import { looksLikeKlaviyoPrivateKey } from "../services/klaviyo.server";
 
 const KINDS: MessageKind[] = ["stalled", "delayed", "exception", "lost", "delivered"];
 
@@ -48,6 +51,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       flowTriggerEnabled: settings.flowTriggerEnabled,
     },
     timezone: settings.timezone ?? "UTC",
+    klaviyo: {
+      connected: Boolean(settings.klaviyoApiKeyEnc),
+      masked: maskSecret(klaviyoKeyFor({ ...settings, klaviyoEnabled: true })),
+      canStoreKeys: encryptionAvailable(),
+    },
     plan: { label: plan.label, autopilot: plan.autopilot, compensation: plan.compensation },
   };
 };
@@ -58,6 +66,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const settings = await getSettings(session.shop);
   const plan = planFor(settings);
   const intent = form.get("intent");
+
+  // R3: connect / disconnect Klaviyo. The key is encrypted and never sent back.
+  if (intent === "klaviyo_connect") {
+    const key = String(form.get("klaviyoKey") ?? "").trim();
+    if (!looksLikeKlaviyoPrivateKey(key)) return { klaviyoError: "That doesn't look like a Klaviyo private API key (it starts with pk_)." };
+    if (!encryptionAvailable()) return { klaviyoError: "Secure key storage isn't configured on the server yet." };
+    await db.shopSettings.update({
+      where: { shop: session.shop },
+      data: { klaviyoEnabled: true, klaviyoApiKeyEnc: encryptSecret(key, session.shop) },
+    });
+    return { klaviyoConnected: true };
+  }
+  if (intent === "klaviyo_disconnect") {
+    await db.shopSettings.update({
+      where: { shop: session.shop },
+      data: { klaviyoEnabled: false, klaviyoApiKeyEnc: null },
+    });
+    return { klaviyoDisconnected: true };
+  }
 
   if (intent === "preview" || intent === "test") {
     const kindValue = String(form.get("kind"));
@@ -117,6 +144,8 @@ export default function SettingsPage() {
   const [s, setS] = useState<SettingsState>(data.settings);
   const [previewLang, setPreviewLang] = useState("en");
   const [previewKind, setPreviewKind] = useState("delayed");
+  const klaviyo = useFetcher<typeof action>();
+  const [klaviyoKey, setKlaviyoKey] = useState("");
 
   const set = <K extends keyof SettingsState>(key: K, value: SettingsState[K]) =>
     setS((prev) => ({ ...prev, [key]: value }));
@@ -135,6 +164,17 @@ export default function SettingsPage() {
     if ("testSentTo" in preview.data && preview.data.testSentTo) shopify.toast.show(`Test email sent to ${preview.data.testSentTo}`);
     if ("testError" in preview.data && preview.data.testError) shopify.toast.show(preview.data.testError, { isError: true });
   }, [preview.data, shopify]);
+
+  useEffect(() => {
+    const d = klaviyo.data;
+    if (!d) return;
+    if ("klaviyoConnected" in d) {
+      setKlaviyoKey("");
+      shopify.toast.show("Klaviyo connected");
+    }
+    if ("klaviyoDisconnected" in d) shopify.toast.show("Klaviyo disconnected");
+    if ("klaviyoError" in d && d.klaviyoError) shopify.toast.show(d.klaviyoError, { isError: true });
+  }, [klaviyo.data, shopify]);
 
   const previewEmail = preview.data && "preview" in preview.data ? preview.data.preview : null;
   const busy = preview.state !== "idle";
@@ -291,6 +331,44 @@ export default function SettingsPage() {
             checked={s.flowTriggerEnabled}
             onChange={(e) => set("flowTriggerEnabled", checked(e))}
           ></s-checkbox>
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Klaviyo (optional)">
+        <s-stack direction="block" gap="base">
+          <s-paragraph color="subdued">
+            Send “Delaywise Shipment At Risk” and “Delaywise Delayed Shipment Delivered” events to your Klaviyo
+            account, then build your own branded flows there. Use a private API key with the Events: write scope.
+          </s-paragraph>
+          {data.klaviyo.connected ? (
+            <s-stack direction="inline" gap="base" alignItems="center">
+              <s-badge tone="success">{`Connected (${data.klaviyo.masked || "key stored"})`}</s-badge>
+              <s-button
+                tone="critical"
+                onClick={() => klaviyo.submit({ intent: "klaviyo_disconnect" }, { method: "post" })}
+                {...(klaviyo.state !== "idle" ? { loading: true } : {})}
+              >
+                Disconnect
+              </s-button>
+            </s-stack>
+          ) : data.klaviyo.canStoreKeys ? (
+            <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
+              <s-password-field
+                label="Klaviyo private API key"
+                placeholder="pk_…"
+                value={klaviyoKey}
+                onInput={(e) => setKlaviyoKey(text(e))}
+              ></s-password-field>
+              <s-button
+                onClick={() => klaviyo.submit({ intent: "klaviyo_connect", klaviyoKey }, { method: "post" })}
+                {...(klaviyo.state !== "idle" ? { loading: true } : {})}
+              >
+                Connect
+              </s-button>
+            </s-grid>
+          ) : (
+            <s-text color="subdued">Klaviyo connection isn't available yet on this server.</s-text>
+          )}
         </s-stack>
       </s-section>
 

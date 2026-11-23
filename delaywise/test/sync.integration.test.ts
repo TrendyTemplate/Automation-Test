@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { encryptSecret } from "../app/lib/crypto";
 import db from "../app/db.server";
 import { syncShop } from "../app/services/sync.server";
 import { sendMessage } from "../app/services/notifier.server";
@@ -329,5 +330,44 @@ describe("F13: retention", () => {
     const result = await applyRetention(NOW);
     expect(result.shipments).toBeGreaterThanOrEqual(1);
     expect(await db.shipment.count({ where: { shop: shop.domain } })).toBe(0);
+  });
+});
+
+describe("R3: Klaviyo events", () => {
+  const shop = newShop("Growth", [
+    { n: "3001", locale: "en", country: "US", f: { id: "gid://shopify/Fulfillment/31", createdAt: ago(20), displayStatus: "FULFILLED", deliveredAt: null, events: [], carrier: "UPS" } },
+  ]);
+  const sent: { url: string; body: string; auth: string }[] = [];
+
+  beforeAll(async () => {
+    process.env.APP_ENCRYPTION_KEY = "22".repeat(32);
+    await db.shopSettings.create({
+      data: { shop: shop.domain, klaviyoEnabled: true, klaviyoApiKeyEnc: encryptSecret("pk_testkey0123456789abcdef", shop.domain) },
+    });
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      sent.push({ url, body: String(init.body), auth: String((init.headers as Record<string, string>).Authorization) });
+      return new Response(null, { status: 202 });
+    });
+  });
+  afterAll(() => {
+    vi.unstubAllGlobals();
+    delete process.env.APP_ENCRYPTION_KEY;
+  });
+
+  it("pushes one at-risk event with the customer's email, only on escalation", async () => {
+    const first = await syncShop(fakeAdmin(shop), shop.domain, NOW);
+    expect(first.klaviyoEvents).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].url).toBe("https://a.klaviyo.com/api/events");
+    expect(sent[0].auth).toBe("Klaviyo-API-Key pk_testkey0123456789abcdef");
+    expect(sent[0].body).toContain("buyer@example.test");
+    expect(sent[0].body).toContain("Delaywise Shipment At Risk");
+    const again = await syncShop(fakeAdmin(shop), shop.domain, new Date(NOW.getTime() + 3_600_000));
+    expect(again.klaviyoEvents).toBe(0);
+  });
+
+  it("stores the key encrypted, never in plain text", async () => {
+    const settings = await db.shopSettings.findUniqueOrThrow({ where: { shop: shop.domain } });
+    expect(settings.klaviyoApiKeyEnc).not.toContain("pk_testkey");
   });
 });
