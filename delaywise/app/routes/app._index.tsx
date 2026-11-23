@@ -10,6 +10,20 @@ import { ScanInProgressError, syncShop } from "../services/sync.server";
 import { toCsv } from "../lib/csv";
 import { roiSummary } from "../services/roi.server";
 import { STATUS_LABEL, type ShipmentStatus } from "../lib/status";
+import { detectIncidents, INCIDENT_WINDOW_HOURS } from "../lib/incidents";
+import { sendMessage, setHandled } from "../services/notifier.server";
+import { actorFrom, audit } from "../services/audit.server";
+import { z } from "zod";
+
+/** S6: dashboard actions and their inputs. */
+const DashboardAction = z.object({
+  intent: z.enum(["scan", "export", "handle", "unhandle", "incident_send"]),
+  ids: z
+    .string()
+    .max(20_000)
+    .optional()
+    .transform((v) => (v ? v.split(",").filter((id) => /^[a-z0-9]{10,40}$/i.test(id)).slice(0, 500) : [])),
+});
 
 const AT_RISK = ["stalled", "delayed", "exception", "lost"];
 
@@ -31,6 +45,7 @@ const RISK_LABEL: Record<string, string> = {
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
+  const now = new Date();
   const settings = await getSettings(shop);
   const plan = planFor(settings);
   const usage = await getUsage(shop);
@@ -52,6 +67,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     db.shipment.count({ where: { shop } }),
     roiSummary(shop),
   ]);
+  // U3: carrier incidents from problems that started in the last few days.
+  const recent = await db.shipment.findMany({
+    where: { ...openWhere, risk: { in: AT_RISK }, riskSince: { gte: new Date(now.getTime() - INCIDENT_WINDOW_HOURS * 3_600_000) } },
+    select: { id: true, carrier: true, destinationCountry: true, risk: true, riskSince: true, orderValue: true, excluded: true, handledAt: true },
+    take: 2000,
+  });
+  const incidents = detectIncidents(recent, settings.incidentThreshold, now).map((i) => ({
+    ...i,
+    since: i.since.toISOString(),
+    ids: i.shipmentIds.join(","),
+  }));
 
   const atRisk = flagged
     .sort((a, b) => riskOrder(b.risk) - riskOrder(a.risk))
@@ -68,6 +94,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       value: `${s.orderValue.toFixed(2)} ${s.currency}`,
       excluded: s.excluded,
       excludedReason: s.excludedReason,
+      vip: s.vip,
+      handled: Boolean(s.handledAt),
     }));
 
   // Order values are in the shop's currency (shopMoney), so one total is correct.
@@ -92,6 +120,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       totalShipments,
     },
     atRisk,
+    incidents,
   };
 };
 
@@ -100,11 +129,34 @@ function riskOrder(risk: string): number {
 }
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { admin, session, sessionToken } = await authenticate.admin(request);
   const form = await request.formData();
+  const parsed = DashboardAction.safeParse(Object.fromEntries(form));
+  if (!parsed.success) return { scanError: "Invalid request" };
+  const { intent, ids } = parsed.data;
+  const actor = actorFrom(sessionToken);
+
+  // U5: mark orders handled (or undo).
+  if (intent === "handle" || intent === "unhandle") {
+    const count = await setHandled(session.shop, ids, actor, intent === "handle");
+    return { handled: count, intent };
+  }
+
+  // U3: approve the drafted emails for every order in an incident (max 25 per click).
+  if (intent === "incident_send") {
+    const drafts = await db.message.findMany({
+      where: { shop: session.shop, shipmentId: { in: ids }, status: "pending_approval" },
+      select: { id: true },
+      take: 25,
+    });
+    let sent = 0;
+    for (const d of drafts) if ((await sendMessage(admin, session.shop, d.id)).ok) sent++;
+    await audit(session.shop, actor, "Incident emails sent", `${sent} of ${drafts.length}`);
+    return { incidentSent: sent, incidentTotal: drafts.length };
+  }
 
   // F10: CSV of every open at-risk shipment (for carrier claims, 3PLs, reports).
-  if (form.get("intent") === "export") {
+  if (intent === "export") {
     const rows = await db.shipment.findMany({
       where: { shop: session.shop, risk: { not: "none" }, status: { notIn: ["DELIVERED", "CANCELED"] } },
       orderBy: { shippedAt: "asc" },
@@ -169,7 +221,15 @@ export default function Dashboard() {
   const data = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const exporter = useFetcher<typeof action>();
+  const actions = useFetcher<typeof action>();
   const shopify = useAppBridge();
+
+  useEffect(() => {
+    const d = actions.data;
+    if (!d) return;
+    if ("handled" in d) shopify.toast.show(d.intent === "handle" ? `${d.handled} order(s) marked as handled` : "Undone");
+    if ("incidentSent" in d) shopify.toast.show(`${d.incidentSent} of ${d.incidentTotal} customer update(s) sent`);
+  }, [actions.data, shopify]);
 
   useEffect(() => {
     if (exporter.data && "csv" in exporter.data && exporter.data.csv) downloadCsv(exporter.data.csv);
@@ -207,6 +267,28 @@ export default function Dashboard() {
       >
         Export at-risk orders (CSV)
       </s-button>
+
+      {data.incidents.map((i) => (
+        <s-banner key={i.key} tone="critical" heading={`Possible carrier incident: ${i.carrier} → ${i.country}`}>
+          <s-stack direction="block" gap="small">
+            <s-text>
+              {`${i.count} parcels with ${i.carrier} to ${i.country} ran into trouble at the same time (worth ${i.orderValue.toFixed(2)} ${data.stats.currency}). This usually means a strike, weather or a hub problem, not ${i.count} separate issues.`}
+            </s-text>
+            <s-stack direction="inline" gap="base">
+              <s-button
+                variant="primary"
+                onClick={() => actions.submit({ intent: "incident_send", ids: i.ids }, { method: "POST" })}
+                {...(actions.state !== "idle" ? { loading: true } : {})}
+              >
+                Send the waiting updates to these customers
+              </s-button>
+              <s-button onClick={() => actions.submit({ intent: "handle", ids: i.ids }, { method: "POST" })}>
+                Mark all as handled
+              </s-button>
+            </s-stack>
+          </s-stack>
+        </s-banner>
+      ))}
 
       {data.settings.lastScanError && (
         <s-banner heading="The last scan ran into a problem" tone="critical">
@@ -262,6 +344,7 @@ export default function Dashboard() {
               <s-table-header>Carrier</s-table-header>
               <s-table-header>Status</s-table-header>
               <s-table-header format="currency">Value</s-table-header>
+              <s-table-header>Action</s-table-header>
             </s-table-header-row>
             <s-table-body>
               {data.atRisk.map((s) => (
@@ -275,6 +358,8 @@ export default function Dashboard() {
                     <s-stack direction="inline" gap="small-200">
                       <s-badge tone={RISK_TONE[s.risk] ?? "info"}>{RISK_LABEL[s.risk] ?? s.risk}</s-badge>
                       {s.excluded && <s-badge tone="neutral">{`No emails: ${s.excludedReason ?? "excluded"}`}</s-badge>}
+                      {s.vip && <s-badge tone="info">VIP · you approve</s-badge>}
+                      {s.handled && <s-badge tone="success">Handled</s-badge>}
                     </s-stack>
                   </s-table-cell>
                   <s-table-cell>{s.reason}</s-table-cell>
@@ -289,6 +374,14 @@ export default function Dashboard() {
                     )}
                   </s-table-cell>
                   <s-table-cell>{s.value}</s-table-cell>
+                  <s-table-cell>
+                    <s-button
+                      variant="tertiary"
+                      onClick={() => actions.submit({ intent: s.handled ? "unhandle" : "handle", ids: s.id }, { method: "POST" })}
+                    >
+                      {s.handled ? "Undo handled" : "Mark handled"}
+                    </s-button>
+                  </s-table-cell>
                 </s-table-row>
               ))}
             </s-table-body>

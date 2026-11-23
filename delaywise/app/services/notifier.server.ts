@@ -130,6 +130,11 @@ export async function createNotification(args: {
     data: kind === "delivered" ? { followUpSent: true } : { notifiedRisk: kind },
   });
 
+  // U4: VIP orders always wait for a person, even on Autopilot.
+  if (shipment.vip && settings.mode === "autopilot") {
+    await audit(shipment.shop, "Autopilot", "VIP order held for approval", `${kind} · ${shipment.orderName}`);
+    return messageId;
+  }
   if (settings.mode === "autopilot" && plan.autopilot) {
     // F6: respect the send window; otherwise queue until it opens.
     if (inSendWindow(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd)) {
@@ -322,6 +327,26 @@ export async function skipResolvedMessages(shop: string): Promise<number> {
     },
     data: { status: "skipped", error: "Parcel arrived or the order was cancelled before this was sent" },
   });
+  return result.count;
+}
+
+/**
+ * U5: the merchant has taken care of these orders (refund, reship, call).
+ * Unsent drafts are dropped and nothing more is sent; undo clears the mark.
+ */
+export async function setHandled(shop: string, shipmentIds: string[], actor: string, handled: boolean): Promise<number> {
+  const ids = shipmentIds.slice(0, 500);
+  const result = await db.shipment.updateMany({
+    where: { shop, id: { in: ids } },
+    data: handled ? { handledAt: new Date(), handledBy: actor.slice(0, 80) } : { handledAt: null, handledBy: null },
+  });
+  if (handled) {
+    await db.message.updateMany({
+      where: { shop, shipmentId: { in: ids }, status: { in: SENDABLE } },
+      data: { status: "skipped", error: "Marked as handled by the store" },
+    });
+  }
+  await audit(shop, actor, handled ? "Marked as handled" : "Unmarked as handled", `${result.count} order(s)`);
   return result.count;
 }
 

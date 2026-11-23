@@ -28,7 +28,7 @@ export async function noticeForCustomer(args: {
 
   const shipments = await db.shipment.findMany({
     where: { shop: args.shop, orderId: args.orderId },
-    select: { risk: true, status: true, excluded: true, trackingUrl: true, customerLocale: true },
+    select: { risk: true, status: true, excluded: true, handledAt: true, trackingUrl: true, customerLocale: true },
   });
   const notice = customerNotice(shipments, args.viewerLanguage);
   if (!notice) return null;

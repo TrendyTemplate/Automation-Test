@@ -2,6 +2,7 @@ import db from "../db.server";
 import { buildDigest, localDateKey, shouldSendDigest } from "../lib/digest";
 import { isAtRisk } from "../lib/risk";
 import { localHour } from "../lib/rules";
+import { detectIncidents } from "../lib/incidents";
 import { sendEmail } from "./email.server";
 
 /**
@@ -22,6 +23,7 @@ export async function maybeSendDigest(shop: string, now = new Date()): Promise<b
       where: {
         shop,
         excluded: false,
+        handledAt: null,
         status: { notIn: ["DELIVERED", "CANCELED"] },
         risk: { in: ["stalled", "delayed", "exception", "lost"] },
       },
@@ -46,6 +48,7 @@ export async function maybeSendDigest(shop: string, now = new Date()): Promise<b
       })),
     pendingApprovals,
     sentYesterday,
+    incidents: detectIncidents(open, settings.incidentThreshold, now),
   };
   if (!shouldSendDigest(input)) return false;
 

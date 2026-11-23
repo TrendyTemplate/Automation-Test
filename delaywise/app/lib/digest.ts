@@ -15,6 +15,8 @@ export interface DigestInput {
   atRisk: DigestShipment[];
   pendingApprovals: number;
   sentYesterday: number;
+  /** U3: carrier incidents to call out first. */
+  incidents?: { carrier: string; country: string; count: number }[];
 }
 
 const LABEL: Record<string, string> = {
@@ -45,6 +47,9 @@ export function buildDigest(input: DigestInput): { subject: string; text: string
       ? `${sorted.length} order(s) need attention (${counts}), worth ${value.toFixed(2)} ${currency}.`
       : "No parcels are at risk right now.",
   ];
+  for (const i of input.incidents ?? []) {
+    lines.push(`⚠ Possible carrier incident: ${i.carrier} → ${i.country}, ${i.count} parcels affected. Handle them together on the dashboard.`);
+  }
   if (input.pendingApprovals > 0) {
     lines.push(`${input.pendingApprovals} customer email(s) are waiting for your approval.`);
   }

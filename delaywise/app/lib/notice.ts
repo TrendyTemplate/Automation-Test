@@ -10,6 +10,7 @@ export interface NoticeShipment {
   risk: string;
   status: string;
   excluded: boolean;
+  handledAt?: Date | null;
   trackingUrl: string | null;
   customerLocale: string | null;
 }
@@ -26,7 +27,7 @@ export function customerNotice(
   viewerLanguage: string | null | undefined,
 ): CustomerNotice | null {
   const candidates = shipments.filter(
-    (s) => !s.excluded && isAtRisk(s.risk) && s.status !== "DELIVERED" && s.status !== "CANCELED",
+    (s) => !s.excluded && !s.handledAt && isAtRisk(s.risk) && s.status !== "DELIVERED" && s.status !== "CANCELED",
   );
   if (!candidates.length) return null;
   const worst = candidates.sort((a, b) => riskRank(b.risk) - riskRank(a.risk))[0];

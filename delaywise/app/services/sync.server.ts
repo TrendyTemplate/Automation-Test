@@ -1,6 +1,7 @@
 import db from "../db.server";
 import { assessRisk, estimateExpectedBy, isAtRisk, LOST_AFTER_DAYS, riskRank, shouldNotify } from "../lib/risk";
 import { exclusionReason, parseCarrierTransit, transitDaysFor } from "../lib/rules";
+import { isVip } from "../lib/incidents";
 import { hasCarrierSignal, isFinal, resolveFulfillmentStatus, type ShipmentStatus } from "../lib/status";
 import { gql, type AdminApi } from "./admin-types";
 import { fireShipmentAtRisk } from "./flow.server";
@@ -241,6 +242,7 @@ async function runSync(
           orderValue,
           excluded: excludedReason !== null,
           excludedReason,
+          vip: isVip({ tags: order.tags, orderValue }, settings.vipTags, settings.vipMinOrderValue),
           currency: order.totalPriceSet.shopMoney.currencyCode,
           carrier: tracking?.company ?? null,
           trackingNumber: tracking?.number ?? null,
@@ -449,7 +451,9 @@ async function runSync(
       },
     });
     if (isAtRisk(result.risk)) summary.atRisk++;
-    if (s.excluded) continue; // F5: shown on the dashboard, but no emails or workflows.
+    // F5 + U5: excluded or merchant-handled orders stay on the dashboard, but
+    // get no emails, workflows or Klaviyo events.
+    if (s.excluded || s.handledAt) continue;
 
     // F1: start merchant workflows when a shipment becomes (more) at risk.
     if (
@@ -512,6 +516,7 @@ async function runSync(
         shop,
         status: "DELIVERED",
         excluded: false,
+        handledAt: null,
         followUpSent: false,
         notifiedRisk: { not: null },
         deliveredAt: { gte: new Date(now.getTime() - FOLLOW_UP_WITHIN_DAYS * 24 * HOUR) },

@@ -31,6 +31,10 @@ describe("F3 digest builder", () => {
     expect(d.text).toContain("3 customer email(s) are waiting");
     expect(d.text.indexOf("#2")).toBeLessThan(d.text.indexOf("#1"));
   });
+  it("U3: calls out carrier incidents", () => {
+    const d = buildDigest({ ...base, atRisk: [ship("#1", "stalled")], incidents: [{ carrier: "UPS", country: "DE", count: 7 }] });
+    expect(d.text).toContain("Possible carrier incident: UPS → DE, 7 parcels");
+  });
   it("caps the list at 15", () => {
     const many = Array.from({ length: 20 }, (_, i) => ship(`#${i}`, "delayed"));
     expect(buildDigest({ ...base, atRisk: many }).text).toContain("…and 5 more.");
