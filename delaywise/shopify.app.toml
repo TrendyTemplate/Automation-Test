@@ -32,6 +32,11 @@ api_version = "2026-10"
   uri = "/webhooks/app/scopes_update"
   topics = ["app/scopes_update"]
 
+  # Plan changes take effect immediately.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/subscriptions_update"
+  topics = ["app_subscriptions/update"]
+
   # Mandatory privacy webhooks for public apps.
   [[webhooks.subscriptions]]
   uri = "/webhooks/compliance"

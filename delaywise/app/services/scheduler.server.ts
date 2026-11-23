@@ -38,7 +38,7 @@ export async function runScheduledScans(args: {
       const shop = queue.shift()!;
       try {
         const admin = await args.adminFor(shop);
-        const summary = await syncShop(admin, shop);
+        const summary = await syncShop(admin, shop, new Date(), { deadline });
         await maybeSendDigest(shop).catch((error) => console.error(`[digest] ${shop}`, error));
         results.push({ shop, status: "ok", atRisk: summary.atRisk, messages: summary.messagesCreated });
       } catch (error) {
@@ -52,4 +52,26 @@ export async function runScheduledScans(args: {
   };
   await Promise.all(Array.from({ length: Math.max(1, args.concurrency) }, worker));
   return { results, remaining: queue.length };
+}
+
+/** One background run at a time per server process. */
+let running: Promise<unknown> | null = null;
+
+export function jobIsRunning(): boolean {
+  return running !== null;
+}
+
+/**
+ * V-7: starts the scheduled work in the background and returns immediately,
+ * so the scheduler's HTTP request never times out. Returns false if a run is
+ * already in progress.
+ */
+export function startBackgroundRun(work: () => Promise<unknown>): boolean {
+  if (running) return false;
+  running = work()
+    .catch((error) => console.error("[job] background run failed", error))
+    .finally(() => {
+      running = null;
+    });
+  return true;
 }

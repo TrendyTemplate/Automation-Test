@@ -45,7 +45,7 @@ export async function refreshShopInfo(admin: AdminApi, shop: string): Promise<Sh
   // L1: contact emails are seeded once (first scan); after that, an empty
   // field means the merchant cleared it on purpose.
   const firstRun = current.lastScanAt === null;
-  const updated = await db.shopSettings.update({
+  await db.shopSettings.update({
     where: { shop },
     data: {
       shopName: data.shop.name,
@@ -57,8 +57,21 @@ export async function refreshShopInfo(admin: AdminApi, shop: string): Promise<Sh
           }
         : {}),
       timezone: data.shop.ianaTimezone || current.timezone,
+    },
+  });
+  return applyPlan(shop, plan.id);
+}
+
+/**
+ * Sets the shop's plan and switches off paid-only features it doesn't
+ * include (M10). Used by the scan and by the app_subscriptions/update webhook.
+ */
+export async function applyPlan(shop: string, planId: string): Promise<ShopSettings> {
+  const plan = getPlan(planId);
+  const updated = await db.shopSettings.update({
+    where: { shop },
+    data: {
       plan: plan.id,
-      // M10: paid-only features switch off when the plan no longer includes them.
       ...(plan.autopilot ? {} : { mode: "approval" }),
       ...(plan.compensation ? {} : { compensationEnabled: false }),
     },

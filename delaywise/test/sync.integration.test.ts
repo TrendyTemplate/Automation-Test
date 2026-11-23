@@ -258,7 +258,7 @@ describe("core pipeline (approval mode, Growth plan)", () => {
 
   it("sends an approved message without storing the customer email", async () => {
     const message = await db.message.findFirstOrThrow({ where: { shop: shop.domain, language: "de" } });
-    const result = await sendMessage(fakeAdmin(shop), message.id, { body: `${message.body}\n\nP.S. edited` });
+    const result = await sendMessage(fakeAdmin(shop), shop.domain, message.id, { body: `${message.body}\n\nP.S. edited` });
     expect(result.ok).toBe(true);
     const sent = await db.message.findUniqueOrThrow({ where: { id: message.id } });
     expect(sent.status).toBe("sent");
@@ -278,7 +278,7 @@ describe("core pipeline (approval mode, Growth plan)", () => {
 
   it("H2: a message can only be sent once, even if two requests race", async () => {
     const message = await db.message.findFirstOrThrow({ where: { shop: shop.domain, language: "fr" } });
-    const [a, b] = await Promise.all([sendMessage(fakeAdmin(shop), message.id), sendMessage(fakeAdmin(shop), message.id)]);
+    const [a, b] = await Promise.all([sendMessage(fakeAdmin(shop), shop.domain, message.id), sendMessage(fakeAdmin(shop), shop.domain, message.id)]);
     expect(a.ok || b.ok).toBe(true); // the loser sees "sending" or "sent", never sends again
     const contacts = shop.calls.filter((c) => c.op === "DelaywiseOrderContact" && c.variables?.id === "gid://shopify/Order/1003");
     expect(contacts).toHaveLength(1);
@@ -456,7 +456,7 @@ describe("H4 + H5: shipments outside the order search are still refreshed, and r
     expect(s.status).toBe("DELIVERED");
     const after = await db.message.findUniqueOrThrow({ where: { id: draft.id } });
     expect(after.status).toBe("skipped");
-    const send = await sendMessage(fakeAdmin(shop), draft.id);
+    const send = await sendMessage(fakeAdmin(shop), shop.domain, draft.id);
     expect(send.ok).toBe(false);
   });
 });

@@ -81,6 +81,7 @@ model ShopSettings {
   klaviyoApiKeyEnc         String?
   // H2: per-shop lease so two scans never run at once.
   scanLockUntil            DateTime?
+  scanLockToken            String?
   // F12
   lastScanAt               DateTime?
   lastScanError            String?
@@ -114,6 +115,7 @@ model Shipment {
   riskSince        DateTime?
   notifiedRisk     String? // highest risk level the customer was already told about
   followUpSent     Boolean   @default(false) // F2
+  importedOverdue  Boolean   @default(false) // V-H2: already long overdue when first seen
   excluded         Boolean   @default(false) // F5
   excludedReason   String?
   createdAt        DateTime  @default(now())
@@ -139,6 +141,7 @@ model Message {
   discountPercent Int?
   discountCreated Boolean  @default(false)
   attempts     Int       @default(0) // L2: send attempts
+  sendingSince DateTime? // V-M1: when a send was claimed, to recover interrupted sends
   status       String    @default("pending_approval") // pending_approval | scheduled | sending | sent | skipped | failed
   scheduledFor DateTime? // F6: autopilot emails waiting for the send window
   // F11: discount redemption

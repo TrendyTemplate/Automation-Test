@@ -16,6 +16,8 @@ import { CREATE_DISCOUNT_MUTATION, ORDER_CONTACT_QUERY } from "./shopify-queries
 const DISCOUNT_VALID_DAYS = 60;
 /** L2: autopilot retries failed sends up to this many attempts in total. */
 export const MAX_SEND_ATTEMPTS = 3;
+/** V-7: bounded work per scan; the rest goes out next run. */
+export const MAX_SENDS_PER_RUN = 25;
 /** Statuses a message can be claimed for sending from. */
 const SENDABLE = ["pending_approval", "failed", "scheduled"];
 
@@ -80,8 +82,11 @@ export async function createNotification(args: {
     settings.compensationEnabled &&
     (kind === "delayed" || kind === "lost") &&
     daysLate >= settings.compensationMinDaysLate &&
-    // One apology code per shipment, even if it escalates from late to lost.
-    (await db.message.count({ where: { shipmentId: shipment.id, discountCode: { not: null } } })) === 0;
+    // One apology code per shipment, even if it escalates from late to lost
+    // (a skipped draft's code doesn't count: nobody received it).
+    (await db.message.count({
+      where: { shipmentId: shipment.id, discountCode: { not: null }, status: { not: "skipped" } },
+    })) === 0;
   const discount = wantsDiscount ? { code: newDiscountCode(), percent: settings.compensationPercent } : null;
 
   const email = await writeDelayEmail({
@@ -127,7 +132,7 @@ export async function createNotification(args: {
   if (settings.mode === "autopilot" && plan.autopilot) {
     // F6: respect the send window; otherwise queue until it opens.
     if (inSendWindow(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd)) {
-      await sendMessage(admin, messageId);
+      await sendMessage(admin, shipment.shop, messageId);
     } else {
       await db.message.update({
         where: { id: messageId },
@@ -157,15 +162,16 @@ function describeSendError(error: unknown): string {
  */
 export async function sendMessage(
   admin: AdminApi,
+  shop: string,
   messageId: string,
   edits?: { subject?: string; body?: string },
 ): Promise<{ ok: boolean; error?: string }> {
   const claimed = await db.message.updateMany({
-    where: { id: messageId, status: { in: SENDABLE } },
-    data: { status: "sending", attempts: { increment: 1 } },
+    where: { id: messageId, shop, status: { in: SENDABLE } },
+    data: { status: "sending", sendingSince: new Date(), attempts: { increment: 1 } },
   });
   if (claimed.count !== 1) {
-    const current = await db.message.findUnique({ where: { id: messageId }, select: { status: true } });
+    const current = await db.message.findFirst({ where: { id: messageId, shop }, select: { status: true } });
     if (current?.status === "sent") return { ok: true };
     return { ok: false, error: current ? `This message is already ${current.status}` : "Message not found" };
   }
@@ -198,7 +204,15 @@ export async function sendMessage(
       return { ok: false, error: "This order has no customer email" };
     }
 
-    if (message.discountCode && !message.discountCreated) {
+    const plan = getPlan(settings?.plan);
+    if (message.discountCode && !message.discountCreated && !plan.compensation) {
+      // The plan no longer includes apology discounts.
+      if (body.includes(message.discountCode)) {
+        throw new Error(
+          "Apology discounts need a paid plan. Remove the discount code from the email, or upgrade, then send again.",
+        );
+      }
+    } else if (message.discountCode && !message.discountCreated) {
       await createSorryDiscount(admin, {
         code: message.discountCode,
         orderName: message.shipment.orderName,
@@ -215,21 +229,48 @@ export async function sendMessage(
       subject,
       text: body,
     });
-    await db.message.update({
-      where: { id: messageId },
-      data: { status: "sent", sentAt: new Date(), error: null, subject, body },
-    });
-    const usage = await getUsage(message.shop);
-    await db.usageMonth.update({ where: { id: usage.id }, data: { messagesSent: { increment: 1 } } });
-    return { ok: true };
   } catch (error) {
     const text = describeSendError(error);
     await db.message.update({
       where: { id: messageId },
-      data: { status: "failed", error: text, subject, body },
+      data: { status: "failed", sendingSince: null, error: text, subject, body },
     });
     return { ok: false, error: text };
   }
+
+  // V-H1: the email is out. Record that first and on its own, so a later
+  // bookkeeping error can never make it look unsent (and be sent again).
+  await db.message.update({
+    where: { id: messageId },
+    data: { status: "sent", sentAt: new Date(), sendingSince: null, error: null, subject, body },
+  });
+  try {
+    const usage = await getUsage(message.shop);
+    await db.usageMonth.update({ where: { id: usage.id }, data: { messagesSent: { increment: 1 } } });
+  } catch (error) {
+    console.error(`[notifier] ${message.shop}: could not count a sent email`, error);
+  }
+  return { ok: true };
+}
+
+/** V-M1: a claimed send older than this was interrupted (crash, redeploy). */
+export const STUCK_SEND_MS = 10 * 60 * 1000;
+
+/**
+ * V-M1: interrupted sends become "failed" so the merchant sees them. They are
+ * not retried automatically: the email may or may not have gone out.
+ */
+export async function recoverStuckSends(shop: string, now = new Date()): Promise<number> {
+  const result = await db.message.updateMany({
+    where: { shop, status: "sending", sendingSince: { lt: new Date(now.getTime() - STUCK_SEND_MS) } },
+    data: {
+      status: "failed",
+      sendingSince: null,
+      attempts: MAX_SEND_ATTEMPTS,
+      error: "Sending was interrupted. Check whether the customer received it before sending again.",
+    },
+  });
+  return result.count;
 }
 
 /**
@@ -257,11 +298,11 @@ export async function sendDueScheduled(admin: AdminApi, shop: string, now = new 
         { status: "failed", attempts: { lt: MAX_SEND_ATTEMPTS }, error: { not: "This order has no customer email" } },
       ],
     },
-    take: 100,
+    take: MAX_SENDS_PER_RUN,
   });
   let sent = 0;
   for (const m of due) {
-    const result = await sendMessage(admin, m.id);
+    const result = await sendMessage(admin, shop, m.id);
     if (result.ok) sent++;
   }
   return sent;

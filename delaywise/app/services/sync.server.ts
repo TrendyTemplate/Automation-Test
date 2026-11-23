@@ -1,12 +1,13 @@
 import db from "../db.server";
-import { assessRisk, estimateExpectedBy, isAtRisk, riskRank, shouldNotify } from "../lib/risk";
+import { assessRisk, estimateExpectedBy, isAtRisk, LOST_AFTER_DAYS, riskRank, shouldNotify } from "../lib/risk";
 import { exclusionReason, parseCarrierTransit, transitDaysFor } from "../lib/rules";
-import { resolveFulfillmentStatus, type ShipmentStatus } from "../lib/status";
+import { hasCarrierSignal, isFinal, resolveFulfillmentStatus, type ShipmentStatus } from "../lib/status";
 import { gql, type AdminApi } from "./admin-types";
 import { fireShipmentAtRisk } from "./flow.server";
 import { pushKlaviyoShipmentEvent } from "./klaviyo-events.server";
 import { KLAVIYO_METRICS } from "./klaviyo.server";
-import { createNotification, sendDueScheduled, skipResolvedMessages } from "./notifier.server";
+import { randomUUID } from "node:crypto";
+import { createNotification, recoverStuckSends, sendDueScheduled, skipResolvedMessages } from "./notifier.server";
 import { trackRedemptions } from "./roi.server";
 import { getSettings, getUsage, planFor, refreshShopInfo } from "./settings.server";
 import { fetchResults, registerAndTrack, ship24Enabled } from "./ship24.server";
@@ -84,23 +85,50 @@ interface RefreshNode {
   order: { cancelledAt: string | null } | null;
 }
 
+const OVERDUE_NOTE = "Already long overdue when Delaywise first saw it. Check it manually; no automatic emails.";
+
 /** F2: follow up only on recent deliveries. */
 const FOLLOW_UP_WITHIN_DAYS = 3;
 
 const toDate = (v: string | null | undefined) => (v ? new Date(v) : null);
 
-export async function syncShop(admin: AdminApi, shop: string, now = new Date()): Promise<SyncSummary> {
+export interface SyncOptions {
+  /** V-7: wall-clock time (ms) after which no new AI drafts or sends start. */
+  deadline?: number;
+}
+
+/** V-7: bounded work per scan; anything left is picked up next scan. */
+export const MAX_NEW_DRAFTS_PER_SCAN = 25;
+const MAX_REFRESH_BATCHES = 20;
+const DEFAULT_SCAN_BUDGET_MS = 4 * 60 * 1000;
+
+export async function syncShop(
+  admin: AdminApi,
+  shop: string,
+  now = new Date(),
+  options: SyncOptions = {},
+): Promise<SyncSummary> {
   // H2: take the shop's lease (or fail fast) so scans never overlap.
+  // V-2: the lease carries a token, so only its owner can renew or release it.
   await getSettings(shop);
+  const token = randomUUID();
   const clock = new Date();
   const lock = await db.shopSettings.updateMany({
     where: { shop, OR: [{ scanLockUntil: null }, { scanLockUntil: { lt: clock } }] },
-    data: { scanLockUntil: new Date(clock.getTime() + SCAN_LOCK_MS) },
+    data: { scanLockUntil: new Date(clock.getTime() + SCAN_LOCK_MS), scanLockToken: token },
   });
   if (lock.count !== 1) throw new ScanInProgressError();
+  const renew = async () => {
+    const r = await db.shopSettings.updateMany({
+      where: { shop, scanLockToken: token },
+      data: { scanLockUntil: new Date(Date.now() + SCAN_LOCK_MS) },
+    });
+    if (r.count !== 1) throw new ScanInProgressError();
+  };
+  const deadline = options.deadline ?? Date.now() + DEFAULT_SCAN_BUDGET_MS;
 
   try {
-    const summary = await runSync(admin, shop, now);
+    const summary = await runSync(admin, shop, now, { renew, deadline });
     await db.shopSettings.update({ where: { shop }, data: { lastScanAt: now, lastScanError: null } });
     return summary;
   } catch (error) {
@@ -108,11 +136,21 @@ export async function syncShop(admin: AdminApi, shop: string, now = new Date()):
     await db.shopSettings.updateMany({ where: { shop }, data: { lastScanAt: now, lastScanError: message.slice(0, 300) } });
     throw error;
   } finally {
-    await db.shopSettings.updateMany({ where: { shop }, data: { scanLockUntil: null } });
+    await db.shopSettings.updateMany({
+      where: { shop, scanLockToken: token },
+      data: { scanLockUntil: null, scanLockToken: null },
+    });
   }
 }
 
-async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSummary> {
+async function runSync(
+  admin: AdminApi,
+  shop: string,
+  now: Date,
+  ctl: { renew: () => Promise<void>; deadline: number },
+): Promise<SyncSummary> {
+  // V-M1: sends interrupted by a crash or redeploy become visible again.
+  await recoverStuckSends(shop, now);
   let settings = await getSettings(shop);
   try {
     settings = await refreshShopInfo(admin, shop);
@@ -144,7 +182,8 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
   const transitTable = parseCarrierTransit(settings.carrierTransitDays);
 
   // 1. Pull shipped orders from Shopify and upsert one row per fulfillment.
-  const since = new Date(now.getTime() - WINDOW_DAYS * 24 * HOUR).toISOString().slice(0, 10);
+  const windowStart = now.getTime() - WINDOW_DAYS * 24 * HOUR;
+  const since = new Date(windowStart).toISOString().slice(0, 10);
   // L9: updated_at, so pre-orders placed long ago but shipped recently are included.
   const search = `(fulfillment_status:shipped OR fulfillment_status:partial) AND updated_at:>=${since}`;
   let after: string | null = null;
@@ -179,6 +218,11 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
         const keepExternal =
           existing?.source === "ship24" && (shopifyStatus === "UNKNOWN" || shopifyStatus === "PRE_TRANSIT");
         const shippedAt = toDate(f.inTransitAt) ?? new Date(f.createdAt);
+        // V-H2: an old order touched recently (tag, refund) is not a new shipment.
+        if (!existing && shippedAt.getTime() < windowStart) {
+          summary.skippedNoTracking++;
+          continue;
+        }
         const destination = order.shippingAddress?.countryCodeV2 ?? null;
         const international = Boolean(
           destination && settings.shopCountry && destination !== settings.shopCountry,
@@ -225,8 +269,25 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
         if (existing) {
           await db.shipment.update({ where: { id: existing.id }, data: fields });
         } else {
+          // V-H2: a parcel already far past "probably lost" when we first see it
+          // gets no automatic emails or workflows; the merchant checks it.
+          const alreadyLost = now.getTime() - fields.expectedBy.getTime() > LOST_AFTER_DAYS * 24 * HOUR;
           await db.shipment.create({
-            data: { shop, fulfillmentId: f.id, status: shopifyStatus, ...fields },
+            data: {
+              shop,
+              fulfillmentId: f.id,
+              status: shopifyStatus,
+              ...fields,
+              ...(alreadyLost && hasCarrierSignal(shopifyStatus) && !isFinal(shopifyStatus)
+                ? {
+                    risk: "lost",
+                    notifiedRisk: "lost",
+                    importedOverdue: true,
+                    riskSince: now,
+                    riskReason: OVERDUE_NOTE,
+                  }
+                : {}),
+            },
           });
           summary.newShipments++;
           usage = await db.usageMonth.update({
@@ -240,33 +301,57 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
     after = data.orders.pageInfo.endCursor;
   }
 
-  // 1b. H4: open shipments the order search didn't return (big stores, old
-  // orders) are re-checked directly, so deliveries are never missed.
+  await ctl.renew();
+
+  // 1b. H4 + V-M3: every open tracked shipment the order search didn't return
+  // (big stores, old orders, Ship24-tracked rows) is re-checked by ID, so a
+  // delivery or cancellation is never missed. Oldest-checked first, bounded.
   const stale = await db.shipment.findMany({
-    where: { shop, status: { notIn: ["DELIVERED", "CANCELED"] }, source: "shopify" },
-    select: { id: true, fulfillmentId: true, deliveredAt: true },
+    where: { shop, status: { notIn: ["DELIVERED", "CANCELED"] }, trackingNumber: { not: null } },
+    select: { id: true, fulfillmentId: true, deliveredAt: true, source: true },
+    orderBy: { lastCheckedAt: "asc" },
   });
-  const toRefresh = stale.filter((s) => !seen.has(s.fulfillmentId));
+  const toRefresh = stale.filter((s) => !seen.has(s.fulfillmentId)).slice(0, MAX_REFRESH_BATCHES * 50);
   for (let i = 0; i < toRefresh.length; i += 50) {
     const batch = toRefresh.slice(i, i + 50);
-    const data = await gql<{ nodes: (RefreshNode | null)[] }>(admin, REFRESH_FULFILLMENTS_QUERY, {
-      ids: batch.map((b) => b.fulfillmentId),
-    });
-    for (const node of data.nodes) {
-      const row = node?.id ? batch.find((b) => b.fulfillmentId === node.id) : undefined;
-      if (!node || !row) continue;
+    let nodes: (RefreshNode | null)[];
+    try {
+      // V-M4: one bad batch must not stop the rest of the scan.
+      nodes = (
+        await gql<{ nodes: (RefreshNode | null)[] }>(admin, REFRESH_FULFILLMENTS_QUERY, {
+          ids: batch.map((b) => b.fulfillmentId),
+        })
+      ).nodes;
+    } catch (error) {
+      console.error(`[sync] ${shop}: refresh batch failed`, error);
+      continue;
+    }
+    for (const [index, node] of nodes.entries()) {
+      const row = batch[index];
+      if (!row) continue;
+      if (!node) {
+        // The fulfillment no longer exists (deleted / order removed).
+        await db.shipment.update({
+          where: { id: row.id },
+          data: { status: "CANCELED", riskReason: "Fulfillment no longer exists in Shopify", lastCheckedAt: now },
+        });
+        continue;
+      }
       const event = node.events.nodes[0];
+      const status = resolveFulfillmentStatus({
+        orderCancelled: Boolean(node.order?.cancelledAt),
+        fulfillmentStatus: node.status,
+        deliveredAt: node.deliveredAt,
+        latestEventStatus: event?.status,
+        displayStatus: node.displayStatus,
+      });
+      // Ship24-tracked rows keep their external status unless Shopify knows more.
+      if (row.source === "ship24" && !isFinal(status) && !hasCarrierSignal(status)) continue;
       await db.shipment.update({
         where: { id: row.id },
         data: {
-          status: resolveFulfillmentStatus({
-            orderCancelled: Boolean(node.order?.cancelledAt),
-            fulfillmentStatus: node.status,
-            deliveredAt: node.deliveredAt,
-            latestEventStatus: event?.status,
-            displayStatus: node.displayStatus,
-          }),
-          lastEventAt: toDate(event?.happenedAt),
+          status,
+          ...(row.source === "ship24" ? {} : { lastEventAt: toDate(event?.happenedAt) }),
           deliveredAt: toDate(node.deliveredAt) ?? row.deliveredAt,
           ...(node.estimatedDeliveryAt ? { expectedBy: new Date(node.estimatedDeliveryAt) } : {}),
         },
@@ -274,19 +359,33 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
       summary.refreshed++;
     }
   }
+  await ctl.renew();
 
   // 2. Fill gaps with external tracking where Shopify has no carrier scans.
   if (ship24Enabled()) {
-    const candidates = await db.shipment.findMany({
-      where: {
-        shop,
-        trackingNumber: { not: null },
-        status: { in: ["UNKNOWN", "PRE_TRANSIT", "IN_TRANSIT", "OUT_FOR_DELIVERY", "CARRIER_DELAYED", "ATTEMPTED", "EXCEPTION", "PICKUP_READY"] },
-        shippedAt: { lt: new Date(now.getTime() - EXTERNAL_LOOKUP_AFTER_HOURS * HOUR) },
-        OR: [{ source: "ship24" }, { status: { in: ["UNKNOWN", "PRE_TRANSIT"] } }],
-      },
+    // V-M3: existing trackers (free to re-read) oldest-checked first, then new
+    // registrations only up to the plan's remaining quota.
+    const open = { notIn: ["DELIVERED", "CANCELED"] };
+    const existingTrackers = await db.shipment.findMany({
+      where: { shop, externalTrackerId: { not: null }, status: open },
+      orderBy: { lastCheckedAt: "asc" },
       take: 200,
     });
+    const quotaLeft = Math.max(0, plan.includedPaidLookups - usage.paidLookups);
+    const newTrackers = quotaLeft
+      ? await db.shipment.findMany({
+          where: {
+            shop,
+            externalTrackerId: null,
+            trackingNumber: { not: null },
+            status: { in: ["UNKNOWN", "PRE_TRANSIT"] },
+            shippedAt: { lt: new Date(now.getTime() - EXTERNAL_LOOKUP_AFTER_HOURS * HOUR) },
+          },
+          orderBy: { shippedAt: "desc" },
+          take: Math.min(quotaLeft, 200),
+        })
+      : [];
+    const candidates = [...existingTrackers, ...newTrackers];
     for (const s of candidates) {
       const isNew = !s.externalTrackerId;
       if (isNew && usage.paidLookups >= plan.includedPaidLookups) continue;
@@ -310,6 +409,7 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
             status: result.status,
             lastEventAt: result.lastEventAt ?? s.lastEventAt,
             deliveredAt: result.deliveredAt,
+            lastCheckedAt: now,
             ...(result.estimatedDelivery ? { expectedBy: result.estimatedDelivery } : {}),
           },
         });
@@ -319,9 +419,13 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
     }
   }
 
+  await ctl.renew();
+
   // 3. Re-assess risk and create customer messages where needed.
+  // V-1: rows without a tracking number (imported by older versions) are ignored.
+  let draftsLeft = MAX_NEW_DRAFTS_PER_SCAN;
   const open = await db.shipment.findMany({
-    where: { shop, status: { notIn: ["DELIVERED", "CANCELED"] } },
+    where: { shop, status: { notIn: ["DELIVERED", "CANCELED"] }, trackingNumber: { not: null } },
   });
   for (const s of open) {
     const result = assessRisk(
@@ -339,7 +443,7 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
       where: { id: s.id },
       data: {
         risk: result.risk,
-        riskReason: result.reason,
+        riskReason: s.importedOverdue ? OVERDUE_NOTE : result.reason,
         lastCheckedAt: now,
         ...(changed ? { riskSince: now } : {}),
       },
@@ -373,7 +477,10 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
       if (pushed) summary.klaviyoEvents++;
     }
 
-    if (shouldNotify(result.risk, s.notifiedRisk, settings)) {
+    // V-7: drafting calls the AI (and may send). Stop starting new ones when
+    // the scan's budget is used; the rest are drafted next scan.
+    if (shouldNotify(result.risk, s.notifiedRisk, settings) && draftsLeft > 0 && Date.now() < ctl.deadline) {
+      draftsLeft--;
       try {
         const created = await createNotification({
           admin,
@@ -414,6 +521,8 @@ async function runSync(admin: AdminApi, shop: string, now: Date): Promise<SyncSu
       take: 100,
     });
     for (const s of delivered) {
+      if (draftsLeft <= 0 || Date.now() >= ctl.deadline) break;
+      draftsLeft--;
       try {
         const created = await createNotification({ admin, shipment: s, kind: "delivered", daysLate: 0, settings, plan, now });
         if (!created) continue;

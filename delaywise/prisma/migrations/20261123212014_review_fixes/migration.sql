@@ -35,7 +35,11 @@ CREATE TABLE "new_Message" (
     "sentAt" DATETIME,
     CONSTRAINT "Message_shipmentId_fkey" FOREIGN KEY ("shipmentId") REFERENCES "Shipment" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-INSERT INTO "new_Message" ("body", "createdAt", "discountCode", "discountOrderName", "discountOrderValue", "discountRedeemedAt", "error", "generatedBy", "id", "kind", "language", "scheduledFor", "sentAt", "shipmentId", "shop", "status", "subject") SELECT "body", "createdAt", "discountCode", "discountOrderName", "discountOrderValue", "discountRedeemedAt", "error", "generatedBy", "id", "kind", "language", "scheduledFor", "sentAt", "shipmentId", "shop", "status", "subject" FROM "Message";
+-- Before this migration, discount codes were created in Shopify when the
+-- draft was made, so existing codes are marked as already created. Older
+-- versions could create duplicate drafts; keep only the first per
+-- (shipmentId, kind) so the new unique index can be built.
+INSERT INTO "new_Message" ("body", "createdAt", "discountCode", "discountCreated", "discountOrderName", "discountOrderValue", "discountRedeemedAt", "error", "generatedBy", "id", "kind", "language", "scheduledFor", "sentAt", "shipmentId", "shop", "status", "subject") SELECT "body", "createdAt", "discountCode", CASE WHEN "discountCode" IS NOT NULL THEN 1 ELSE 0 END, "discountOrderName", "discountOrderValue", "discountRedeemedAt", "error", "generatedBy", "id", "kind", "language", "scheduledFor", "sentAt", "shipmentId", "shop", "status", "subject" FROM "Message" WHERE rowid IN (SELECT MIN(rowid) FROM "Message" GROUP BY "shipmentId", "kind");
 DROP TABLE "Message";
 ALTER TABLE "new_Message" RENAME TO "Message";
 CREATE INDEX "Message_shop_status_idx" ON "Message"("shop", "status");

@@ -8,6 +8,8 @@ import db from "../db.server";
 import { languageName } from "../lib/language";
 import { sendMessage, skipMessage } from "../services/notifier.server";
 
+const BULK_SEND_BATCH = 25;
+
 const KIND_LABEL: Record<string, string> = {
   stalled: "Stalled",
   delayed: "Late",
@@ -21,7 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = session.shop;
   const [pending, recent] = await Promise.all([
     db.message.findMany({
-      where: { shop, status: { in: ["pending_approval", "failed", "scheduled"] } },
+      where: { shop, status: { in: ["pending_approval", "failed", "scheduled", "sending"] } },
       include: { shipment: true },
       orderBy: { createdAt: "desc" },
       take: 50,
@@ -63,8 +65,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const waiting = await db.message.findMany({
       where: { shop: session.shop, status: "pending_approval" },
       select: { id: true },
-      take: 200,
+      // V-M5: a bounded batch per click so the request never runs for minutes.
+      take: intent === "send_all" ? BULK_SEND_BATCH : 500,
     });
+    const remaining =
+      intent === "send_all"
+        ? Math.max(0, (await db.message.count({ where: { shop: session.shop, status: "pending_approval" } })) - waiting.length)
+        : 0;
     let done = 0;
     let failed = 0;
     for (const m of waiting) {
@@ -72,12 +79,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         await skipMessage(session.shop, m.id);
         done++;
       } else {
-        const r = await sendMessage(admin, m.id);
+        const r = await sendMessage(admin, session.shop, m.id);
         if (r.ok) done++;
         else failed++;
       }
     }
-    return { ok: failed === 0, intent, done, failed, error: failed ? `${failed} email(s) could not be sent` : undefined };
+    return {
+      ok: failed === 0,
+      intent,
+      done,
+      failed,
+      remaining,
+      error: failed ? `${failed} email(s) could not be sent` : undefined,
+    };
   }
 
   const message = await db.message.findFirst({ where: { id, shop: session.shop } });
@@ -87,7 +101,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await skipMessage(session.shop, id);
     return { ok: true, intent };
   }
-  const result = await sendMessage(admin, id, {
+  const result = await sendMessage(admin, session.shop, id, {
     subject: String(form.get("subject") ?? ""),
     body: String(form.get("body") ?? ""),
   });
@@ -104,7 +118,8 @@ export default function Messages() {
     const d = bulk.data;
     if (!d || !("done" in d)) return;
     const verb = d.intent === "skip_all" ? "skipped" : "sent";
-    shopify.toast.show(d.ok ? `${d.done} email(s) ${verb}` : (d.error ?? "Some emails failed"), { isError: !d.ok });
+    const more = "remaining" in d && d.remaining ? `. ${d.remaining} left: click Send all again.` : "";
+    shopify.toast.show(d.ok ? `${d.done} email(s) ${verb}${more}` : (d.error ?? "Some emails failed"), { isError: !d.ok });
   }, [bulk.data, shopify]);
 
   return (
@@ -207,6 +222,7 @@ function PendingMessage({ message: m }: { message: MessageView }) {
             <s-badge>{m.language}</s-badge>
             {m.discountCode && <s-badge tone="success">Discount {m.discountCode}</s-badge>}
             {m.generatedBy === "template" && <s-badge tone="neutral">Template</s-badge>}
+            {m.status === "sending" && <s-badge tone="info">Sending…</s-badge>}
             {m.status === "scheduled" && m.scheduledFor && (
               <s-badge tone="info">{`Autopilot sends at ${m.scheduledFor} UTC`}</s-badge>
             )}

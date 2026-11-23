@@ -35,7 +35,7 @@ Call the job every 15–60 minutes:
 curl -X POST https://your-app.example.com/jobs/scan -H "Authorization: Bearer $JOB_SECRET"
 ```
 
-Each call works for up to `JOB_TIME_BUDGET_MS` (default 50 s), scanning `JOB_CONCURRENCY` shops at a time (default 3), oldest-scanned first. Shops it doesn't reach go first next time, and overlapping calls are safe. The response lists `processed` and `remaining`; if `remaining` stays above 0, call more often or raise the budget.
+The endpoint answers `202` at once and does the work in the background, so scheduler timeouts don't matter. One run at a time: a call made while a run is in progress returns `{"alreadyRunning": true}`. Each run scans `JOB_CONCURRENCY` shops at a time (default 3), oldest-scanned first, for up to `JOB_TIME_BUDGET_MS` (default 10 minutes); shops it doesn't reach go first next time. Within a scan, at most 25 new customer emails are drafted and 25 queued emails sent; the rest follow on the next run. Results are logged as `[job] {...}`. Add `?wait=1` to wait for the result while debugging.
 
 ## Moving to Postgres later
 
