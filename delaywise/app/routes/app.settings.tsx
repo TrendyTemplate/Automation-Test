@@ -168,10 +168,7 @@ export default function SettingsPage() {
   useEffect(() => {
     const d = klaviyo.data;
     if (!d) return;
-    if ("klaviyoConnected" in d) {
-      setKlaviyoKey("");
-      shopify.toast.show("Klaviyo connected");
-    }
+    if ("klaviyoConnected" in d) shopify.toast.show("Klaviyo connected");
     if ("klaviyoDisconnected" in d) shopify.toast.show("Klaviyo disconnected");
     if ("klaviyoError" in d && d.klaviyoError) shopify.toast.show(d.klaviyoError, { isError: true });
   }, [klaviyo.data, shopify]);
@@ -360,14 +357,17 @@ export default function SettingsPage() {
                 onInput={(e) => setKlaviyoKey(text(e))}
               ></s-password-field>
               <s-button
-                onClick={() => klaviyo.submit({ intent: "klaviyo_connect", klaviyoKey }, { method: "post" })}
+                onClick={() => {
+                  klaviyo.submit({ intent: "klaviyo_connect", klaviyoKey }, { method: "post" });
+                  setKlaviyoKey("");
+                }}
                 {...(klaviyo.state !== "idle" ? { loading: true } : {})}
               >
                 Connect
               </s-button>
             </s-grid>
           ) : (
-            <s-text color="subdued">Klaviyo connection isn't available yet on this server.</s-text>
+            <s-text color="subdued">Klaviyo connection isn’t available yet on this server.</s-text>
           )}
         </s-stack>
       </s-section>
