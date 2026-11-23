@@ -28,7 +28,8 @@ export default function Privacy() {
             discount codes in the merchant’s store.
           </li>
           <li>
-            <strong>Store details</strong> (store name, contact email, country), to set up the App.
+            <strong>Store details</strong> (store name, contact email, country, time zone), to set up the App and
+            send the merchant an optional daily summary.
           </li>
         </ul>
         <h2>Service providers</h2>
@@ -40,7 +41,8 @@ export default function Privacy() {
         </ul>
         <h2>Retention and deletion</h2>
         <p>
-          Shipment records older than 45 days are no longer updated. When a merchant uninstalls the App, we stop all
+          Shipment records are deleted 90 days after shipping and email records after 180 days. When a merchant
+          uninstalls the App, we stop all
           processing, and we delete all of the store’s data when Shopify sends the shop data erasure request (48 hours
           after uninstall). We honour customer data erasure requests from Shopify by deleting the related order
           records.

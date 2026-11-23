@@ -13,6 +13,7 @@ const KIND_LABEL: Record<string, string> = {
   delayed: "Late",
   exception: "Carrier problem",
   lost: "Probably lost",
+  delivered: "Arrived after delay",
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -20,7 +21,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = session.shop;
   const [pending, recent] = await Promise.all([
     db.message.findMany({
-      where: { shop, status: { in: ["pending_approval", "failed"] } },
+      where: { shop, status: { in: ["pending_approval", "failed", "scheduled"] } },
       include: { shipment: true },
       orderBy: { createdAt: "desc" },
       take: 50,
@@ -45,6 +46,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     generatedBy: m.generatedBy,
     createdAt: m.createdAt.toISOString().slice(0, 16).replace("T", " "),
     sentAt: m.sentAt ? m.sentAt.toISOString().slice(0, 16).replace("T", " ") : null,
+    scheduledFor: m.scheduledFor ? m.scheduledFor.toISOString().slice(0, 16).replace("T", " ") : null,
+    discountRedeemed: Boolean(m.discountRedeemedAt),
   });
   return { pending: pending.map(shape), recent: recent.map(shape) };
 };
@@ -54,6 +57,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const form = await request.formData();
   const id = String(form.get("id") ?? "");
   const intent = String(form.get("intent") ?? "");
+
+  // F9: bulk actions on everything waiting for approval.
+  if (intent === "send_all" || intent === "skip_all") {
+    const waiting = await db.message.findMany({
+      where: { shop: session.shop, status: "pending_approval" },
+      select: { id: true },
+      take: 200,
+    });
+    let done = 0;
+    let failed = 0;
+    for (const m of waiting) {
+      if (intent === "skip_all") {
+        await skipMessage(session.shop, m.id);
+        done++;
+      } else {
+        const r = await sendMessage(admin, m.id);
+        if (r.ok) done++;
+        else failed++;
+      }
+    }
+    return { ok: failed === 0, intent, done, failed, error: failed ? `${failed} email(s) could not be sent` : undefined };
+  }
 
   const message = await db.message.findFirst({ where: { id, shop: session.shop } });
   if (!message) return { ok: false, error: "Message not found" };
@@ -71,10 +96,39 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 export default function Messages() {
   const { pending, recent } = useLoaderData<typeof loader>();
+  const bulk = useFetcher<typeof action>();
+  const shopify = useAppBridge();
+  const waiting = pending.filter((m) => m.status === "pending_approval").length;
+
+  useEffect(() => {
+    const d = bulk.data;
+    if (!d || !("done" in d)) return;
+    const verb = d.intent === "skip_all" ? "skipped" : "sent";
+    shopify.toast.show(d.ok ? `${d.done} email(s) ${verb}` : (d.error ?? "Some emails failed"), { isError: !d.ok });
+  }, [bulk.data, shopify]);
 
   return (
     <s-page heading="Customer messages">
-      <s-section heading={`Waiting for approval (${pending.length})`}>
+      {waiting > 1 && (
+        <>
+          <s-button
+            slot="primary-action"
+            variant="primary"
+            onClick={() => bulk.submit({ intent: "send_all" }, { method: "post" })}
+            {...(bulk.state !== "idle" ? { loading: true } : {})}
+          >
+            {`Send all ${waiting}`}
+          </s-button>
+          <s-button
+            slot="secondary-actions"
+            onClick={() => bulk.submit({ intent: "skip_all" }, { method: "post" })}
+            {...(bulk.state !== "idle" ? { disabled: true } : {})}
+          >
+            Skip all
+          </s-button>
+        </>
+      )}
+      <s-section heading={`Waiting (${pending.length})`}>
         {pending.length === 0 ? (
           <s-paragraph color="subdued">
             No messages waiting. When a parcel runs into trouble, its draft appears here.
@@ -109,8 +163,9 @@ export default function Messages() {
                   <s-table-cell>{m.subject}</s-table-cell>
                   <s-table-cell>
                     <s-badge tone={m.status === "sent" ? "success" : "neutral"}>
-                      {m.status === "sent" ? `Sent ${m.sentAt ?? ""}` : "Skipped"}
+                      {m.status === "sent" ? `Sent ${m.sentAt ?? ""} UTC` : "Skipped"}
                     </s-badge>
+                    {m.discountRedeemed && <s-badge tone="success">Discount used</s-badge>}
                   </s-table-cell>
                 </s-table-row>
               ))}
@@ -152,6 +207,9 @@ function PendingMessage({ message: m }: { message: MessageView }) {
             <s-badge>{m.language}</s-badge>
             {m.discountCode && <s-badge tone="success">Discount {m.discountCode}</s-badge>}
             {m.generatedBy === "template" && <s-badge tone="neutral">Template</s-badge>}
+            {m.status === "scheduled" && m.scheduledFor && (
+              <s-badge tone="info">{`Autopilot sends at ${m.scheduledFor} UTC`}</s-badge>
+            )}
           </s-stack>
           {m.status === "failed" && m.error && (
             <s-banner tone="critical" heading="Last attempt failed">

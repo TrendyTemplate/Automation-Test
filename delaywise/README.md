@@ -5,7 +5,7 @@ A Shopify app that tells customers about late parcels before they ask.
 Delaywise checks a store's shipped orders every hour. When a parcel stalls, runs late, hits a carrier problem or looks lost, it writes a short update to the customer **in the customer's own language** and **in the store's tone**, optionally with a single-use apology discount. The merchant approves each email or turns on Autopilot.
 
 > 🇧🇩 বাংলা: **[সেটআপ ও লঞ্চ গাইড](docs/SETUP_BN.md)** · **[App Store রিভিউ চেকলিস্ট](docs/REVIEW_CHECKLIST_BN.md)**
-> App Store listing copy: [docs/APP_STORE_LISTING.md](docs/APP_STORE_LISTING.md)
+> App Store listing copy: [docs/APP_STORE_LISTING.md](docs/APP_STORE_LISTING.md) · Feature research & roadmap: [docs/FEATURES_ROADMAP_BN.md](docs/FEATURES_ROADMAP_BN.md)
 
 ## What makes it different
 
@@ -19,6 +19,12 @@ Delaywise checks a store's shipped orders every hour. When a parcel stalls, runs
 | Revenue at risk | Live total of order value sitting in late or stalled parcels |
 | Privacy by design | Stores no customer names, emails or addresses; email is read from Shopify only at send time |
 | No theme changes | Nothing is injected into the storefront, so there is no speed impact |
+| Shopify Flow trigger | "Shipment at risk" starts merchant workflows (tag order, Slack, help desk) |
+| Arrived follow-up | Short "it arrived, thanks for your patience" note after a warned-about delay |
+| Daily summary | One email per local day to the merchant when orders need attention |
+| Rules | Exclude by order tag, country or minimum value; per-carrier transit days; send window in the shop's time zone |
+| Results | Apology discount redemptions and the revenue they brought back |
+| Bulk actions & CSV | Send/skip all drafts; export at-risk orders for carrier claims |
 
 ## How it works
 

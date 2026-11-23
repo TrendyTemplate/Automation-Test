@@ -8,6 +8,8 @@ import db from "../db.server";
 import { getSettings, getUsage, planFor } from "../services/settings.server";
 import { syncShop } from "../services/sync.server";
 import { revenueAtRisk } from "../lib/scorecard";
+import { toCsv } from "../lib/csv";
+import { roiSummary } from "../services/roi.server";
 import { STATUS_LABEL, type ShipmentStatus } from "../lib/status";
 
 const RISK_TONE: Record<string, "critical" | "warning" | "caution" | "info"> = {
@@ -32,7 +34,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const plan = planFor(settings);
   const usage = await getUsage(shop);
 
-  const [open, pendingCount, sentCount, totalShipments] = await Promise.all([
+  const [open, pendingCount, sentCount, totalShipments, roi] = await Promise.all([
     db.shipment.findMany({
       where: { shop, status: { notIn: ["DELIVERED", "CANCELED"] } },
       orderBy: { riskSince: "desc" },
@@ -40,6 +42,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     db.message.count({ where: { shop, status: "pending_approval" } }),
     db.message.count({ where: { shop, status: "sent" } }),
     db.shipment.count({ where: { shop } }),
+    roiSummary(shop),
   ]);
 
   const atRisk = open
@@ -56,11 +59,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       reason: s.riskReason ?? "",
       trackingUrl: s.trackingUrl,
       value: `${s.orderValue.toFixed(2)} ${s.currency}`,
+      excluded: s.excluded,
+      excludedReason: s.excludedReason,
     }));
 
   const money = revenueAtRisk(open);
   return {
-    settings: { mode: settings.mode, onboardingCompleted: settings.onboardingCompleted },
+    settings: {
+      mode: settings.mode,
+      onboardingCompleted: settings.onboardingCompleted,
+      lastScanAt: settings.lastScanAt ? settings.lastScanAt.toISOString() : null,
+      lastScanError: settings.lastScanError,
+    },
+    roi,
     plan: { label: plan.label, shipmentLimit: plan.shipmentLimit, includedPaidLookups: plan.includedPaidLookups },
     usage: { shipmentsTracked: usage.shipmentsTracked, paidLookups: usage.paidLookups, messagesSent: usage.messagesSent },
     stats: {
@@ -82,18 +93,73 @@ function riskOrder(risk: string): number {
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
+  const form = await request.formData();
+
+  // F10: CSV of every open at-risk shipment (for carrier claims, 3PLs, reports).
+  if (form.get("intent") === "export") {
+    const rows = await db.shipment.findMany({
+      where: { shop: session.shop, risk: { not: "none" }, status: { notIn: ["DELIVERED", "CANCELED"] } },
+      orderBy: { shippedAt: "asc" },
+    });
+    const csv = toCsv(
+      ["Order", "Risk", "Reason", "Carrier", "Tracking number", "Tracking URL", "Status", "Shipped", "Expected", "Destination", "Value", "Currency", "Excluded"],
+      rows.map((r) => [
+        r.orderName,
+        r.risk,
+        r.riskReason,
+        r.carrier,
+        r.trackingNumber,
+        r.trackingUrl,
+        STATUS_LABEL[r.status as ShipmentStatus] ?? r.status,
+        r.shippedAt.toISOString().slice(0, 10),
+        r.expectedBy?.toISOString().slice(0, 10),
+        r.destinationCountry,
+        r.orderValue.toFixed(2),
+        r.currency,
+        r.excluded ? "yes" : "no",
+      ]),
+    );
+    return { csv };
+  }
+
   const summary = await syncShop(admin, session.shop);
   return { summary };
 };
 
+function downloadCsv(csv: string) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `delaywise-at-risk-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return "never";
+  const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+}
+
 export default function Dashboard() {
   const data = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
+  const exporter = useFetcher<typeof action>();
   const shopify = useAppBridge();
+
+  useEffect(() => {
+    if (exporter.data && "csv" in exporter.data && exporter.data.csv) downloadCsv(exporter.data.csv);
+  }, [exporter.data]);
   const scanning = fetcher.state !== "idle";
 
   useEffect(() => {
-    const s = fetcher.data?.summary;
+    const s = fetcher.data && "summary" in fetcher.data ? fetcher.data.summary : null;
     if (s) {
       shopify.toast.show(
         `Checked ${s.shipmentsSeen} shipments · ${s.atRisk} at risk · ${s.messagesCreated} new messages`,
@@ -101,7 +167,7 @@ export default function Dashboard() {
     }
   }, [fetcher.data, shopify]);
 
-  const scan = () => fetcher.submit({}, { method: "POST" });
+  const scan = () => fetcher.submit({ intent: "scan" }, { method: "POST" });
   const { stats, usage, plan } = data;
   const nearLimit = usage.shipmentsTracked >= plan.shipmentLimit * 0.9;
 
@@ -110,6 +176,19 @@ export default function Dashboard() {
       <s-button slot="primary-action" variant="primary" onClick={scan} {...(scanning ? { loading: true } : {})}>
         Scan shipments now
       </s-button>
+      <s-button
+        slot="secondary-actions"
+        onClick={() => exporter.submit({ intent: "export" }, { method: "POST" })}
+        {...(exporter.state !== "idle" ? { loading: true } : {})}
+      >
+        Export at-risk orders (CSV)
+      </s-button>
+
+      {data.settings.lastScanError && (
+        <s-banner heading="The last scan ran into a problem" tone="critical">
+          {data.settings.lastScanError} We will try again automatically within the hour.
+        </s-banner>
+      )}
 
       {!data.settings.onboardingCompleted && (
         <s-banner heading="Welcome! Three quick steps" tone="info">
@@ -169,7 +248,10 @@ export default function Dashboard() {
                     </s-link>
                   </s-table-cell>
                   <s-table-cell>
-                    <s-badge tone={RISK_TONE[s.risk] ?? "info"}>{RISK_LABEL[s.risk] ?? s.risk}</s-badge>
+                    <s-stack direction="inline" gap="small-200">
+                      <s-badge tone={RISK_TONE[s.risk] ?? "info"}>{RISK_LABEL[s.risk] ?? s.risk}</s-badge>
+                      {s.excluded && <s-badge tone="neutral">{`No emails: ${s.excludedReason ?? "excluded"}`}</s-badge>}
+                    </s-stack>
                   </s-table-cell>
                   <s-table-cell>{s.reason}</s-table-cell>
                   <s-table-cell>{s.carrier}</s-table-cell>
@@ -188,6 +270,19 @@ export default function Dashboard() {
             </s-table-body>
           </s-table>
         )}
+      </s-section>
+
+      <s-section slot="aside" heading="Results so far">
+        <s-stack direction="block" gap="small">
+          <s-text>Customer updates sent: {data.roi.emailsSent}</s-text>
+          <s-text>
+            Apology discounts used: {data.roi.discountsRedeemed} of {data.roi.discountsSent}
+          </s-text>
+          <s-text>
+            Revenue from those orders: <s-text type="strong">{`${data.roi.revenueRecovered.toFixed(2)} ${stats.currency}`}</s-text>
+          </s-text>
+          <s-text color="subdued">Last scan: {timeAgo(data.settings.lastScanAt)}</s-text>
+        </s-stack>
       </s-section>
 
       <s-section slot="aside" heading="This month">

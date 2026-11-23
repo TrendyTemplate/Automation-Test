@@ -19,6 +19,7 @@ Late parcels create angry emails, bad reviews and chargebacks, usually because t
 - Emails in your customer's language and your brand's tone, ready to approve or sent on Autopilot
 - Optional single-use apology discount for late or lost orders
 - Carrier scorecard: on-time rate and average delay per carrier
+- Shopify Flow trigger and a daily summary email, so your team acts on late orders fast
 - Works with your existing tracking app; no theme changes, no storefront slowdown
 
 ## Pricing (must match the Partner Dashboard plans)

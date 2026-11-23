@@ -24,7 +24,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 const FEATURES: Record<string, string[]> = {
-  free: ["50 shipments a month", "AI emails in your customer's language", "Approve every email", "Carrier scorecard"],
+  free: [
+    "50 shipments a month",
+    "AI emails in your customer's language",
+    "Approve every email",
+    "Carrier scorecard, daily summary, Shopify Flow trigger",
+  ],
   starter: ["500 shipments a month", "300 extra carrier lookups", "Autopilot sending", "Sorry discount codes"],
   growth: ["2,000 shipments a month", "1,000 extra carrier lookups", "Autopilot sending", "Sorry discount codes"],
   pro: ["5,000 shipments a month", "2,500 extra carrier lookups", "Autopilot sending", "Sorry discount codes"],
