@@ -11,6 +11,7 @@ import { sendEmail } from "../services/email.server";
 import type { MessageKind } from "../lib/risk";
 import { carrierTransitToText } from "../lib/rules";
 import { cleanEmail, cleanText, parseSettingsForm } from "../lib/settings-form";
+import { PRESETS, isPresetId, presetValues, type PresetId } from "../lib/presets";
 import { PREVIEW_DAILY_LIMIT, TEST_EMAIL_DAILY_LIMIT, allowDaily } from "../lib/rate-limit";
 import { encryptSecret, encryptionAvailable, maskSecret } from "../lib/crypto";
 import { klaviyoKeyFor } from "../services/klaviyo-events.server";
@@ -52,6 +53,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       digestEmail: settings.digestEmail ?? "",
       flowTriggerEnabled: settings.flowTriggerEnabled,
       orderStatusNotice: settings.orderStatusNotice,
+      preset: settings.preset,
+      vipTags: settings.vipTags ?? "",
+      vipMinOrderValue: settings.vipMinOrderValue,
+      incidentThreshold: settings.incidentThreshold,
     },
     timezone: settings.timezone ?? "UTC",
     klaviyo: {
@@ -202,6 +207,31 @@ export default function SettingsPage() {
         Save
       </s-button>
 
+      <s-section heading="Style">
+        <s-stack direction="block" gap="base">
+          <s-select
+            label="How proactive should Delaywise be?"
+            value={isPresetId(s.preset) ? s.preset : "custom"}
+            onChange={(e) => {
+              const id = text(e);
+              if (isPresetId(id)) setS((prev) => ({ ...prev, ...presetValues(id as PresetId), preset: id }));
+            }}
+          >
+            {(Object.keys(PRESETS) as PresetId[]).map((id) => (
+              <s-option key={id} value={id}>
+                {PRESETS[id].label}
+              </s-option>
+            ))}
+            <s-option value="custom" disabled>
+              Custom (changed below)
+            </s-option>
+          </s-select>
+          <s-text color="subdued">
+            {isPresetId(s.preset) ? PRESETS[s.preset].description : "You've fine-tuned the thresholds below."}
+          </s-text>
+        </s-stack>
+      </s-section>
+
       <s-section heading="Sending">
         <s-stack direction="block" gap="base">
           <s-select label="How should emails go out?" value={s.mode} onChange={(e) => set("mode", text(e))}>
@@ -252,9 +282,9 @@ export default function SettingsPage() {
 
       <s-section heading="When to tell the customer">
         <s-stack direction="block" gap="base">
-          <s-checkbox label="Parcel has stalled (no carrier scans for a while)" checked={s.notifyOnStall} onChange={(e) => set("notifyOnStall", checked(e))}></s-checkbox>
-          <s-checkbox label="Parcel is late or probably lost" checked={s.notifyOnDelay} onChange={(e) => set("notifyOnDelay", checked(e))}></s-checkbox>
-          <s-checkbox label="Carrier problem or failed delivery attempt" checked={s.notifyOnException} onChange={(e) => set("notifyOnException", checked(e))}></s-checkbox>
+          <s-checkbox label="Parcel has stalled (no carrier scans for a while)" checked={s.notifyOnStall} onChange={(e) => { set("notifyOnStall", checked(e)); set("preset", "custom"); }}></s-checkbox>
+          <s-checkbox label="Parcel is late or probably lost" checked={s.notifyOnDelay} onChange={(e) => { set("notifyOnDelay", checked(e)); set("preset", "custom"); }}></s-checkbox>
+          <s-checkbox label="Carrier problem or failed delivery attempt" checked={s.notifyOnException} onChange={(e) => { set("notifyOnException", checked(e)); set("preset", "custom"); }}></s-checkbox>
           <s-checkbox
             label="When a late parcel finally arrives, send a short “it’s arrived, thanks for your patience” note"
             checked={s.deliveredFollowUp}
@@ -262,8 +292,8 @@ export default function SettingsPage() {
           ></s-checkbox>
           <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
             <s-number-field label="Usual delivery time (business days)" min={1} max={30} value={String(s.defaultTransitDays)} onInput={(e) => set("defaultTransitDays", Number(text(e)))}></s-number-field>
-            <s-number-field label="Grace period (hours)" min={0} max={168} value={String(s.graceHours)} onInput={(e) => set("graceHours", Number(text(e)))}></s-number-field>
-            <s-number-field label="Stalled after (hours without a scan)" min={24} max={336} value={String(s.stallHours)} onInput={(e) => set("stallHours", Number(text(e)))}></s-number-field>
+            <s-number-field label="Grace period (hours)" min={0} max={168} value={String(s.graceHours)} onInput={(e) => { set("graceHours", Number(text(e))); set("preset", "custom"); }}></s-number-field>
+            <s-number-field label="Stalled after (hours without a scan)" min={24} max={336} value={String(s.stallHours)} onInput={(e) => { set("stallHours", Number(text(e))); set("preset", "custom"); }}></s-number-field>
           </s-grid>
           <s-text-field
             label="Delivery time per carrier (optional)"
@@ -279,6 +309,30 @@ export default function SettingsPage() {
             max={14}
             value={String(s.extraTransitDays)}
             onInput={(e) => set("extraTransitDays", Number(text(e)))}
+          ></s-number-field>
+        </s-stack>
+      </s-section>
+
+      <s-section heading="VIP orders and carrier incidents">
+        <s-stack direction="block" gap="base">
+          <s-paragraph color="subdued">
+            VIP orders always wait for your approval, even on Autopilot, so a person handles your best customers.
+          </s-paragraph>
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
+            <s-text-field label="VIP order tags" placeholder="vip" value={s.vipTags} onInput={(e) => set("vipTags", text(e))}></s-text-field>
+            <s-number-field
+              label="…or order value of at least"
+              min={0}
+              value={String(s.vipMinOrderValue)}
+              onInput={(e) => set("vipMinOrderValue", Number(text(e)))}
+            ></s-number-field>
+          </s-grid>
+          <s-number-field
+            label="Call it a carrier incident when this many parcels with one carrier to one country run into trouble within 3 days"
+            min={2}
+            max={50}
+            value={String(s.incidentThreshold)}
+            onInput={(e) => set("incidentThreshold", Number(text(e)))}
           ></s-number-field>
         </s-stack>
       </s-section>

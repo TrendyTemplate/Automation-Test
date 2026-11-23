@@ -26,6 +26,12 @@ Delaywise checks a store's shipped orders every hour. When a parcel stalls, runs
 | Results | Apology discount redemptions and the revenue they brought back |
 | Bulk actions & CSV | Send/skip all drafts; export at-risk orders for carrier claims |
 | Learned delivery times | Suggests per-carrier transit days from the store's own deliveries; holiday buffer for peak season |
+| One-click setup | Pick a style (Gentle / Balanced / Proactive) and Autopilot on/off; the app applies defaults, runs the first scan and learns carrier times |
+| Carrier incidents | Detects when one carrier to one country fails for several parcels at once; handle all of them in one click |
+| VIP protection | VIP-tagged or high-value orders always wait for a person, even on Autopilot |
+| Mark as handled | Stop all emails/workflows for an order the team already resolved; undo anytime |
+| Activity log | Who sent, skipped or changed what, kept 180 days |
+| Security | Encrypted Shopify tokens, strict headers, rate limits, webhook de-duplication, production config checks: see docs/SECURITY.md |
 | Order-status notice | Customer-account block shows a localized delay notice on the customer's own order page (ownership verified) |
 | Klaviyo events | Optional: push "shipment at risk" / "delivered after delay" events to the merchant's Klaviyo (key encrypted) |
 

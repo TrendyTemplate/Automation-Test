@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -14,10 +14,14 @@ import { detectIncidents, INCIDENT_WINDOW_HOURS } from "../lib/incidents";
 import { sendMessage, setHandled } from "../services/notifier.server";
 import { actorFrom, audit } from "../services/audit.server";
 import { z } from "zod";
+import { PRESETS, type PresetId } from "../lib/presets";
+import { runQuickSetup } from "../services/quick-setup.server";
 
 /** S6: dashboard actions and their inputs. */
 const DashboardAction = z.object({
-  intent: z.enum(["scan", "export", "handle", "unhandle", "incident_send"]),
+  intent: z.enum(["scan", "export", "handle", "unhandle", "incident_send", "quick_setup"]),
+  preset: z.enum(["gentle", "balanced", "proactive"]).optional().default("balanced"),
+  autopilot: z.enum(["true", "false"]).optional().default("false"),
   ids: z
     .string()
     .max(20_000)
@@ -104,11 +108,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     settings: {
       mode: settings.mode,
       onboardingCompleted: settings.onboardingCompleted,
+      setupDone: Boolean(settings.setupDoneAt),
       lastScanAt: settings.lastScanAt ? settings.lastScanAt.toISOString() : null,
       lastScanError: settings.lastScanError,
     },
     roi,
-    plan: { label: plan.label, shipmentLimit: plan.shipmentLimit, includedPaidLookups: plan.includedPaidLookups },
+    plan: {
+      label: plan.label,
+      shipmentLimit: plan.shipmentLimit,
+      includedPaidLookups: plan.includedPaidLookups,
+      autopilot: plan.autopilot,
+    },
     usage: { shipmentsTracked: usage.shipmentsTracked, paidLookups: usage.paidLookups, messagesSent: usage.messagesSent },
     stats: {
       watching,
@@ -135,6 +145,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (!parsed.success) return { scanError: "Invalid request" };
   const { intent, ids } = parsed.data;
   const actor = actorFrom(sessionToken);
+
+  // U1: everything a new merchant needs, in one click.
+  if (intent === "quick_setup") {
+    const result = await runQuickSetup({
+      admin,
+      shop: session.shop,
+      preset: parsed.data.preset,
+      autopilot: parsed.data.autopilot === "true",
+      actor,
+    });
+    return { setup: { ...result, atRisk: result.summary?.atRisk ?? 0, seen: result.summary?.shipmentsSeen ?? 0 } };
+  }
 
   // U5: mark orders handled (or undo).
   if (intent === "handle" || intent === "unhandle") {
@@ -296,21 +318,7 @@ export default function Dashboard() {
         </s-banner>
       )}
 
-      {!data.settings.onboardingCompleted && (
-        <s-banner heading="Welcome! Three quick steps" tone="info">
-          <s-ordered-list>
-            <s-list-item>Click “Scan shipments now” to load your shipped orders from the last 45 days.</s-list-item>
-            <s-list-item>
-              Check your store name, reply-to email and tone in <s-link href="/app/settings">Settings</s-link>, then
-              preview a sample email.
-            </s-list-item>
-            <s-list-item>
-              Late parcels show up in <s-link href="/app/messages">Messages</s-link> for your approval, or go out
-              automatically in Autopilot mode.
-            </s-list-item>
-          </s-ordered-list>
-        </s-banner>
-      )}
+      {!data.settings.setupDone && <QuickSetup autopilotAllowed={data.plan.autopilot} />}
 
       {nearLimit && (
         <s-banner heading="You're close to your monthly shipment limit" tone="warning">
@@ -426,6 +434,72 @@ export default function Dashboard() {
         </s-paragraph>
       </s-section>
     </s-page>
+  );
+}
+
+/** U1: the whole setup on one card: pick a style, pick how emails go out, done. */
+function QuickSetup({ autopilotAllowed }: { autopilotAllowed: boolean }) {
+  const fetcher = useFetcher<typeof action>();
+  const shopify = useAppBridge();
+  const [preset, setPreset] = useState<PresetId>("balanced");
+  const [autopilot, setAutopilot] = useState(false);
+  const busy = fetcher.state !== "idle";
+
+  useEffect(() => {
+    const setup = fetcher.data && "setup" in fetcher.data ? fetcher.data.setup : undefined;
+    if (!setup) return;
+    const learned = setup.learnedCarriers.length ? ` Learned delivery times for ${setup.learnedCarriers.join(", ")}.` : "";
+    shopify.toast.show(
+      setup.scanned
+        ? `You're all set. Checked ${setup.seen} shipments; ${setup.atRisk} need attention.${learned}`
+        : `You're all set. Your first scan is already running.${learned}`,
+    );
+  }, [fetcher.data, shopify]);
+
+  return (
+    <s-section heading="Set up Delaywise in one click">
+      <s-stack direction="block" gap="base">
+        <s-paragraph>
+          Pick a style and how emails go out. Delaywise does the rest: it checks your shipped orders, learns how long
+          your carriers really take, and turns on the daily summary and the delivery notice on your customers&apos;
+          order page. You can change anything later in Settings.
+        </s-paragraph>
+        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
+          {(Object.keys(PRESETS) as PresetId[]).map((id) => (
+            <s-clickable
+              key={id}
+              onClick={() => setPreset(id)}
+              padding="base"
+              borderRadius="base"
+              border="base"
+              background={preset === id ? "subdued" : "transparent"}
+              accessibilityLabel={`Choose ${PRESETS[id].label}`}
+            >
+              <s-stack direction="block" gap="small-200">
+                <s-text type="strong">{`${preset === id ? "● " : "○ "}${PRESETS[id].label}`}</s-text>
+                <s-text color="subdued">{PRESETS[id].description}</s-text>
+              </s-stack>
+            </s-clickable>
+          ))}
+        </s-grid>
+        <s-checkbox
+          label={autopilotAllowed ? "Send emails automatically (Autopilot)" : "Send emails automatically (Autopilot, on paid plans)"}
+          details="Off: every email waits for your approval in Messages. VIP orders always wait for you."
+          checked={autopilot}
+          onChange={(e) => setAutopilot(Boolean((e.currentTarget as unknown as { checked: boolean }).checked))}
+          {...(autopilotAllowed ? {} : { disabled: true })}
+        ></s-checkbox>
+        <s-stack direction="inline" gap="base">
+          <s-button
+            variant="primary"
+            onClick={() => fetcher.submit({ intent: "quick_setup", preset, autopilot: String(autopilot) }, { method: "POST" })}
+            {...(busy ? { loading: true } : {})}
+          >
+            Set it up for me
+          </s-button>
+        </s-stack>
+      </s-stack>
+    </s-section>
   );
 }
 

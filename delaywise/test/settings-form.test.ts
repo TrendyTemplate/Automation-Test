@@ -43,6 +43,14 @@ describe("settings form", () => {
     expect(s.extraTransitDays).toBe(14);
   });
 
+  it("U2: records which style the thresholds match", () => {
+    const balanced = parseSettingsForm(form({ stallHours: "72", graceHours: "24", notifyOnStall: "true", notifyOnDelay: "true", notifyOnException: "true" }), PLANS.growth);
+    expect(balanced.preset).toBe("balanced");
+    const custom = parseSettingsForm(form({ stallHours: "80", graceHours: "24", notifyOnStall: "true", notifyOnDelay: "true", notifyOnException: "true", incidentThreshold: "1", vipMinOrderValue: "250" }), PLANS.growth);
+    expect(custom.preset).toBe("custom");
+    expect(custom.incidentThreshold).toBe(2);
+    expect(custom.vipMinOrderValue).toBe(250);
+  });
   it("keeps paid features off on the free plan", () => {
     const s = parseSettingsForm(form({ mode: "autopilot", compensationEnabled: "true" }), PLANS.free);
     expect(s.mode).toBe("approval");

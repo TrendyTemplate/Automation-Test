@@ -96,3 +96,28 @@ describe("U5 mark as handled", () => {
     expect(await setHandled("other.myshopify.com", [s.id], "x", true)).toBe(0);
   });
 });
+
+import { runQuickSetup } from "../app/services/quick-setup.server";
+
+describe("U1 one-click setup", () => {
+  it("applies the style, runs the first scan and learns carrier times", async () => {
+    const shop = `setup-${Date.now()}.myshopify.com`;
+    shops.push(shop);
+    await db.shopSettings.create({ data: { shop, merchantDigest: false } });
+    // Five delivered UPS parcels that took ~4 days teach the app UPS's real time.
+    for (let i = 0; i < 5; i++) {
+      await db.shipment.create({
+        data: { shop, orderId: `gid://shopify/Order/9${i}`, orderName: `#9${i}`, fulfillmentId: `f9${i}`, carrier: "UPS", trackingNumber: `T9${i}`,
+          shippedAt: new Date(NOW.getTime() - 10 * DAY), deliveredAt: new Date(NOW.getTime() - 6 * DAY), status: "DELIVERED" },
+      });
+    }
+    const result = await runQuickSetup({ admin: admin([order("20", [])]), shop, preset: "proactive", autopilot: true, actor: "Staff 1" });
+    expect(result.scanned).toBe(true);
+    expect(result.mode).toBe("autopilot"); // Growth plan
+    expect(result.learnedCarriers).toEqual(["UPS"]);
+    const s = await db.shopSettings.findUniqueOrThrow({ where: { shop } });
+    expect(s).toMatchObject({ preset: "proactive", stallHours: 48, graceHours: 8, merchantDigest: true, orderStatusNotice: true });
+    expect(s.setupDoneAt).not.toBeNull();
+    expect(JSON.parse(s.carrierTransitDays!)).toEqual({ ups: 3 });
+  });
+});

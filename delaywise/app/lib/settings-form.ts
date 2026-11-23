@@ -1,5 +1,6 @@
 import type { Plan } from "./plans";
 import { carrierTransitFromText } from "./rules";
+import { detectPreset } from "./presets";
 
 /**
  * Turns the settings form into safe database values: clamps numbers, trims
@@ -31,7 +32,21 @@ const bool = (form: FormLike, name: string) => form.get(name) === "true";
 export function parseSettingsForm(form: FormLike, plan: Plan) {
   const tone = String(form.get("tone"));
   const minOrderValue = Number(form.get("minOrderValue"));
+  const vipMin = Number(form.get("vipMinOrderValue"));
+  const thresholds = {
+    stallHours: clampInt(form.get("stallHours"), 24, 336, 72),
+    graceHours: clampInt(form.get("graceHours"), 0, 168, 24),
+    notifyOnStall: bool(form, "notifyOnStall"),
+    notifyOnDelay: bool(form, "notifyOnDelay"),
+    notifyOnException: bool(form, "notifyOnException"),
+  };
   return {
+    ...thresholds,
+    // U2: the style is whatever preset the thresholds match.
+    preset: detectPreset(thresholds),
+    vipTags: cleanText(form.get("vipTags"), 300),
+    vipMinOrderValue: Number.isFinite(vipMin) && vipMin > 0 ? Math.min(vipMin, 1_000_000) : 0,
+    incidentThreshold: clampInt(form.get("incidentThreshold"), 2, 50, 5),
     mode: form.get("mode") === "autopilot" && plan.autopilot ? "autopilot" : "approval",
     tone: ["friendly", "professional", "playful"].includes(tone) ? tone : "friendly",
     brandName: cleanText(form.get("brandName"), 80),
@@ -39,11 +54,6 @@ export function parseSettingsForm(form: FormLike, plan: Plan) {
     signature: cleanText(form.get("signature"), 200),
     brandInstructions: cleanText(form.get("brandInstructions"), 500),
     defaultTransitDays: clampInt(form.get("defaultTransitDays"), 1, 30, 5),
-    graceHours: clampInt(form.get("graceHours"), 0, 168, 24),
-    stallHours: clampInt(form.get("stallHours"), 24, 336, 72),
-    notifyOnStall: bool(form, "notifyOnStall"),
-    notifyOnDelay: bool(form, "notifyOnDelay"),
-    notifyOnException: bool(form, "notifyOnException"),
     deliveredFollowUp: bool(form, "deliveredFollowUp"),
     compensationEnabled: plan.compensation && bool(form, "compensationEnabled"),
     compensationPercent: clampInt(form.get("compensationPercent"), 1, 50, 10),
