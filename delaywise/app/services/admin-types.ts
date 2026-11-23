@@ -27,9 +27,10 @@ export class GraphqlError extends Error {
  * revoked. Never retried; the message tells the operator where to look.
  */
 export class AdminForbiddenError extends Error {
-  constructor() {
+  constructor(cause?: unknown) {
     super(
-      "Shopify refused the Admin API request (403). Check that this server's outgoing IP or ASN is in the app's IP allowlist in the Dev Dashboard.",
+      "Shopify refused the Admin API request (403). Check that this server's outgoing IP or ASN is in the app's IP allowlist in the Dev Dashboard, and that the app is still installed.",
+      cause === undefined ? undefined : { cause },
     );
   }
 }
@@ -69,7 +70,7 @@ export async function gql<T>(
       if (error instanceof AdminForbiddenError) throw error;
       // The Shopify library throws its own error object for HTTP failures.
       const code = (error as { response?: { code?: number } } | null)?.response?.code;
-      if (code === 403) throw new AdminForbiddenError();
+      if (code === 403) throw new AdminForbiddenError(error);
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
       if (!isThrottle(message) || attempt === MAX_ATTEMPTS) throw error;

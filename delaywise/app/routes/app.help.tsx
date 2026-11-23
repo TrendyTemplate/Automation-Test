@@ -25,7 +25,7 @@ const FAQ: { q: string; a: string }[] = [
   },
   {
     q: "Where does the tracking information come from?",
-    a: "From the tracking numbers on your Shopify fulfillments. If Shopify has no recent update, Delaywise asks a tracking service (included in your plan).",
+    a: "From the tracking numbers on your Shopify fulfillments. On paid plans, if Shopify has no recent update, Delaywise also asks a tracking service (a set number of lookups each month is included).",
   },
   {
     q: "What does a “carrier problem” alert mean?",
@@ -45,9 +45,15 @@ export default function Help() {
   const askForReview = async () => {
     try {
       const result = await shopify.reviews.request();
-      if (!result.success) setReviewNote("Thanks! Shopify will show the review form a little later.");
+      if (!result.success) {
+        setReviewNote(
+          result.code === "already-reviewed"
+            ? "You've already reviewed Delaywise. Thank you!"
+            : "Shopify can't show the review form right now. Please try again another day.",
+        );
+      }
     } catch {
-      setReviewNote("Thanks! Shopify will show the review form a little later.");
+      setReviewNote("Shopify can't show the review form right now. Please try again another day.");
     }
   };
 

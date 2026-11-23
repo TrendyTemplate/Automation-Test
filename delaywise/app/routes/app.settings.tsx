@@ -129,7 +129,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // F8 + M6: tests only ever go to the store's own saved address.
     const to = settings.digestEmail ?? settings.replyToEmail;
-    if (!to) return { testError: "Save a summary email address under “Daily summary” first." };
+    if (!to) return { testError: "Add your email under “The basics” (daily summary) or a reply-to email first." };
     try {
       await sendEmail({
         to,
@@ -240,15 +240,15 @@ export default function SettingsPage() {
           </s-select>
           <s-text-field label="Store name shown to customers" value={s.brandName} onInput={(e) => set("brandName", text(e))}></s-text-field>
           <s-text-field label="Sign emails as" placeholder="The Acme team" value={s.signature} onInput={(e) => set("signature", text(e))}></s-text-field>
-          <s-email-field
-            label="Send my daily summary to"
-            details="Only on days when something needs you. Leave empty to turn it off."
-            value={s.digestEmail}
-            onInput={(e) => {
-              const v = text(e);
-              setS((prev) => ({ ...prev, digestEmail: v, merchantDigest: v.trim() !== "" }));
-            }}
-          ></s-email-field>
+          <s-switch
+            label="Email me a daily summary"
+            details="Only on days when something needs you."
+            checked={s.merchantDigest}
+            onChange={(e) => set("merchantDigest", checked(e))}
+          ></s-switch>
+          {s.merchantDigest && (
+            <s-email-field label="Summary email address" value={s.digestEmail} onInput={(e) => set("digestEmail", text(e))}></s-email-field>
+          )}
         </s-stack>
       </s-section>
 

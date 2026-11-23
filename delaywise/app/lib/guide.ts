@@ -16,6 +16,7 @@ export interface GuideStep {
 export interface GuideInput {
   guideDone: string | null;
   digestEmail: string | null;
+  merchantDigest: boolean;
   orderStatusNotice: boolean;
   /** The store's tracking page, e.g. https://acme.myshopify.com/apps/track */
   trackUrl?: string;
@@ -39,7 +40,7 @@ export function guideSteps(input: GuideInput): GuideStep[] {
       title: "Get a daily summary by email",
       detail: "One short email on days when something needs you. Nothing on quiet days.",
       action: { label: "Add my email", href: "/app/settings" },
-      done: Boolean(input.digestEmail?.trim()) || done.has("summary"),
+      done: (input.merchantDigest && Boolean(input.digestEmail?.trim())) || done.has("summary"),
     },
     {
       id: "test",
@@ -51,7 +52,7 @@ export function guideSteps(input: GuideInput): GuideStep[] {
     {
       id: "tracking",
       title: "Add the tracking page to your store",
-      detail: `Customers type their order number and email to see where their parcel is. Add ${input.trackUrl ?? "/apps/track"} to your store menu.`,
+      detail: `Customers type their order number and email to see where their parcel is. In Online Store → Navigation, add a menu link to ${input.trackUrl ?? "/apps/track"}.`,
       action: { label: "Open navigation", href: "shopify://admin/menus", external: true },
       done: done.has("tracking"),
     },

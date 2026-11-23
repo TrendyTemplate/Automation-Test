@@ -60,7 +60,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // L5: counts and aggregates instead of loading every shipment.
   const openWhere = { shop, status: { notIn: ["DELIVERED", "CANCELED"] } };
   const atRiskWhere = { ...openWhere, risk: { in: AT_RISK } };
-  const [watching, flagged, atRiskTotals, anyShipment, pendingCount, sentCount, totalShipments, roi] = await Promise.all([
+  const [openAtRisk, watching, flagged, atRiskTotals, anyShipment, pendingCount, sentCount, totalShipments, roi] = await Promise.all([
+    db.shipment.count({ where: { ...atRiskWhere, handledAt: null } }),
     db.shipment.count({ where: openWhere }),
     db.shipment.findMany({
       where: { ...openWhere, risk: { not: "none" } },
@@ -130,6 +131,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     stats: {
       watching,
       atRiskOrders: money.orders,
+      openAtRisk,
       atRiskValue: money.value.toFixed(2),
       currency: anyShipment?.currency ?? "",
       pendingCount,
@@ -291,8 +293,7 @@ export default function Dashboard() {
   const scan = () => fetcher.submit({ intent: "scan" }, { method: "POST" });
   const { stats, usage, plan } = data;
   const nearLimit = usage.shipmentsTracked >= plan.shipmentLimit * 0.9;
-  const open = data.atRisk.filter((s) => !s.handled);
-  const headline = headlineFor(stats, open.length, data.settings.mode === "autopilot");
+  const headline = headlineFor(stats, stats.openAtRisk, data.settings.mode === "autopilot");
 
   if (!data.settings.setupDone) {
     return (

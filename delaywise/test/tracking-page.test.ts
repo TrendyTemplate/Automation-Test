@@ -104,3 +104,35 @@ describe("T1 tracking page: lookup", () => {
     expect(r.kind === "order" && r.shipped === false && r.parcels.length === 0).toBe(true);
   });
 });
+
+describe("T1 review fixes", () => {
+  const shop = `track2-${Date.now()}.myshopify.com`;
+  const base = { name: "#2001", email: "a@b.co", customerLocale: "en", cancelledAt: null };
+  const admin = (nodes: unknown[]) => ({
+    graphql: async () => new Response(JSON.stringify({ data: { orders: { nodes } } })),
+  });
+
+  it("doesn't call an on-hold order shipped", async () => {
+    const r = await trackOrder({ admin: admin([{ ...base, id: "gid://shopify/Order/9001", displayFulfillmentStatus: "ON_HOLD", fulfillments: [] }]), shop, orderInput: "2001", emailInput: "a@b.co", lang: "en" });
+    expect(r.kind === "order" && r.shipped).toBe(false);
+  });
+  it("falls back to Shopify's own tracking for orders never scanned", async () => {
+    const r = await trackOrder({
+      admin: admin([{ ...base, id: "gid://shopify/Order/9002", displayFulfillmentStatus: "FULFILLED", fulfillments: [
+        { displayStatus: "OUT_FOR_DELIVERY", estimatedDeliveryAt: null, trackingInfo: [{ company: "UPS", number: "1Z", url: "https://ups.com/t" }] },
+        { displayStatus: "CANCELED", estimatedDeliveryAt: null, trackingInfo: [] },
+      ] }]),
+      shop, orderInput: "2001", emailInput: "a@b.co", lang: "en",
+    });
+    expect(r.kind).toBe("order");
+    if (r.kind === "order") {
+      expect(r.parcels).toHaveLength(1);
+      expect(r.parcels[0]).toMatchObject({ carrier: "UPS", status: "OUT_FOR_DELIVERY" });
+    }
+  });
+  it("shows canceled orders as canceled", () => {
+    const html = renderTrackPage({ kind: "order", orderName: "#1", shipped: false, canceled: true, parcels: [], notice: null }, "en", "/apps/track");
+    expect(html).toContain("Canceled");
+    expect(html).not.toContain("hasn't shipped");
+  });
+});

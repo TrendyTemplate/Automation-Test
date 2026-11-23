@@ -275,6 +275,7 @@ export type TrackResult =
       kind: "order";
       orderName: string;
       shipped: boolean;
+      canceled?: boolean;
       parcels: TrackParcel[];
       notice: string | null;
     };
@@ -321,10 +322,12 @@ export function renderTrackPage(result: TrackResult, lang: TrackLang, action: st
   } else {
     parts.push(`<p class="dw-muted">${esc(result.orderName)}</p>`);
     if (result.notice) parts.push(`<div class="dw-notice" role="status">${esc(result.notice)}</div>`);
-    if (!result.parcels.length) {
+    if (result.canceled) {
+      parts.push(`<div class="dw-card"><p class="dw-status">${esc(s.status.canceled)}</p></div>`);
+    } else if (!result.parcels.length) {
       parts.push(`<div class="dw-card"><p>${esc(result.shipped ? s.noTracking : s.notShipped)}</p></div>`);
     }
-    result.parcels.forEach((p, i) => {
+    if (!result.canceled) result.parcels.forEach((p, i) => {
       const label = s.status[statusKey(p.status, p.risk)];
       const link = safeUrl(p.trackingUrl);
       const meta = [p.carrier, p.trackingNumber].filter(Boolean).map(esc).join(" · ");

@@ -11,6 +11,40 @@ interface LookupOrder {
   email: string | null;
   customerLocale: string | null;
   displayFulfillmentStatus: string;
+  cancelledAt: string | null;
+  fulfillments: {
+    displayStatus: string | null;
+    estimatedDeliveryAt: string | null;
+    trackingInfo: { company: string | null; number: string | null; url: string | null }[];
+  }[];
+}
+
+const SHIPPED = new Set(["FULFILLED", "PARTIALLY_FULFILLED", "RESTOCKED"]);
+
+/** Fulfillment display status → our status codes, for orders the app hasn't scanned. */
+function fulfillmentStatus(display: string | null): string {
+  switch (display) {
+    case "DELIVERED":
+    case "PICKED_UP":
+      return "DELIVERED";
+    case "OUT_FOR_DELIVERY":
+      return "OUT_FOR_DELIVERY";
+    case "READY_FOR_PICKUP":
+      return "PICKUP_READY";
+    case "ATTEMPTED_DELIVERY":
+      return "ATTEMPTED";
+    case "FAILURE":
+    case "NOT_DELIVERED":
+      return "EXCEPTION";
+    case "CANCELED":
+      return "CANCELED";
+    case "LABEL_PRINTED":
+    case "LABEL_PURCHASED":
+    case "CONFIRMED":
+      return "PRE_TRANSIT";
+    default:
+      return "IN_TRANSIT";
+  }
 }
 
 function sameEmail(a: string, b: string): boolean {
@@ -61,18 +95,32 @@ export async function trackOrder(args: {
     }),
   ]);
   const notice = settings?.orderStatusNotice === false ? null : customerNotice(shipments, args.lang);
+  // Orders Delaywise never scanned (older, or over the plan's limit) still show Shopify's own tracking.
+  const parcels = shipments.length
+    ? shipments.map(({ carrier, trackingNumber, trackingUrl, status, risk, expectedBy }) => ({
+        carrier,
+        trackingNumber,
+        trackingUrl,
+        status,
+        risk,
+        expectedBy,
+      }))
+    : (order.fulfillments ?? [])
+        .filter((f) => f.displayStatus !== "CANCELED" && f.displayStatus !== "LABEL_VOIDED")
+        .map((f) => ({
+          carrier: f.trackingInfo[0]?.company ?? null,
+          trackingNumber: f.trackingInfo[0]?.number ?? null,
+          trackingUrl: f.trackingInfo[0]?.url ?? null,
+          status: fulfillmentStatus(f.displayStatus),
+          risk: "none",
+          expectedBy: f.estimatedDeliveryAt ? new Date(f.estimatedDeliveryAt) : null,
+        }));
   return {
     kind: "order",
     orderName: order.name,
-    shipped: order.displayFulfillmentStatus !== "UNFULFILLED",
-    parcels: shipments.map(({ carrier, trackingNumber, trackingUrl, status, risk, expectedBy }) => ({
-      carrier,
-      trackingNumber,
-      trackingUrl,
-      status,
-      risk,
-      expectedBy,
-    })),
+    shipped: SHIPPED.has(order.displayFulfillmentStatus) || parcels.length > 0,
+    canceled: Boolean(order.cancelledAt),
+    parcels,
     notice: notice?.text ?? null,
   };
 }

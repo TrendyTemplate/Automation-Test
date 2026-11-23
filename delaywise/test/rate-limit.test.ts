@@ -9,3 +9,16 @@ describe("M6 daily limiter", () => {
     expect(allowDaily("shop-a:test", 2, new Date("2026-11-21T00:00:01Z"))).toBe(true);
   });
 });
+
+describe("rate limit memory", () => {
+  it("forgets earlier days and counts without recording", async () => {
+    const { allowDaily, dailyCount, bucketCountForTests } = await import("../app/lib/rate-limit");
+    const d1 = new Date("2026-01-01T10:00:00Z");
+    const d2 = new Date("2026-01-02T10:00:00Z");
+    for (let i = 0; i < 100; i++) allowDaily(`spoof-${i}`, 5, d1);
+    expect(dailyCount("spoof-1", d1)).toBe(1);
+    expect(dailyCount("spoof-1", d1)).toBe(1);
+    allowDaily("fresh", 5, d2);
+    expect(bucketCountForTests()).toBe(1);
+  });
+});

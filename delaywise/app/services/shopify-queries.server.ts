@@ -116,6 +116,16 @@ export const TRACK_ORDER_LOOKUP_QUERY = `#graphql
         email
         customerLocale
         displayFulfillmentStatus
+        cancelledAt
+        fulfillments(first: 5) {
+          displayStatus
+          estimatedDeliveryAt
+          trackingInfo(first: 1) {
+            company
+            number
+            url
+          }
+        }
       }
     }
   }`;

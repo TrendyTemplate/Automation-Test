@@ -7,7 +7,7 @@ import { getPlan, type Plan } from "../lib/plans";
 import type { MessageKind } from "../lib/risk";
 import { inSendWindow, nextSendTime } from "../lib/rules";
 import { isFinal, type ShipmentStatus } from "../lib/status";
-import { GraphqlError, gql, type AdminApi } from "./admin-types";
+import { AdminForbiddenError, GraphqlError, gql, type AdminApi } from "./admin-types";
 import { writeDelayEmail } from "./ai-writer.server";
 import { sendEmail } from "./email.server";
 import { getUsage } from "./settings.server";
@@ -157,6 +157,9 @@ export async function createNotification(args: {
 function describeSendError(error: unknown): string {
   if (error instanceof GraphqlError && error.accessDenied) {
     return "Shopify hasn't approved this app to read customer emails yet (Partner Dashboard → API access → Protected customer data).";
+  }
+  if (error instanceof AdminForbiddenError) {
+    return "Shopify didn't let Delaywise read this order right now. It will try again; if this keeps happening, contact Delaywise support.";
   }
   return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }
