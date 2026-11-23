@@ -1,0 +1,124 @@
+// Delaywise data model.
+// Privacy by design: we never store customer names, emails, phone numbers or
+// addresses. Customer contact details are fetched from Shopify at send time
+// and discarded. Only order/fulfillment identifiers and shipping status live here.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// SQLite for local development. Switch to "postgresql" for production
+// (see docs/DEPLOY.md).
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model ShopSettings {
+  shop                     String   @id
+  plan                     String   @default("free") // free | starter | growth | pro
+  mode                     String   @default("approval") // approval | autopilot
+  tone                     String   @default("friendly") // friendly | professional | playful
+  shopCountry              String? // ISO code, used to tell domestic from international
+  shopName                 String?
+  brandName                String?
+  replyToEmail             String?
+  signature                String?
+  defaultTransitDays       Int      @default(5)
+  graceHours               Int      @default(24)
+  stallHours               Int      @default(72)
+  notifyOnStall            Boolean  @default(true)
+  notifyOnDelay            Boolean  @default(true)
+  notifyOnException        Boolean  @default(true)
+  compensationEnabled      Boolean  @default(false)
+  compensationPercent      Int      @default(10)
+  compensationMinDaysLate  Int      @default(3)
+  onboardingCompleted      Boolean  @default(false)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+}
+
+model Shipment {
+  id               String    @id @default(cuid())
+  shop             String
+  orderId          String // Shopify GID
+  orderName        String
+  orderValue       Float     @default(0)
+  currency         String    @default("USD")
+  fulfillmentId    String // Shopify GID
+  carrier          String?
+  trackingNumber   String?
+  trackingUrl      String?
+  customerLocale   String? // e.g. "de", "fr-CA" (not personal data)
+  destinationCountry String? // ISO country code only
+  shippedAt        DateTime
+  expectedBy       DateTime?
+  status           String    @default("UNKNOWN") // normalized, see app/lib/status.ts
+  lastEventAt      DateTime?
+  lastCheckedAt    DateTime?
+  deliveredAt      DateTime?
+  source           String    @default("shopify") // shopify | ship24
+  externalTrackerId String?
+  risk             String    @default("none") // none | watch | stalled | delayed | exception | lost
+  riskReason       String?
+  riskSince        DateTime?
+  notifiedRisk     String? // highest risk level the customer was already told about
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  messages         Message[]
+
+  @@unique([shop, fulfillmentId])
+  @@index([shop, risk])
+  @@index([shop, status])
+}
+
+model Message {
+  id           String    @id @default(cuid())
+  shop         String
+  shipmentId   String
+  shipment     Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  kind         String // stalled | delayed | exception | lost
+  language     String
+  subject      String
+  body         String
+  generatedBy  String    @default("ai") // ai | template
+  discountCode String?
+  status       String    @default("pending_approval") // pending_approval | sent | skipped | failed
+  error        String?
+  createdAt    DateTime  @default(now())
+  sentAt       DateTime?
+
+  @@index([shop, status])
+}
+
+model UsageMonth {
+  id               String @id @default(cuid())
+  shop             String
+  month            String // "2026-11"
+  shipmentsTracked Int    @default(0)
+  paidLookups      Int    @default(0)
+  messagesSent     Int    @default(0)
+  overageBilled    Int    @default(0) // paid lookups already reported as usage charges
+
+  @@unique([shop, month])
+}

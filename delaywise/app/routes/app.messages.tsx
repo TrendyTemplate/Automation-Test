@@ -1,0 +1,176 @@
+import { useEffect, useState } from "react";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+import { languageName } from "../lib/language";
+import { sendMessage, skipMessage } from "../services/notifier.server";
+
+const KIND_LABEL: Record<string, string> = {
+  stalled: "Stalled",
+  delayed: "Late",
+  exception: "Carrier problem",
+  lost: "Probably lost",
+};
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+  const [pending, recent] = await Promise.all([
+    db.message.findMany({
+      where: { shop, status: { in: ["pending_approval", "failed"] } },
+      include: { shipment: true },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
+    db.message.findMany({
+      where: { shop, status: { in: ["sent", "skipped"] } },
+      include: { shipment: true },
+      orderBy: { createdAt: "desc" },
+      take: 30,
+    }),
+  ]);
+  const shape = (m: (typeof pending)[number]) => ({
+    id: m.id,
+    orderName: m.shipment.orderName,
+    kind: m.kind,
+    language: languageName(m.language),
+    subject: m.subject,
+    body: m.body,
+    status: m.status,
+    error: m.error,
+    discountCode: m.discountCode,
+    generatedBy: m.generatedBy,
+    createdAt: m.createdAt.toISOString().slice(0, 16).replace("T", " "),
+    sentAt: m.sentAt ? m.sentAt.toISOString().slice(0, 16).replace("T", " ") : null,
+  });
+  return { pending: pending.map(shape), recent: recent.map(shape) };
+};
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { admin, session } = await authenticate.admin(request);
+  const form = await request.formData();
+  const id = String(form.get("id") ?? "");
+  const intent = String(form.get("intent") ?? "");
+
+  const message = await db.message.findFirst({ where: { id, shop: session.shop } });
+  if (!message) return { ok: false, error: "Message not found" };
+
+  if (intent === "skip") {
+    await skipMessage(session.shop, id);
+    return { ok: true, intent };
+  }
+  const result = await sendMessage(admin, id, {
+    subject: String(form.get("subject") ?? ""),
+    body: String(form.get("body") ?? ""),
+  });
+  return { ...result, intent };
+};
+
+export default function Messages() {
+  const { pending, recent } = useLoaderData<typeof loader>();
+
+  return (
+    <s-page heading="Customer messages">
+      <s-section heading={`Waiting for approval (${pending.length})`}>
+        {pending.length === 0 ? (
+          <s-paragraph color="subdued">
+            No messages waiting. When a parcel runs into trouble, its draft appears here.
+          </s-paragraph>
+        ) : (
+          <s-stack direction="block" gap="base">
+            {pending.map((m) => (
+              <PendingMessage key={m.id} message={m} />
+            ))}
+          </s-stack>
+        )}
+      </s-section>
+
+      <s-section heading="History">
+        {recent.length === 0 ? (
+          <s-paragraph color="subdued">Nothing sent yet.</s-paragraph>
+        ) : (
+          <s-table>
+            <s-table-header-row>
+              <s-table-header listSlot="primary">Order</s-table-header>
+              <s-table-header>Type</s-table-header>
+              <s-table-header>Language</s-table-header>
+              <s-table-header>Subject</s-table-header>
+              <s-table-header>Status</s-table-header>
+            </s-table-header-row>
+            <s-table-body>
+              {recent.map((m) => (
+                <s-table-row key={m.id}>
+                  <s-table-cell>{m.orderName}</s-table-cell>
+                  <s-table-cell>{KIND_LABEL[m.kind] ?? m.kind}</s-table-cell>
+                  <s-table-cell>{m.language}</s-table-cell>
+                  <s-table-cell>{m.subject}</s-table-cell>
+                  <s-table-cell>
+                    <s-badge tone={m.status === "sent" ? "success" : "neutral"}>
+                      {m.status === "sent" ? `Sent ${m.sentAt ?? ""}` : "Skipped"}
+                    </s-badge>
+                  </s-table-cell>
+                </s-table-row>
+              ))}
+            </s-table-body>
+          </s-table>
+        )}
+      </s-section>
+    </s-page>
+  );
+}
+
+type MessageView = ReturnType<typeof useLoaderData<typeof loader>>["pending"][number];
+
+function PendingMessage({ message: m }: { message: MessageView }) {
+  const fetcher = useFetcher<typeof action>();
+  const shopify = useAppBridge();
+  const busy = fetcher.state !== "idle";
+  const [subject, setSubject] = useState(m.subject);
+  const [body, setBody] = useState(m.body);
+  const valueOf = (e: Event) => (e.currentTarget as HTMLInputElement).value;
+  const submit = (intent: "send" | "skip") =>
+    fetcher.submit({ id: m.id, intent, subject, body }, { method: "post" });
+
+  useEffect(() => {
+    if (!fetcher.data) return;
+    if (fetcher.data.ok) {
+      shopify.toast.show("intent" in fetcher.data && fetcher.data.intent === "skip" ? "Message skipped" : "Email sent");
+    } else {
+      shopify.toast.show(fetcher.data.error ?? "Could not send", { isError: true });
+    }
+  }, [fetcher.data, shopify]);
+
+  return (
+    <s-box padding="base" border="base" borderRadius="base">
+      <s-stack direction="block" gap="base">
+          <s-stack direction="inline" gap="small" alignItems="center">
+            <s-text type="strong">{m.orderName}</s-text>
+            <s-badge tone="warning">{KIND_LABEL[m.kind] ?? m.kind}</s-badge>
+            <s-badge>{m.language}</s-badge>
+            {m.discountCode && <s-badge tone="success">Discount {m.discountCode}</s-badge>}
+            {m.generatedBy === "template" && <s-badge tone="neutral">Template</s-badge>}
+          </s-stack>
+          {m.status === "failed" && m.error && (
+            <s-banner tone="critical" heading="Last attempt failed">
+              {m.error}
+            </s-banner>
+          )}
+          <s-text-field label="Subject" value={subject} onInput={(e) => setSubject(valueOf(e))}></s-text-field>
+          <s-text-area label="Email" rows={8} value={body} onInput={(e) => setBody(valueOf(e))}></s-text-area>
+          <s-stack direction="inline" gap="base">
+            <s-button variant="primary" onClick={() => submit("send")} {...(busy ? { loading: true } : {})}>
+              Send to customer
+            </s-button>
+            <s-button onClick={() => submit("skip")} {...(busy ? { disabled: true } : {})}>
+              Skip
+            </s-button>
+          </s-stack>
+        </s-stack>
+    </s-box>
+  );
+}
+
+export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);

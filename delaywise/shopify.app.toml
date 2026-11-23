@@ -1,0 +1,41 @@
+# Delaywise app configuration.
+# `client_id`, `application_url` and the redirect URLs are filled in by
+# `shopify app config link` / `shopify app deploy` (see docs/SETUP_BN.md).
+client_id = ""
+name = "Delaywise"
+handle = "delaywise"
+application_url = "https://example.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+include_config_on_deploy = true
+
+[access_scopes]
+# read_orders: shipped orders and fulfillment tracking status.
+# write_discounts: optional single-use apology discount codes.
+# The customer email (protected customer data, level 2) must also be
+# requested in the Partner Dashboard → API access → Protected customer data.
+scopes = "read_orders,write_discounts"
+
+[auth]
+redirect_urls = ["https://example.com/auth/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = ["app/scopes_update"]
+
+  # Mandatory privacy webhooks for public apps.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/compliance"
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+
+[pos]
+embedded = false
