@@ -17,6 +17,7 @@ interface ShopInfo {
     name: string;
     contactEmail: string;
     myshopifyDomain: string;
+    ianaTimezone: string;
     billingAddress: { countryCodeV2: string | null };
   };
   currentAppInstallation: {
@@ -42,6 +43,8 @@ export async function refreshShopInfo(admin: AdminApi, shop: string): Promise<Sh
       shopName: data.shop.name,
       shopCountry: data.shop.billingAddress.countryCodeV2 ?? current.shopCountry,
       replyToEmail: current.replyToEmail ?? data.shop.contactEmail,
+      digestEmail: current.digestEmail ?? data.shop.contactEmail,
+      timezone: data.shop.ianaTimezone || current.timezone,
       plan: plan.id,
     },
   });

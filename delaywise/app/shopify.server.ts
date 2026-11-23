@@ -6,6 +6,7 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
+import { syncShop } from "./services/sync.server";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
@@ -16,6 +17,17 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
+  hooks: {
+    // F12: run the first scan right after install so the dashboard is useful
+    // within a minute. Runs in the background; auth never waits for it.
+    afterAuth: async ({ session, admin }) => {
+      const settings = await prisma.shopSettings.findUnique({ where: { shop: session.shop } });
+      if (settings?.lastScanAt) return;
+      void syncShop(admin, session.shop).catch((error) =>
+        console.error(`[afterAuth] first scan failed for ${session.shop}`, error),
+      );
+    },
+  },
   future: {
     expiringOfflineAccessTokens: true,
   },

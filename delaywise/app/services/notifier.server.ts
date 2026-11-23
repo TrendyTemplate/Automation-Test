@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import db from "../db.server";
 import { baseLanguage } from "../lib/language";
 import type { Plan } from "../lib/plans";
-import type { NotifiableRisk } from "../lib/risk";
+import type { MessageKind } from "../lib/risk";
+import { inSendWindow, nextSendTime } from "../lib/rules";
 import { gql, type AdminApi } from "./admin-types";
 import { writeDelayEmail } from "./ai-writer.server";
 import { sendEmail } from "./email.server";
@@ -48,12 +49,14 @@ export async function createSorryDiscount(
 export async function createNotification(args: {
   admin: AdminApi;
   shipment: Shipment;
-  kind: NotifiableRisk;
+  kind: MessageKind;
   daysLate: number;
   settings: ShopSettings;
   plan: Plan;
+  now?: Date;
 }): Promise<string> {
   const { admin, shipment, kind, daysLate, settings, plan } = args;
+  const now = args.now ?? new Date();
   const storeName = settings.brandName || settings.shopName || "Our store";
 
   let discount: { code: string; percent: number } | null = null;
@@ -78,6 +81,7 @@ export async function createNotification(args: {
     daysLate,
     discount,
     signature: settings.signature,
+    brandInstructions: settings.brandInstructions,
   });
 
   const message = await db.message.create({
@@ -92,10 +96,24 @@ export async function createNotification(args: {
       discountCode: discount?.code ?? null,
     },
   });
-  await db.shipment.update({ where: { id: shipment.id }, data: { notifiedRisk: kind } });
+  await db.shipment.update({
+    where: { id: shipment.id },
+    data: kind === "delivered" ? { followUpSent: true } : { notifiedRisk: kind },
+  });
 
   if (settings.mode === "autopilot" && plan.autopilot) {
-    await sendMessage(admin, message.id);
+    // F6: respect the send window; otherwise queue until it opens.
+    if (inSendWindow(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd)) {
+      await sendMessage(admin, message.id);
+    } else {
+      await db.message.update({
+        where: { id: message.id },
+        data: {
+          status: "scheduled",
+          scheduledFor: nextSendTime(now, settings.timezone, settings.sendWindowStart, settings.sendWindowEnd),
+        },
+      });
+    }
   }
   return message.id;
 }
@@ -160,9 +178,23 @@ export async function sendMessage(
   }
 }
 
+/** F6: send queued autopilot emails whose send window has opened. */
+export async function sendDueScheduled(admin: AdminApi, shop: string, now = new Date()): Promise<number> {
+  const due = await db.message.findMany({
+    where: { shop, status: "scheduled", scheduledFor: { lte: now } },
+    take: 100,
+  });
+  let sent = 0;
+  for (const m of due) {
+    const result = await sendMessage(admin, m.id);
+    if (result.ok) sent++;
+  }
+  return sent;
+}
+
 export async function skipMessage(shop: string, messageId: string): Promise<void> {
   await db.message.updateMany({
-    where: { id: messageId, shop, status: { in: ["pending_approval", "failed"] } },
+    where: { id: messageId, shop, status: { in: ["pending_approval", "failed", "scheduled"] } },
     data: { status: "skipped" },
   });
 }

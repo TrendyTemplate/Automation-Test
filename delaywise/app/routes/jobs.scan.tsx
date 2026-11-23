@@ -3,6 +3,8 @@ import { timingSafeEqual } from "node:crypto";
 import db from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import { syncShop } from "../services/sync.server";
+import { applyRetention } from "../services/retention.server";
+import { maybeSendDigest } from "../services/digest.server";
 
 /**
  * Hourly scan of every installed shop. Call from an external scheduler
@@ -33,12 +35,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     try {
       const { admin } = await unauthenticated.admin(shop);
       const summary = await syncShop(admin, shop);
+      await maybeSendDigest(shop).catch((error) => console.error(`[digest] ${shop}`, error));
       results.push({ shop, ok: true, atRisk: summary.atRisk, messages: summary.messagesCreated });
     } catch (error) {
       results.push({ shop, ok: false, error: error instanceof Error ? error.message : String(error) });
     }
   }
-  return Response.json({ shops: results.length, results });
+  const retention = await applyRetention();
+  return Response.json({ shops: results.length, results, retention });
 };
 
 export const loader = () => new Response("Method Not Allowed", { status: 405 });

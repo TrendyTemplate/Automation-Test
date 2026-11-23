@@ -54,6 +54,27 @@ model ShopSettings {
   compensationPercent      Int      @default(10)
   compensationMinDaysLate  Int      @default(3)
   onboardingCompleted      Boolean  @default(false)
+  // F4: extra instructions for the AI writer (merchant-provided, treated as data).
+  brandInstructions        String?
+  // F5: exclusions. Comma-separated tags / ISO country codes.
+  excludedTags             String?
+  excludedCountries        String?
+  minOrderValue            Float    @default(0)
+  // F6: send window in the shop's timezone (hours 0-23). Equal values = any time.
+  timezone                 String?
+  sendWindowStart          Int      @default(8)
+  sendWindowEnd            Int      @default(20)
+  // F7: per-carrier transit days, JSON object {"usps": 5, "dhl express": 2}.
+  carrierTransitDays       String?
+  // F2 / F3 / F1
+  deliveredFollowUp        Boolean  @default(true)
+  merchantDigest           Boolean  @default(true)
+  digestEmail              String?
+  lastDigestAt             DateTime?
+  flowTriggerEnabled       Boolean  @default(true)
+  // F12
+  lastScanAt               DateTime?
+  lastScanError            String?
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 }
@@ -83,6 +104,9 @@ model Shipment {
   riskReason       String?
   riskSince        DateTime?
   notifiedRisk     String? // highest risk level the customer was already told about
+  followUpSent     Boolean   @default(false) // F2
+  excluded         Boolean   @default(false) // F5
+  excludedReason   String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   messages         Message[]
@@ -97,13 +121,18 @@ model Message {
   shop         String
   shipmentId   String
   shipment     Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
-  kind         String // stalled | delayed | exception | lost
+  kind         String // stalled | delayed | exception | lost | delivered
   language     String
   subject      String
   body         String
   generatedBy  String    @default("ai") // ai | template
   discountCode String?
-  status       String    @default("pending_approval") // pending_approval | sent | skipped | failed
+  status       String    @default("pending_approval") // pending_approval | scheduled | sent | skipped | failed
+  scheduledFor DateTime? // F6: autopilot emails waiting for the send window
+  // F11: discount redemption
+  discountRedeemedAt DateTime?
+  discountOrderName  String?
+  discountOrderValue Float?
   error        String?
   createdAt    DateTime  @default(now())
   sentAt       DateTime?

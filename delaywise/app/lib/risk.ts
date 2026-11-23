@@ -6,6 +6,9 @@ export type Risk = "none" | "watch" | "stalled" | "delayed" | "exception" | "los
 /** Message kinds the customer can be told about. */
 export type NotifiableRisk = Extract<Risk, "stalled" | "delayed" | "exception" | "lost">;
 
+/** Everything a customer email can be about, including the F2 follow-up. */
+export type MessageKind = NotifiableRisk | "delivered";
+
 const RANK: Record<Risk, number> = {
   none: 0,
   watch: 1,

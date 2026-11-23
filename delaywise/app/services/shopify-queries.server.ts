@@ -9,6 +9,7 @@ export const SHOP_INFO_QUERY = `#graphql
       name
       contactEmail
       myshopifyDomain
+      ianaTimezone
       billingAddress {
         countryCodeV2
       }
@@ -31,7 +32,10 @@ export const SHIPPED_ORDERS_QUERY = `#graphql
       }
       nodes {
         id
+        legacyResourceId
         name
+        tags
+        cancelledAt
         customerLocale
         totalPriceSet {
           shopMoney {
@@ -87,9 +91,39 @@ export const CREATE_DISCOUNT_MUTATION = `#graphql
     }
   }`;
 
+/** F11: find orders that used apology discount codes. */
+export const DISCOUNT_REDEMPTIONS_QUERY = `#graphql
+  query DelaywiseDiscountRedemptions($query: String!) {
+    orders(first: 50, query: $query) {
+      nodes {
+        name
+        createdAt
+        discountCodes
+        totalPriceSet {
+          shopMoney {
+            amount
+          }
+        }
+      }
+    }
+  }`;
+
+/** F1: start merchant workflows that use the "Shipment at risk" Flow trigger. */
+export const FLOW_TRIGGER_MUTATION = `#graphql
+  mutation DelaywiseFlowTrigger($handle: String!, $payload: JSON!) {
+    flowTriggerReceive(handle: $handle, payload: $payload) {
+      userErrors {
+        field
+        message
+      }
+    }
+  }`;
+
 export const ALL_OPERATIONS = {
   SHOP_INFO_QUERY,
   SHIPPED_ORDERS_QUERY,
   ORDER_CONTACT_QUERY,
   CREATE_DISCOUNT_MUTATION,
+  DISCOUNT_REDEMPTIONS_QUERY,
+  FLOW_TRIGGER_MUTATION,
 };
