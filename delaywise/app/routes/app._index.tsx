@@ -6,11 +6,12 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getSettings, getUsage, planFor } from "../services/settings.server";
-import { syncShop } from "../services/sync.server";
-import { revenueAtRisk } from "../lib/scorecard";
+import { ScanInProgressError, syncShop } from "../services/sync.server";
 import { toCsv } from "../lib/csv";
 import { roiSummary } from "../services/roi.server";
 import { STATUS_LABEL, type ShipmentStatus } from "../lib/status";
+
+const AT_RISK = ["stalled", "delayed", "exception", "lost"];
 
 const RISK_TONE: Record<string, "critical" | "warning" | "caution" | "info"> = {
   lost: "critical",
@@ -24,7 +25,7 @@ const RISK_LABEL: Record<string, string> = {
   exception: "Carrier problem",
   delayed: "Late",
   stalled: "Stalled",
-  watch: "Due soon",
+  watch: "Check manually",
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -34,19 +35,25 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const plan = planFor(settings);
   const usage = await getUsage(shop);
 
-  const [open, pendingCount, sentCount, totalShipments, roi] = await Promise.all([
+  // L5: counts and aggregates instead of loading every shipment.
+  const openWhere = { shop, status: { notIn: ["DELIVERED", "CANCELED"] } };
+  const atRiskWhere = { ...openWhere, risk: { in: AT_RISK } };
+  const [watching, flagged, atRiskTotals, anyShipment, pendingCount, sentCount, totalShipments, roi] = await Promise.all([
+    db.shipment.count({ where: openWhere }),
     db.shipment.findMany({
-      where: { shop, status: { notIn: ["DELIVERED", "CANCELED"] } },
+      where: { ...openWhere, risk: { not: "none" } },
       orderBy: { riskSince: "desc" },
+      take: 300,
     }),
+    db.shipment.aggregate({ where: atRiskWhere, _count: { _all: true }, _sum: { orderValue: true } }),
+    db.shipment.findFirst({ where: { shop }, select: { currency: true }, orderBy: { createdAt: "desc" } }),
     db.message.count({ where: { shop, status: "pending_approval" } }),
     db.message.count({ where: { shop, status: "sent" } }),
     db.shipment.count({ where: { shop } }),
     roiSummary(shop),
   ]);
 
-  const atRisk = open
-    .filter((s) => s.risk !== "none")
+  const atRisk = flagged
     .sort((a, b) => riskOrder(b.risk) - riskOrder(a.risk))
     .slice(0, 50)
     .map((s) => ({
@@ -63,7 +70,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       excludedReason: s.excludedReason,
     }));
 
-  const money = revenueAtRisk(open);
+  // Order values are in the shop's currency (shopMoney), so one total is correct.
+  const money = { orders: atRiskTotals._count._all, value: atRiskTotals._sum.orderValue ?? 0 };
   return {
     settings: {
       mode: settings.mode,
@@ -75,10 +83,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     plan: { label: plan.label, shipmentLimit: plan.shipmentLimit, includedPaidLookups: plan.includedPaidLookups },
     usage: { shipmentsTracked: usage.shipmentsTracked, paidLookups: usage.paidLookups, messagesSent: usage.messagesSent },
     stats: {
-      watching: open.length,
+      watching,
       atRiskOrders: money.orders,
       atRiskValue: money.value.toFixed(2),
-      currency: open[0]?.currency ?? "",
+      currency: anyShipment?.currency ?? "",
       pendingCount,
       sentCount,
       totalShipments,
@@ -122,8 +130,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { csv };
   }
 
-  const summary = await syncShop(admin, session.shop);
-  return { summary };
+  // M1: a failed or overlapping scan shows a message, never an error page.
+  try {
+    const summary = await syncShop(admin, session.shop);
+    return { summary };
+  } catch (error) {
+    const message =
+      error instanceof ScanInProgressError
+        ? error.message
+        : "The scan couldn't finish. Shopify may be busy; Delaywise will retry automatically within the hour.";
+    console.error(`[scan] ${session.shop}`, error);
+    return { scanError: message };
+  }
 };
 
 function downloadCsv(csv: string) {
@@ -157,6 +175,12 @@ export default function Dashboard() {
     if (exporter.data && "csv" in exporter.data && exporter.data.csv) downloadCsv(exporter.data.csv);
   }, [exporter.data]);
   const scanning = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.data && "scanError" in fetcher.data && fetcher.data.scanError) {
+      shopify.toast.show(fetcher.data.scanError, { isError: true });
+    }
+  }, [fetcher.data, shopify]);
 
   useEffect(() => {
     const s = fetcher.data && "summary" in fetcher.data ? fetcher.data.summary : null;
@@ -214,7 +238,7 @@ export default function Dashboard() {
       )}
 
       <s-section heading="Today">
-        <s-grid gridTemplateColumns="repeat(4, 1fr)" gap="base">
+        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(170px, 1fr))" gap="base">
           <Metric label="Shipments in transit" value={String(stats.watching)} />
           <Metric label="Orders at risk" value={String(stats.atRiskOrders)} />
           <Metric label="Order value at risk" value={`${stats.atRiskValue} ${stats.currency}`} />

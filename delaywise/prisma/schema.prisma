@@ -7,11 +7,11 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// SQLite for local development. Switch to "postgresql" for production
-// (see docs/DEPLOY.md).
+// SQLite by default. DATABASE_URL must point at a file on a persistent disk in
+// production (see docs/DEPLOY.md). Tests use their own throwaway file.
 datasource db {
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  url      = env("DATABASE_URL")
 }
 
 model Session {

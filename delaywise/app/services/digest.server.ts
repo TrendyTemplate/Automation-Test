@@ -18,7 +18,14 @@ export async function maybeSendDigest(shop: string, now = new Date()): Promise<b
 
   const [open, pendingApprovals, sentYesterday] = await Promise.all([
     db.shipment.findMany({
-      where: { shop, excluded: false, status: { notIn: ["DELIVERED", "CANCELED"] } },
+      // L5: only the at-risk rows, bounded.
+      where: {
+        shop,
+        excluded: false,
+        status: { notIn: ["DELIVERED", "CANCELED"] },
+        risk: { in: ["stalled", "delayed", "exception", "lost"] },
+      },
+      take: 500,
     }),
     db.message.count({ where: { shop, status: "pending_approval" } }),
     db.message.count({ where: { shop, status: "sent", sentAt: { gte: new Date(now.getTime() - 86_400_000) } } }),

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { MessageKind } from "../lib/risk";
 import { languageName } from "../lib/language";
 import { renderTemplate } from "../lib/templates";
+import { emailProblems } from "../lib/email-guard";
 
 /**
  * Writes the customer-facing delay email in the customer's language and the
@@ -73,12 +74,9 @@ export interface WrittenEmail {
 let client: Anthropic | null = null;
 function getClient(): Anthropic | null {
   if (!process.env.ANTHROPIC_API_KEY) return null;
-  client ??= new Anthropic();
+  // H3: fail fast and fall back to the template rather than stall the hourly job.
+  client ??= new Anthropic({ timeout: 20_000, maxRetries: 1 });
   return client;
-}
-
-function mustContain(text: string, needle?: string | null): boolean {
-  return !needle || text.includes(needle);
 }
 
 export async function writeDelayEmail(args: WriteArgs): Promise<WrittenEmail> {
@@ -124,12 +122,11 @@ export async function writeDelayEmail(args: WriteArgs): Promise<WrittenEmail> {
 
     if (response.stop_reason === "refusal" || !response.parsed_output) return fallback();
     const { subject, body } = response.parsed_output;
-    const ok =
-      subject.trim().length > 0 &&
-      body.trim().length > 0 &&
-      mustContain(body, args.trackingUrl) &&
-      mustContain(body, args.discount?.code);
-    if (!ok) return fallback();
+    const problems = emailProblems({ subject, body, trackingUrl: args.trackingUrl, discountCode: args.discount?.code });
+    if (problems.length) {
+      console.warn(`[ai-writer] using template: ${problems.join(", ")}`);
+      return fallback();
+    }
 
     return {
       subject: subject.trim().slice(0, 150),

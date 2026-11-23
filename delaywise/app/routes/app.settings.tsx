@@ -11,6 +11,7 @@ import { sendEmail } from "../services/email.server";
 import type { MessageKind } from "../lib/risk";
 import { carrierTransitToText } from "../lib/rules";
 import { cleanEmail, cleanText, parseSettingsForm } from "../lib/settings-form";
+import { PREVIEW_DAILY_LIMIT, TEST_EMAIL_DAILY_LIMIT, allowDaily } from "../lib/rate-limit";
 import { encryptSecret, encryptionAvailable, maskSecret } from "../lib/crypto";
 import { klaviyoKeyFor } from "../services/klaviyo-events.server";
 import { looksLikeKlaviyoPrivateKey } from "../services/klaviyo.server";
@@ -54,6 +55,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     klaviyo: {
       connected: Boolean(settings.klaviyoApiKeyEnc),
       masked: maskSecret(klaviyoKeyFor({ ...settings, klaviyoEnabled: true })),
+      // M11: a stored key we can no longer decrypt (e.g. rotated server key).
+      broken: Boolean(settings.klaviyoApiKeyEnc) && !klaviyoKeyFor({ ...settings, klaviyoEnabled: true }),
       canStoreKeys: encryptionAvailable(),
     },
     plan: { label: plan.label, autopilot: plan.autopilot, compensation: plan.compensation },
@@ -87,6 +90,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "preview" || intent === "test") {
+    // M6: previews call the AI and tests send real email, so both are limited.
+    if (!allowDaily(`${session.shop}:preview`, PREVIEW_DAILY_LIMIT)) {
+      return { testError: "Daily preview limit reached. Try again tomorrow." };
+    }
+    if (intent === "test" && !allowDaily(`${session.shop}:test`, TEST_EMAIL_DAILY_LIMIT)) {
+      return { testError: "Daily test email limit reached. Try again tomorrow." };
+    }
     const kindValue = String(form.get("kind"));
     const kind = (KINDS as string[]).includes(kindValue) ? (kindValue as MessageKind) : "delayed";
     const email = await writeDelayEmail({
@@ -107,9 +117,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     if (intent === "preview") return { preview: email };
 
-    // F8: send the sample to the merchant (never to a customer).
-    const to = cleanEmail(form.get("digestEmail")) ?? settings.digestEmail ?? settings.replyToEmail;
-    if (!to) return { testError: "Add an email address under “Daily summary” first." };
+    // F8 + M6: tests only ever go to the store's own saved address.
+    const to = settings.digestEmail ?? settings.replyToEmail;
+    if (!to) return { testError: "Save a summary email address under “Daily summary” first." };
     try {
       await sendEmail({
         to,
@@ -195,7 +205,7 @@ export default function SettingsPage() {
               Autopilot: send automatically{data.plan.autopilot ? "" : " (paid plans)"}
             </s-option>
           </s-select>
-          <s-grid gridTemplateColumns="1fr 1fr" gap="base">
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
             <s-select label="Send emails from" value={String(s.sendWindowStart)} onChange={(e) => set("sendWindowStart", Number(text(e)))}>
               {HOURS.map((h) => (
                 <s-option key={h} value={String(h)}>{hourLabel(h)}</s-option>
@@ -245,7 +255,7 @@ export default function SettingsPage() {
             checked={s.deliveredFollowUp}
             onChange={(e) => set("deliveredFollowUp", checked(e))}
           ></s-checkbox>
-          <s-grid gridTemplateColumns="1fr 1fr 1fr" gap="base">
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
             <s-number-field label="Usual delivery time (business days)" min={1} max={30} value={String(s.defaultTransitDays)} onInput={(e) => set("defaultTransitDays", Number(text(e)))}></s-number-field>
             <s-number-field label="Grace period (hours)" min={0} max={168} value={String(s.graceHours)} onInput={(e) => set("graceHours", Number(text(e)))}></s-number-field>
             <s-number-field label="Stalled after (hours without a scan)" min={24} max={336} value={String(s.stallHours)} onInput={(e) => set("stallHours", Number(text(e)))}></s-number-field>
@@ -276,7 +286,7 @@ export default function SettingsPage() {
             value={s.excludedTags}
             onInput={(e) => set("excludedTags", text(e))}
           ></s-text-field>
-          <s-grid gridTemplateColumns="1fr 1fr" gap="base">
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
             <s-text-field
               label="Destination countries (ISO codes)"
               placeholder="CA, MX"
@@ -307,7 +317,7 @@ export default function SettingsPage() {
             {...(data.plan.compensation ? {} : { disabled: true })}
           ></s-switch>
           {!data.plan.compensation && <s-text color="subdued">Available on paid plans.</s-text>}
-          <s-grid gridTemplateColumns="1fr 1fr" gap="base">
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
             <s-number-field label="Discount (%)" min={1} max={50} value={String(s.compensationPercent)} onInput={(e) => set("compensationPercent", Number(text(e)))}></s-number-field>
             <s-number-field label="Only when at least this many days late" min={1} max={30} value={String(s.compensationMinDaysLate)} onInput={(e) => set("compensationMinDaysLate", Number(text(e)))}></s-number-field>
           </s-grid>
@@ -337,6 +347,12 @@ export default function SettingsPage() {
             Send “Delaywise Shipment At Risk” and “Delaywise Delayed Shipment Delivered” events to your Klaviyo
             account, then build your own branded flows there. Use a private API key with the Events: write scope.
           </s-paragraph>
+          {data.klaviyo.broken && (
+            <s-banner tone="warning" heading="Reconnect Klaviyo">
+              Delaywise can no longer read your saved Klaviyo key, so no events are being sent. Disconnect and connect
+              again with your private API key.
+            </s-banner>
+          )}
           {data.klaviyo.connected ? (
             <s-stack direction="inline" gap="base" alignItems="center">
               <s-badge tone="success">{`Connected (${data.klaviyo.masked || "key stored"})`}</s-badge>
@@ -374,7 +390,7 @@ export default function SettingsPage() {
 
       <s-section heading="Preview and test">
         <s-stack direction="block" gap="base">
-          <s-grid gridTemplateColumns="1fr 1fr" gap="base">
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(220px, 1fr))" gap="base">
             <s-select label="Customer language" value={previewLang} onChange={(e) => setPreviewLang(text(e))}>
               <s-option value="en">English</s-option>
               <s-option value="es">Spanish</s-option>
@@ -400,7 +416,7 @@ export default function SettingsPage() {
               Preview
             </s-button>
             <s-button onClick={() => runPreview("test")} {...(busy ? { disabled: true } : {})}>
-              Send me a test email
+              Send a test to my saved summary address
             </s-button>
           </s-stack>
           {previewEmail && (

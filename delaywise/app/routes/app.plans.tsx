@@ -2,7 +2,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { refreshShopInfo } from "../services/settings.server";
+import { getSettings, refreshShopInfo } from "../services/settings.server";
 import { PLANS, TRIAL_DAYS } from "../lib/plans";
 
 /**
@@ -12,7 +12,11 @@ import { PLANS, TRIAL_DAYS } from "../lib/plans";
  */
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
-  const settings = await refreshShopInfo(admin, session.shop);
+  // M1: if Shopify is unreachable, show the last known plan instead of an error.
+  const settings = await refreshShopInfo(admin, session.shop).catch(async (error) => {
+    console.error(`[plans] ${session.shop}: could not refresh plan`, error);
+    return getSettings(session.shop);
+  });
   const storeHandle = session.shop.replace(/\.myshopify\.com$/, "");
   const appHandle = process.env.SHOPIFY_APP_HANDLE || "delaywise";
   return {
@@ -45,7 +49,7 @@ export default function Plans() {
           invoice. You can change or cancel anytime.
         </s-paragraph>
       </s-section>
-      <s-grid gridTemplateColumns="repeat(4, 1fr)" gap="base">
+      <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
         {plans.map((p) => (
           <s-section key={p.id} heading={p.label}>
             <s-stack direction="block" gap="base">

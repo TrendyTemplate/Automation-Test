@@ -30,22 +30,26 @@
    - App Store-এ একই নামের অ্যাপ থাকলে অন্য নাম নিন। তখন `shopify.app.toml`-এ `name` আর `handle` বদলাতে হবে।
 2. **Client ID** আর **Client secret** কপি করে রাখুন।
 3. **API access → Protected customer data**-তে গিয়ে অনুমতি চান:
-   - কারণ লিখুন: *"To email the customer a shipping-delay update. The email is read at send time and never stored."*
-   - শুধু **Email** ফিল্ড বেছে নিন, নাম বা ঠিকানা নেবেন না।
-   - নিরাপত্তার প্রশ্নগুলোর উত্তর দিন। ডেটা এনক্রিপ্টেড থাকে, কাস্টমারের ডেটা সংরক্ষণ করা হয় না।
+   - **Level 1** (অর্ডারের তথ্য) আর Level 2-এর **Email** আর **Address** ফিল্ড নিন। Address লাগে শুধু গন্তব্য দেশের কোড বুঝতে। নাম আর ফোন নেবেন না।
+   - কারণ লিখুন: *"Email: to send the customer a shipping-delay update (read at send time, never stored; optionally sent to the merchant's own Klaviyo when they connect it). Address: destination country only, to estimate international transit times."*
+   - নিরাপত্তার প্রশ্নগুলোর উত্তর দিন। গোপন key এনক্রিপ্টেড থাকে, আর কাস্টমারের যোগাযোগের তথ্য সংরক্ষণ করা হয় না।
+   - ⚠️ অনুমতি না পেলে অ্যাপ ইমেইল পাঠাতে পারবে না। তখন Messages পেজে এ কথা স্পষ্ট লেখা দেখাবে।
 
 ## ধাপ ৩: হোস্টিংয়ে অ্যাপ চালু করা
 
 Claude আপনার সাথে এই ধাপটা ধাপে ধাপে করবে। সংক্ষেপে:
 
 1. এই `delaywise` ফোল্ডারটা হোস্টিংয়ে Docker দিয়ে deploy করুন। ফোল্ডারে `Dockerfile` আছে।
-2. ডেটাবেসের জন্য একটা **persistent disk/volume** যোগ করুন, `/app/prisma`-তে mount করে। নাহলে প্রতিবার deploy করলে ডেটা মুছে যাবে।
+2. ডেটাবেসের জন্য একটা **persistent disk/volume** যোগ করুন (যেমন `/data`), আর `DATABASE_URL=file:/data/delaywise.sqlite` দিন। নাহলে প্রতিবার deploy করলে ডেটা মুছে যাবে, আর কাস্টমাররা একই ইমেইল আবার পাবে। অ্যাপ সবসময় **একটা মাত্র কপিতে** চালাবেন। বিস্তারিত: `docs/DEPLOY.md`।
 3. হোস্টিংয়ের Environment Variables-এ `.env.example`-এর সবগুলো ভেরিয়েবল দিন:
    - `SHOPIFY_API_KEY` = Client ID
    - `SHOPIFY_API_SECRET` = Client secret
    - `SHOPIFY_APP_URL` = হোস্টিংয়ের ঠিকানা, যেমন `https://delaywise.onrender.com`
    - `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `EMAIL_FROM_ADDRESS`, `SHIP24_API_KEY`
    - `JOB_SECRET` = অন্তত ২৪ অক্ষরের র‍্যান্ডম লেখা
+   - `APP_ENCRYPTION_KEY` = `openssl rand -hex 32` চালিয়ে পাওয়া লেখা। একবার দেওয়ার পর **আর বদলাবেন না**।
+   - `COMPANY_NAME`, `COMPANY_ADDRESS`, `SUPPORT_EMAIL` = প্রাইভেসি পলিসি পেজে দেখাবে। Shopify-র রিভিউতে এগুলো লাগে।
+   - `DATABASE_URL` = উপরের ধাপ ২ দেখুন
 4. কম্পিউটারে [Shopify CLI](https://shopify.dev/docs/apps/tools/cli) ইনস্টল করে `delaywise` ফোল্ডারে চালান:
    ```
    shopify app config link     # Partner Dashboard-এর অ্যাপের সাথে যুক্ত করে
@@ -60,7 +64,7 @@ Claude আপনার সাথে এই ধাপটা ধাপে ধা�
 - URL: `https://আপনার-অ্যাপ/jobs/scan`
 - Method: `POST`
 - Header: `Authorization: Bearer <আপনার JOB_SECRET>`
-- Schedule: প্রতি ঘণ্টায়
+- Schedule: প্রতি ১৫ মিনিট থেকে ১ ঘণ্টায় একবার। একসাথে দুবার চললেও সমস্যা নেই, একই দোকান দুবার স্ক্যান হয় না।
 
 ## ধাপ ৫: দাম সেট করা (Shopify App Pricing)
 
@@ -88,7 +92,7 @@ Partner Dashboard → অ্যাপ → **Distribution / Pricing → Shopify A
 
 1. `docs/APP_STORE_LISTING.md` থেকে নাম, বিবরণ আর ফিচারের লেখা কপি করুন।
 2. স্ক্রিনশট নিন: ড্যাশবোর্ড, Messages, Carrier scorecard, Settings preview। ১৬০০×৯০০ পিক্সেল।
-3. প্রাইভেসি পলিসির লিংক: `https://আপনার-অ্যাপ/privacy`। আগে `app/routes/privacy.tsx`-এ `[YOUR COMPANY NAME]` আর `[SUPPORT EMAIL]` বদলে নিন।
+3. প্রাইভেসি পলিসির লিংক: `https://আপনার-অ্যাপ/privacy`। কোম্পানির নাম, ঠিকানা আর সাপোর্ট ইমেইল আসে environment variable থেকে (ধাপ ৩)। খুলে দেখে নিন সব ঠিকমতো দেখাচ্ছে কিনা।
 4. রিভিউয়ারের জন্য টেস্ট নির্দেশনা (listing ফাইলে লেখা আছে) দিন।
 5. `docs/REVIEW_CHECKLIST_BN.md`-এর প্রতিটা ঘর মিলিয়ে নিয়ে **Submit for review** চাপুন।
 

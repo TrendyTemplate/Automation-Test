@@ -2,15 +2,19 @@ import type { ActionFunctionArgs } from "react-router";
 import { timingSafeEqual } from "node:crypto";
 import db from "../db.server";
 import { unauthenticated } from "../shopify.server";
-import { syncShop } from "../services/sync.server";
 import { applyRetention } from "../services/retention.server";
-import { maybeSendDigest } from "../services/digest.server";
+import { runScheduledScans } from "../services/scheduler.server";
 
 /**
  * Hourly scan of every installed shop. Call from an external scheduler
  * (Render/Fly cron, GitHub Actions, cron-job.org):
  *
  *   curl -X POST https://YOUR_APP_URL/jobs/scan -H "Authorization: Bearer $JOB_SECRET"
+ *
+ * H3: the request stops starting new shops after JOB_TIME_BUDGET_MS (default
+ * 50s) so it fits typical scheduler timeouts; unfinished shops go first next
+ * time. Calling it more often (e.g. every 15 minutes) is safe: scans of the
+ * same shop never overlap.
  */
 function authorized(request: Request): boolean {
   const secret = process.env.JOB_SECRET;
@@ -24,25 +28,18 @@ function authorized(request: Request): boolean {
 export const action = async ({ request }: ActionFunctionArgs) => {
   if (!authorized(request)) return new Response("Unauthorized", { status: 401 });
 
-  const shops = await db.session.findMany({
-    where: { isOnline: false },
-    select: { shop: true },
-    distinct: ["shop"],
-  });
+  const shops = (
+    await db.session.findMany({ where: { isOnline: false }, select: { shop: true }, distinct: ["shop"] })
+  ).map((s) => s.shop);
 
-  const results: { shop: string; ok: boolean; atRisk?: number; messages?: number; error?: string }[] = [];
-  for (const { shop } of shops) {
-    try {
-      const { admin } = await unauthenticated.admin(shop);
-      const summary = await syncShop(admin, shop);
-      await maybeSendDigest(shop).catch((error) => console.error(`[digest] ${shop}`, error));
-      results.push({ shop, ok: true, atRisk: summary.atRisk, messages: summary.messagesCreated });
-    } catch (error) {
-      results.push({ shop, ok: false, error: error instanceof Error ? error.message : String(error) });
-    }
-  }
+  const { results, remaining } = await runScheduledScans({
+    shops,
+    adminFor: async (shop) => (await unauthenticated.admin(shop)).admin,
+    budgetMs: Number(process.env.JOB_TIME_BUDGET_MS) || 50_000,
+    concurrency: Number(process.env.JOB_CONCURRENCY) || 3,
+  });
   const retention = await applyRetention();
-  return Response.json({ shops: results.length, results, retention });
+  return Response.json({ shops: shops.length, processed: results.length, remaining, results, retention });
 };
 
 export const loader = () => new Response("Method Not Allowed", { status: 405 });

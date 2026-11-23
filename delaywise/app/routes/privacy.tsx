@@ -1,15 +1,24 @@
+import { useLoaderData } from "react-router";
 import styles from "./_index/styles.module.css";
 
 // Public privacy policy, linked from the App Store listing.
-// Replace the bracketed company details before submitting.
+// L8: company details come from environment variables, so no placeholders ship.
+export const loader = () => ({
+  company: process.env.COMPANY_NAME || "the developer of Delaywise",
+  address: process.env.COMPANY_ADDRESS || "",
+  support: process.env.SUPPORT_EMAIL || "",
+});
+
 export default function Privacy() {
+  const { company, address, support } = useLoaderData<typeof loader>();
   return (
     <div className={styles.index}>
       <div className={styles.content} style={{ textAlign: "left", maxWidth: 760 }}>
         <h1 className={styles.heading}>Delaywise privacy policy</h1>
         <p>Last updated: November 2026</p>
         <p>
-          Delaywise (“the App”) is provided by [YOUR COMPANY NAME], [ADDRESS] (“we”). This policy explains what data
+          Delaywise (“the App”) is provided by {company}
+          {address ? `, ${address}` : ""} (“we”). This policy explains what data
           the App processes when a merchant installs it on a Shopify store.
         </p>
         <h2>What we access and why</h2>
@@ -54,8 +63,9 @@ export default function Privacy() {
         </p>
         <h2>Your rights</h2>
         <p>
-          Customers of a store should contact the store directly. Merchants can contact us at [SUPPORT EMAIL] for
-          access, correction or deletion requests.
+          Customers of a store should contact the store directly. Merchants can contact us
+          {support ? <> at <a href={`mailto:${support}`}>{support}</a></> : " through the App's support page"} for access,
+          correction or deletion requests.
         </p>
       </div>
     </div>
