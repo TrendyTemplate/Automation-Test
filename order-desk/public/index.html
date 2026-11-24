@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Order Desk</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="bar">
+  <strong>AI Order Desk</strong>
+  <span id="store" class="muted"></span>
+  <span class="spacer"></span>
+  <button id="logout" class="ghost" hidden>Sign out</button>
+</header>
+
+<main>
+  <section id="login" class="card narrow" hidden>
+    <h1>Sign in</h1>
+    <p class="muted">Shopify merchants: install the app from your Shopify admin. Other stores: paste your API key.</p>
+    <form id="login-form">
+      <input id="api-key" type="password" placeholder="od_…" autocomplete="off" required>
+      <button>Sign in</button>
+    </form>
+    <p id="login-error" class="error"></p>
+  </section>
+
+  <section id="app" hidden>
+    <div class="grid">
+      <div class="card">
+        <h2>Send purchase orders here</h2>
+        <p class="muted">Forward PO emails (PDF, Excel, CSV, photos or plain text) to your inbound address, or upload a file.</p>
+        <code id="inbound"></code>
+        <div class="row">
+          <label class="button">Upload PO<input id="upload" type="file" accept=".pdf,.csv,.xlsx,.png,.jpg,.jpeg,.webp,.txt" hidden></label>
+          <button id="sync" class="ghost">Sync catalog</button>
+          <span id="catalog" class="muted"></span>
+        </div>
+        <p id="upload-msg" class="muted"></p>
+      </div>
+      <div class="card">
+        <h2>Results</h2>
+        <div id="stats" class="stats"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <nav class="tabs" id="tabs">
+        <button data-status="needs_review" class="active">Needs review</button>
+        <button data-status="ready">Ready</button>
+        <button data-status="created">Created</button>
+        <button data-status="failed">Failed</button>
+        <button data-status="">All</button>
+      </nav>
+      <table class="list"><thead><tr><th>PO</th><th>Buyer</th><th>Lines</th><th>Status</th><th>Received</th></tr></thead><tbody id="pos"></tbody></table>
+      <p id="empty" class="muted" hidden>Nothing here yet.</p>
+    </div>
+
+    <div class="card" id="detail" hidden>
+      <div class="row">
+        <h2 id="d-title"></h2><span class="spacer"></span>
+        <button id="d-ack" class="ghost" hidden>Mark warnings reviewed</button>
+        <button id="d-reject" class="ghost danger">Reject</button>
+        <button id="d-approve">Create order</button>
+      </div>
+      <p id="d-meta" class="muted"></p>
+      <div id="d-flags"></div>
+      <div class="scroll">
+        <table class="lines">
+          <thead><tr><th>#</th><th>On the PO</th><th>Qty</th><th>Matched product</th><th>Order qty</th><th>Match</th></tr></thead>
+          <tbody id="d-lines"></tbody>
+        </table>
+      </div>
+      <p id="d-msg" class="muted"></p>
+    </div>
+  </section>
+</main>
+<datalist id="catalog-options"></datalist>
+<script src="/app.js" type="module"></script>
+</body>
+</html>

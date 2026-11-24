@@ -166,3 +166,15 @@ Observation: LevelOps' founder (`Maxime_Obius`) replies in many of these threads
   - The top tiers are $200 (Ordwell Scale) and $499 (PasteOrder Plus).
   - Every app has a free tier, usually 3–25 orders. Prices are almost always metered per order or draft.
   - Per-order cost ranges from about $3/order (LevelOps Starter) to about $0.10/order (PasteOrder Starter). Newcomers are undercutting LevelOps on price.
+
+## Addendum: App Store search verified with a headless browser (2026-11-24)
+
+The search pages that failed with curl loaded in headless Chromium (Playwright). Queries run: "PDF to order", "purchase order to draft order", "email to order b2b", "wholesale purchase order entry", "PO automation", "order entry AI", "FolioPO".
+
+Direct PO-to-draft-order competitors found in search, in addition to the list above:
+- **B2B Bulk Order / PO automation** (Liquid Scratch, handle `swift-b2b-cart-csv-upload`): 4.9 stars, 20 reviews, from $19.90/mo, not available for Plus. Mainly a buyer quick-order form; also "Forward PO emails to automatically create Shopify Draft Orders – turn PDF to order" and CSV/XLSX/PDF/image upload. https://apps.shopify.com/swift-b2b-cart-csv-upload
+- **FolioPO**: no reviews, free trial. "Turn customer purchase orders into reviewed draft orders."
+- **Ordwell** lives at handle `scribe-b2b` (0 reviews); its listing also offers standing/repeat orders and duplicate/revised PO detection. https://apps.shopify.com/scribe-b2b
+- Adjacent, not direct: Importo (supplier invoices to products, 1 review); Stocky replacements (Stockroom 71, Auto Purchase Orders 46, Mimoran 21, SupplyKit 19, Restocked 10); draft-order editors (Draftable 37, Draft Order Magic 15); B2B pricing/quick-order apps with 200–1,200 reviews (BSS, Sami, SparkLayer, MultiVariants, Clay), which do not parse emailed POs.
+
+Conclusion unchanged: among apps whose main job is turning emailed/uploaded POs into draft orders, the largest has 22 reviews (LevelOps), followed by Liquid Scratch's 20 (where PO email is a secondary feature). No direct competitor has 100+ reviews. Large B2B apps (SparkLayer, BSS, Sami) could add PO parsing and are the main future threat.
