@@ -35,6 +35,19 @@ export function parseWebhook(payload) {
   for (const entry of Array.isArray(payload?.entry) ? payload.entry : []) {
     if (object === 'page' || object === 'instagram') {
       const platform = object === 'page' ? 'messenger' : 'instagram';
+      // Post comments: Page "feed" changes and Instagram "comments" changes.
+      for (const ch of Array.isArray(entry.changes) ? entry.changes : []) {
+        const v = ch.value || {};
+        if (ch.field === 'feed' && v.item === 'comment' && v.verb === 'add' && v.comment_id) {
+          events.push({ platform, type: 'comment', externalId: String(entry.id), commentId: String(v.comment_id), postId: v.post_id ? String(v.post_id) : null,
+            parentId: v.parent_id ? String(v.parent_id) : null, fromId: String(v.from?.id || ''), fromName: v.from?.name || null, text: String(v.message || ''),
+            timestamp: v.created_time ? new Date(Number(v.created_time) * 1000 || v.created_time).toISOString() : new Date().toISOString(), self: String(v.from?.id || '') === String(entry.id) });
+        } else if (ch.field === 'comments' && v.id) {
+          events.push({ platform, type: 'comment', externalId: String(entry.id), commentId: String(v.id), postId: v.media?.id ? String(v.media.id) : null,
+            parentId: v.parent_id ? String(v.parent_id) : null, fromId: String(v.from?.id || ''), fromName: v.from?.username ? `@${v.from.username}` : null, text: String(v.text || ''),
+            timestamp: new Date().toISOString(), self: String(v.from?.id || '') === String(entry.id) });
+        }
+      }
       for (const m of Array.isArray(entry.messaging) ? entry.messaging : []) {
         if (!m.message || m.message.is_deleted) continue; // reads, deliveries, reactions … are ignored
         const echo = Boolean(m.message.is_echo);

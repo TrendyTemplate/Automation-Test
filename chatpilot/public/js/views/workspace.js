@@ -18,14 +18,12 @@ export async function dashboard(ctx, params) {
   const d = await api('/dashboard');
   const me = ctx.me;
   const manager = ['owner', 'admin'].includes(me.role);
+  if (manager && !d.setup.channels && !params.stay) { location.hash = 'welcome'; return; } // the one thing to do first
   const s = d.setup;
   const steps = [
-    [s.products > 0, 'Add your products & prices', '#catalog', 'layers'],
-    [s.business, 'Tell the assistant about your shop', '#brain', 'brain'],
-    [s.knowledge > 0, 'Add delivery charges, payment & return policy', '#knowledge', 'book'],
-    [s.channels > 0, 'Try the Test chat', '#saleslab', 'flask'],
-    [s.channels > 0, 'Connect Messenger, Instagram or WhatsApp', '#channels', 'plug'],
-    [s.live > 0, 'Receive your first customer message', '#channels', 'chat'],
+    [s.channels > 0, 'Connect your Facebook Page', '#welcome', 'plug'],
+    [s.live > 0, 'Receive your first customer message', '#chats', 'chat'],
+    [s.products > 0, 'Optional: add products for exact order totals', '#catalog', 'layers'],
     [Boolean(me.user.totp_enabled), 'Turn on two-factor authentication', '#security', 'lock'],
   ].filter((st) => manager || st[2] === '#security');
   const done = steps.filter((x) => x[0]).length;
@@ -43,8 +41,12 @@ export async function dashboard(ctx, params) {
       ${stat('chat', 'Customers today', num(d.today.conversations), `${num(d.today.ordered || 0)} ordered`)}
       ${stat('alert', 'Waiting for you', `<a href="#chats?status=needs_human">${num(d.needsHuman)}</a>`, `${num(d.drafts)} drafts to approve`, d.needsHuman || d.drafts ? 'warn' : 'ok')}
       ${stat('card', 'Orders (30 days)', `<a href="#orders">${num(d.orders30.n)}</a>`, d.orders30.n ? `${esc(d.orders30.currency || '')} ${num(Math.round(d.orders30.revenue))}` : 'Confirmed in chat', 'ok')}
-      ${stat('send', 'AI replies sent (30 days)', num(d.aiSent30), 'Answered without you', 'ok')}
+      ${stat('sparkles', 'Replies learned', `<a href="#learning">${num(d.learnedTotal)}</a>`, 'Keeps learning by itself', 'ok')}
     </div>
+    ${d.pages.length ? `<div class="grid g3 mt">${d.pages.map((p) => `<a class="card page-card" href="#chats?channel=${p.id}" style="color:inherit;text-decoration:none">
+      <div class="row nowrap"><span class="pf ${esc(p.platform)}">${esc(PL[p.platform])}</span><b class="truncate" style="flex:1">${esc(p.name || '')}</b>${p.last_error ? `<span class="badge bad">${icon('alert', 'sm')}</span>` : ''}</div>
+      <div class="row" style="gap:14px"><span><b>${num(p.today)}</b> <span class="hint">chats today</span></span><span><b>${num(p.orders30)}</b> <span class="hint">orders</span></span>${p.needs_human ? `<span class="badge warn">${num(p.needs_human)} need you</span>` : ''}</div>
+      <span class="hint">${icon('sparkles', 'sm')} ${num(p.learned)} replies learned · ${p.mode === 'auto' ? 'answering automatically' : p.mode === 'draft' ? 'drafts for you' : 'off'}</span></a>`).join('')}</div>` : ''}
     <div class="split mt">
       <div class="card"><div class="card-h"><h3>Messages</h3><span class="spacer"></span><span class="hint">Last 14 days</span></div>
         ${bars(d.daily.map((x) => ({ label: `${x.day}: ${x.received} received, ${x.answered || 0} answered`, short: x.day.slice(5), value: x.received })))}</div>

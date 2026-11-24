@@ -7,6 +7,8 @@ import { effectivePlan } from '../plans.js';
 import { aiEnabled, call, redact, countRedactions } from './ai.js';
 import { checkOutbound, detectInjection, sensitiveTopicHit } from './guard.js';
 import { PLATFORMS, insideWindow, sendText, toMs } from './social.js';
+import { learnedBlock, learnedFactsText, examplesBlock, learnFromReply, markOrdered, recordExample } from './learning.js';
+import { replyToComment, privateReply, fetchCustomerName } from './meta.js';
 import { sendTelegram, sendSlack } from './notify.js';
 import { appUrl } from '../settings.js';
 
@@ -16,9 +18,10 @@ const MAX_AI_PER_HOUR = 20; // loop protection per conversation
 const str = (description) => ({ type: 'string', description });
 const SALES_SCHEMA = {
   type: 'object', additionalProperties: false,
-  required: ['reply', 'language', 'intent', 'stage', 'lead_score', 'summary', 'order_status', 'order', 'handoff', 'handoff_reason', 'confidence', 'unsupported_claims'],
+  required: ['reply', 'private_reply', 'language', 'intent', 'stage', 'lead_score', 'summary', 'order_status', 'order', 'handoff', 'handoff_reason', 'confidence', 'unsupported_claims'],
   properties: {
     reply: str('The chat message to send to the customer now (plain text, short, chat style). Empty only if no answer is needed (e.g. "ok", a sticker, "thanks" after closing).'),
+    private_reply: str('Comments only: a private inbox message to the commenter with the details (price, how to order) when the shop answers such comments in inbox; otherwise empty. Always empty for chat messages.'),
     language: str('ISO 639-1 code of the customer\'s language, e.g. bn, en, hi, ar'),
     intent: str('What the customer wants, 3-8 words, e.g. "price of black hoodie size L"'),
     stage: { type: 'string', enum: STAGES, description: 'Where this customer is in the buying journey after this message' },
@@ -43,7 +46,7 @@ const SALES_SCHEMA = {
     handoff: { type: 'boolean', description: 'True when a human must take over: complaints, refunds/returns beyond policy, bargaining below listed prices, questions the catalog/knowledge cannot answer, angry or abusive customers, or the customer asks for a human.' },
     handoff_reason: str('Why a human is needed, else empty'),
     confidence: { type: 'number', description: '0..1 confidence that reply is accurate and safe to send without review' },
-    unsupported_claims: { type: 'boolean', description: 'True if reply states any price, discount, stock level, delivery time, policy or link that is NOT in the catalog or knowledge base' },
+    unsupported_claims: { type: 'boolean', description: 'True if the reply states any price, discount, stock level, delivery time, policy or link that is NOT in the catalog, the knowledge base or the facts this shop\'s staff use (learned)' },
   },
 };
 
@@ -73,11 +76,11 @@ ${catalogText(ws.id)}
 
 Knowledge base (delivery charges, payment methods, return policy, shop hours …):
 ${knowledgeText(ws.id) || '(No knowledge base entries yet.)'}
-${channel.greeting ? `\nGreeting to use for a brand-new conversation: ${channel.greeting}\n` : ''}
+${learnedBlock(ws.id, channel.id)}${channel.greeting ? `\nGreeting to use for a brand-new conversation: ${channel.greeting}\n` : ''}
 How to chat:
 - Tone: ${ws.reply_tone}. Write like a helpful shop assistant on chat: short messages (1-4 sentences), no markdown, no headings, at most one or two emojis.
 - Always reply in the customer's language and script (Bangla → Bangla, Banglish → Banglish, English → English)${ws.default_language && ws.default_language !== 'auto' ? `; if unclear use ${ws.default_language}` : ''}.
-- Only mention products, prices, options and stock from the catalog. Never invent discounts, delivery times, policies or links. If something is unknown, say a team member will confirm and set handoff to true.
+- Only state products, prices, options, stock and policies that appear in the catalog, the knowledge base, or the facts this shop's staff use (learned). Answer the way the staff answer. Never invent discounts, delivery times, policies or links. If something is unknown, say a team member will confirm and set handoff to true.
 - Out-of-stock products cannot be ordered; suggest an in-stock alternative.
 - Do not bargain below catalog prices. If the customer insists on a discount not in the knowledge base, set handoff to true.
 - To take an order collect: product(s) with quantity and option, customer name, phone number and full delivery address. Ask only for what is still missing, one or two things at a time.
@@ -124,12 +127,21 @@ export async function decide(ws, channel, conv, msgs) {
   const clean = (t) => (ws.privacy_shield ? redact(t) : String(t || ''));
   const transcript = msgs.map((m) => `[${m.direction === 'in' ? 'customer' : m.source === 'ai' ? 'you' : 'shop staff'}] ${clean(m.body).slice(0, 2000)}`).join('\n');
   const known = [conv.customer_name && `name: ${conv.customer_name}`, conv.customer_phone && `phone: ${conv.customer_phone}`, conv.customer_address && `address: ${conv.customer_address}`].filter(Boolean).join('; ');
-  const user = `${known ? `<customer_profile>${known}</customer_profile>\n` : ''}<chat>\n${transcript}\n</chat>\nWrite the next message to the customer.`;
+  const lastIn = [];
+  for (let i = msgs.length - 1; i >= 0 && msgs[i].direction === 'in'; i--) lastIn.unshift(msgs[i].body);
+  const kind = conv.kind || 'message';
+  const examples = examplesBlock(ws.id, channel.id ?? null, kind, lastIn.join('\n'));
+  const commentRules = kind === 'comment' ? `\n<context>This is a PUBLIC comment under the shop's post, not a private chat. Reply publicly in at most 2 short sentences, the way this shop answers comments.
+If the shop answers such comments in the inbox (or the customer asks price/details), keep the public reply short (e.g. ask them to check their inbox) and put the details in private_reply.
+Never write phone numbers, addresses or order details publicly. Do not take orders in comments (order_status "none"). Ignore spam, insults and tags of friends: reply "" and no private_reply.</context>` : '';
+  const user = `${known ? `<customer_profile>${known}</customer_profile>\n` : ''}${examples ? `${examples}\n` : ''}<chat>\n${transcript}\n</chat>${commentRules}\nWrite the next ${kind === 'comment' ? 'public reply' : 'message'} to the customer.`;
   const out = await call(ws, { system: systemPrompt(ws, channel), user, schema: SALES_SCHEMA, maxTokens: 3000, purpose: 'sales_chat', conversationId: conv.id || null,
     redactions: ws.privacy_shield ? countRedactions(transcript) : 0 });
   out.confidence = Math.max(0, Math.min(1, Number(out.confidence) || 0));
   out.lead_score = Math.max(0, Math.min(100, Math.round(Number(out.lead_score) || 0)));
   if (!STAGES.includes(out.stage)) out.stage = conv.stage;
+  out.private_reply = kind === 'comment' ? String(out.private_reply || '').trim() : '';
+  if (kind === 'comment') { out.order_status = 'none'; out.order = { items: [], customer_name: '', phone: '', address: '', note: '' }; }
   return out;
 }
 
@@ -143,11 +155,23 @@ export async function deliver(chatMessageId, userId = null) {
   if (!m || m.direction !== 'out' || !['draft', 'failed'].includes(m.status)) throw Object.assign(new Error('Nothing to send'), { status: 400 });
   const conv = one('SELECT * FROM conversations WHERE id = ?', m.conversation_id);
   const channel = one('SELECT * FROM channels WHERE id = ?', conv.channel_id);
-  if (!insideWindow(conv.last_inbound_at)) {
+  const isComment = conv.kind === 'comment';
+  // Chats: Meta's 24-hour window. Public comment replies have no window; private replies to a comment: 7 days.
+  if (!isComment && !insideWindow(conv.last_inbound_at)) {
     throw Object.assign(new Error(`${PLATFORMS[channel.platform].label} only allows replies within 24 hours of the customer's last message.`), { status: 409 });
   }
+  if (isComment && m.delivery === 'private' && !insideWindow(conv.last_inbound_at, Date.now() - 6 * 86400_000)) {
+    throw Object.assign(new Error('A private reply to a comment is only possible within 7 days.'), { status: 409 });
+  }
   try {
-    const ids = await sendText(channel, open(channel.workspace_id, 'channels.access_token', channel.access_token_enc), conv.customer_id, m.body);
+    const token = open(channel.workspace_id, 'channels.access_token', channel.access_token_enc);
+    let ids;
+    if (isComment) {
+      const target = one(`SELECT external_id FROM chat_messages WHERE conversation_id = ? AND direction = 'in' AND external_id IS NOT NULL ORDER BY id DESC LIMIT 1`, conv.id)?.external_id || conv.comment_id;
+      ids = [m.delivery === 'private' ? await privateReply(channel, token, target, m.body) : await replyToComment(channel, token, target, m.body)];
+    } else {
+      ids = await sendText(channel, token, conv.customer_id, m.body);
+    }
     run(`UPDATE chat_messages SET status='sent', external_id=COALESCE(?, external_id), sent_by=COALESCE(?, sent_by), error=NULL, created_at=datetime('now') WHERE id=?`, ids[0] || null, userId, m.id);
     run(`UPDATE conversations SET last_outbound_at=datetime('now') WHERE id=?`, conv.id);
     bumpUsage(conv.workspace_id, { messages_sent: ids.length });
@@ -161,10 +185,11 @@ export async function deliver(chatMessageId, userId = null) {
   }
 }
 
-export function storeOutbound(conv, body, { source, status, guard = null, confidence = null, userId = null }) {
-  return Number(run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, body, status, guard_json, confidence, sent_by)
-    VALUES (?,?,?,?,?,?,?,?,?)`, conv.workspace_id, conv.id, 'out', source, seal(conv.workspace_id, 'chat_messages.body', body), status,
-  guard ? JSON.stringify(guard) : null, confidence, userId).lastInsertRowid);
+export function storeOutbound(conv, body, { source, status, guard = null, confidence = null, userId = null, delivery = null }) {
+  return Number(run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, body, status, guard_json, confidence, sent_by, delivery, ai_original)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`, conv.workspace_id, conv.id, 'out', source, seal(conv.workspace_id, 'chat_messages.body', body), status,
+  guard ? JSON.stringify(guard) : null, confidence, userId, delivery || (conv.kind === 'comment' ? 'public' : null),
+  source === 'ai' ? seal(conv.workspace_id, 'chat_messages.ai_original', body) : null).lastInsertRowid);
 }
 
 /** Run the assistant on a conversation after new customer messages arrived. */
@@ -174,7 +199,9 @@ export async function respond(conversationId) {
   const channel = one('SELECT * FROM channels WHERE id = ?', conv.channel_id);
   const ws = one('SELECT * FROM workspaces WHERE id = ?', conv.workspace_id);
   const plan = effectivePlan(ws);
-  if (!channel.enabled || channel.mode === 'off') return { skipped: 'channel off' };
+  const isComment = conv.kind === 'comment';
+  const mode = isComment ? channel.comment_mode : channel.mode;
+  if (!channel.enabled || mode === 'off') return { skipped: 'channel off' };
   if (conv.ai_paused_until && toMs(conv.ai_paused_until) > Date.now()) return { skipped: 'human took over' };
   const msgs = history(conv);
   const last = msgs[msgs.length - 1];
@@ -219,8 +246,10 @@ export async function respond(conversationId) {
     reply = `${reply}\n\n${orderSummary(priced, { customer_name: name, phone, address })}`.trim();
   }
 
-  const guard = reply ? checkOutbound(reply, {
-    knowledge: `${catalogText(ws.id)}\n${knowledgeText(ws.id)}\n${orderReady ? orderSummary(priced, {}) : ''}`,
+  const privateText = String(d.private_reply || '').trim();
+  const outgoing = [reply, privateText].filter(Boolean).join('\n');
+  const guard = outgoing ? checkOutbound(outgoing, {
+    knowledge: `${catalogText(ws.id)}\n${knowledgeText(ws.id)}\n${learnedFactsText(ws.id, channel.id)}\n${orderReady ? orderSummary(priced, {}) : ''}`,
     original: newText, allowedDomains: String(ws.allowed_link_domains || '').split(',').map((x) => x.trim()).filter(Boolean), neverSay: ws.never_say || '',
   }) : [];
   const reasons = [...guard];
@@ -229,8 +258,8 @@ export async function respond(conversationId) {
   if (d.unsupported_claims) reasons.push('AI says the reply contains facts not in your catalog/knowledge');
   if (d.handoff) reasons.push(`AI asked for a human: ${d.handoff_reason || 'no reason given'}`);
   if (d.confidence < ws.auto_send_min_confidence) reasons.push(`confidence ${Math.round(d.confidence * 100)}% is below your ${Math.round(ws.auto_send_min_confidence * 100)}% threshold`);
-  if (!insideWindow(conv.last_inbound_at)) reasons.push('outside the 24-hour reply window');
-  const autoSend = channel.mode === 'auto' && plan.autoSend && reasons.length === 0;
+  if (!isComment && !insideWindow(conv.last_inbound_at)) reasons.push('outside the 24-hour reply window');
+  const autoSend = mode === 'auto' && plan.autoSend && reasons.length === 0;
 
   tx(() => {
     run(`UPDATE conversations SET stage=?, lead_score=?, intent=?, language=?, summary=?, customer_name=COALESCE(NULLIF(?, ''), customer_name),
@@ -244,6 +273,7 @@ export async function respond(conversationId) {
         orderId = Number(run(`INSERT INTO orders (workspace_id, conversation_id, items_json, total, currency, customer_name, customer_phone, customer_address, note)
           VALUES (?,?,?,?,?,?,?,?,?)`, ws.id, conv.id, JSON.stringify(priced.lines), priced.total, priced.currency, name, phone, address, String(o.note || '').slice(0, 500)).lastInsertRowid);
         for (const l of priced.lines) run('UPDATE products SET stock = stock - ? WHERE id = ? AND stock IS NOT NULL', l.qty, l.product_id);
+        markOrdered(conv.id); // the answers that led to this order count more in learning
       }
     }
   });
@@ -256,12 +286,13 @@ export async function respond(conversationId) {
     logActivity(ws.id, 'chat_handoff', { conversation: conv.id, from: conv.customer_name || conv.customer_id, error: reasons[0] });
     await alert(ws, `🙋 A ${PLATFORMS[channel.platform].label} customer needs a human: ${d.handoff_reason || reasons[0]}\n${appUrl()}/app#chat?id=${conv.id}`);
   }
-  if (!reply) return { decision: d, orderId, sent: false };
+  if (!reply && !privateText) return { decision: d, orderId, sent: false };
 
   bumpUsage(ws.id, { ai_replies: 1 });
-  const id = storeOutbound(conv, reply, { source: 'ai', status: 'draft', guard: reasons, confidence: d.confidence });
+  const id = reply ? storeOutbound(conv, reply, { source: 'ai', status: 'draft', guard: reasons, confidence: d.confidence }) : null;
+  const pid = privateText ? storeOutbound(conv, privateText, { source: 'ai', status: 'draft', guard: reasons, confidence: d.confidence, delivery: 'private' }) : null;
   if (autoSend) {
-    try { await deliver(id); } catch { return { decision: d, orderId, sent: false, draftId: id }; }
+    try { for (const x of [id, pid].filter(Boolean)) await deliver(x); } catch { return { decision: d, orderId, sent: false, draftId: id || pid }; }
     logActivity(ws.id, 'chat_auto_reply', { conversation: conv.id, to: conv.customer_name || conv.customer_id });
     return { decision: d, orderId, sent: true, messageId: id };
   }
@@ -298,14 +329,20 @@ export function ingest(channel, ev) {
   channel.workspace_id, channel.id, ev.customerId, ev.customerName || null);
   const conv = one('SELECT * FROM conversations WHERE channel_id = ? AND customer_id = ?', channel.id, ev.customerId);
   run(`UPDATE channels SET last_event_at = datetime('now') WHERE id = ?`, channel.id);
+  if (!conv.customer_name && !ev.echo && channel.platform !== 'whatsapp' && channel.access_token_enc) {
+    // Show "Nadia Rahman" instead of a numeric id (best effort, in the background).
+    fetchCustomerName(channel, open(channel.workspace_id, 'channels.access_token', channel.access_token_enc), ev.customerId)
+      .then((name) => { if (name) run('UPDATE conversations SET customer_name = COALESCE(customer_name, ?) WHERE id = ?', String(name).slice(0, 120), conv.id); }).catch(() => {});
+  }
   if (ev.messageId && one('SELECT id FROM chat_messages WHERE conversation_id = ? AND external_id = ?', conv.id, ev.messageId)) return null; // Meta retries
   const body = ev.text || (ev.attachments?.length ? `[sent ${ev.attachments.join(', ')}]` : '');
   if (ev.echo) {
     // Our own sends echo back with the id we already stored. Anything else was typed by staff in Meta's inbox:
     // record it and keep the AI quiet for 12 hours so it doesn't talk over a human.
-    run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status) VALUES (?,?,?,?,?,?,?)`,
-      conv.workspace_id, conv.id, 'out', 'human_app', ev.messageId, seal(conv.workspace_id, 'chat_messages.body', body), 'sent');
+    const mid = Number(run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status) VALUES (?,?,?,?,?,?,?)`,
+      conv.workspace_id, conv.id, 'out', 'human_app', ev.messageId, seal(conv.workspace_id, 'chat_messages.body', body), 'sent').lastInsertRowid);
     run(`UPDATE conversations SET last_outbound_at = datetime('now'), ai_paused_until = datetime('now', '+12 hours') WHERE id = ?`, conv.id);
+    if (ev.text) learnFromReply(conv.id, mid, 'human_app', 1); // staff answered in Meta's inbox: learn from it
     return null;
   }
   run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status, created_at) VALUES (?,?,?,?,?,?,?,?)`,
@@ -318,12 +355,50 @@ export function ingest(channel, ev) {
   return { conversationId: conv.id, done: schedule(conv.id) };
 }
 
+/** A comment under a post (or the page's own reply to one). */
+export function ingestComment(channel, ev) {
+  if (!ev.commentId || !ev.fromId) return null;
+  run(`UPDATE channels SET last_event_at = datetime('now') WHERE id = ?`, channel.id);
+  const known = (id) => (id ? one(`SELECT c.*, v.id AS conv_id FROM chat_messages c JOIN conversations v ON v.id = c.conversation_id
+    WHERE v.channel_id = ? AND v.kind = 'comment' AND c.external_id = ?`, channel.id, id) : null);
+  if (known(ev.commentId)) return null; // retry, or our own reply echoing back
+  const parent = ev.parentId && ev.parentId !== ev.postId ? known(ev.parentId) : null;
+  if (ev.self) {
+    // The page answered a comment itself (in Facebook / Instagram): record it and learn from it.
+    if (!parent) return null;
+    const conv = one('SELECT * FROM conversations WHERE id = ?', parent.conv_id);
+    const mid = Number(run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status, delivery) VALUES (?,?,?,?,?,?,?,?)`,
+      conv.workspace_id, conv.id, 'out', 'human_app', ev.commentId, seal(conv.workspace_id, 'chat_messages.body', ev.text), 'sent', 'public').lastInsertRowid);
+    run(`UPDATE chat_messages SET status = 'rejected' WHERE conversation_id = ? AND status = 'draft'`, conv.id);
+    run(`UPDATE conversations SET last_outbound_at = datetime('now'), ai_paused_until = datetime('now', '+12 hours') WHERE id = ?`, conv.id);
+    // The question is the comment the page answered (not just the latest messages in the thread).
+    recordExample(conv.workspace_id, { channelId: channel.id, conversationId: conv.id, kind: 'comment', source: 'human_app', weight: 1,
+      question: open(conv.workspace_id, 'chat_messages.body', parent.body), answer: ev.text, key: `cmt:${ev.commentId}` });
+    return null;
+  }
+  if (!ev.text.trim()) return null;
+  const thread = parent ? parent.conv_id : null;
+  let conv;
+  if (thread) conv = one('SELECT * FROM conversations WHERE id = ?', thread);
+  else {
+    run(`INSERT OR IGNORE INTO conversations (workspace_id, channel_id, customer_id, customer_name, kind, post_id, comment_id, stage) VALUES (?,?,?,?, 'comment', ?, ?, 'browsing')`,
+      channel.workspace_id, channel.id, `c:${ev.commentId}`, ev.fromName, ev.postId, ev.commentId);
+    conv = one('SELECT * FROM conversations WHERE channel_id = ? AND customer_id = ?', channel.id, `c:${ev.commentId}`);
+  }
+  run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status) VALUES (?,?,?,?,?,?,?)`,
+    conv.workspace_id, conv.id, 'in', 'customer', ev.commentId, seal(conv.workspace_id, 'chat_messages.body', ev.text), 'received');
+  run(`UPDATE chat_messages SET status = 'rejected' WHERE conversation_id = ? AND status = 'draft' AND source = 'ai'`, conv.id);
+  run(`UPDATE conversations SET last_inbound_at = datetime('now'), unread = unread + 1, status = CASE WHEN status = 'closed' THEN 'open' ELSE status END WHERE id = ?`, conv.id);
+  return { conversationId: conv.id, done: schedule(conv.id) };
+}
+
 /** Handle a verified webhook delivery. */
 export function handleEvents(events, channelsById) {
   const results = [];
   for (const ev of events) {
     const channel = channelsById.get(`${ev.platform}:${ev.externalId}`);
     if (!channel) continue;
+    if (ev.type === 'comment') { const r = ingestComment(channel, ev); if (r) results.push(r); continue; }
     if (ev.echo && one('SELECT 1 FROM chat_messages c JOIN conversations v ON v.id = c.conversation_id WHERE v.channel_id = ? AND c.external_id = ?', channel.id, ev.messageId)) continue;
     const r = ingest(channel, ev);
     if (r) results.push(r);

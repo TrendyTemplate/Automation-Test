@@ -2,6 +2,7 @@ import { $, $$, esc, icon, api, toast, applyTheme, commandPalette, dropdown, ava
 import * as workspace from './views/workspace.js';
 import * as account from './views/account.js';
 import * as sales from './views/sales.js';
+import * as onboard from './views/onboard.js';
 
 const ctx = { me: null, view: $('#view'), counts: {} };
 const MANAGERS = ['owner', 'admin'];
@@ -12,6 +13,7 @@ const NAV = [
   { id: 'chats', label: 'Chats', icon: 'chat', count: 'chats' },
   { id: 'orders', label: 'Orders', icon: 'card' },
   { id: 'catalog', label: 'Products', icon: 'layers' },
+  { id: 'learning', label: 'Learning', icon: 'sparkles' },
   { id: 'saleslab', label: 'Test chat', icon: 'flask' },
   { sep: true, roles: MANAGERS },
   { id: 'channels', label: 'Channels', icon: 'plug', roles: MANAGERS },
@@ -33,6 +35,7 @@ const ROLE_ONLY = { channels: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, in
 
 const ROUTES = {
   dashboard: workspace.dashboard, brain: workspace.brain, knowledge: workspace.knowledge, integrations: workspace.integrations,
+  welcome: onboard.welcome, learning: onboard.learning,
   chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: sales.orders, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
   profile: account.profile, team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
 };

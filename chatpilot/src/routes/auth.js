@@ -35,13 +35,13 @@ function consumeToken(token, purpose) {
 }
 
 /** Create user + personal workspace (shared by password sign-up and OAuth sign-up). */
-export function createAccount({ email, name, passwordHash, company, googleId, microsoftId, avatar, verified, refCode }) {
+export function createAccount({ email, name, passwordHash, company, googleId, microsoftId, facebookId, avatar, verified, refCode }) {
   const trialEnds = new Date(Date.now() + getNum('trial_days') * 86400_000).toISOString();
   const referrer = refCode ? one('SELECT id FROM users WHERE referral_code = ?', String(refCode)) : null;
   const user = tx(() => {
-    const u = run(`INSERT INTO users (email, name, password_hash, is_admin, google_id, microsoft_id, avatar_url, email_verified, referred_by, referral_code, password_changed_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?, datetime('now'))`, email, String(name || '').slice(0, 120), passwordHash || '!', config.adminEmails.includes(email) ? 1 : 0,
-    googleId || null, microsoftId || null, avatar || null, verified ? 1 : 0, referrer?.id || null, randomToken(4));
+    const u = run(`INSERT INTO users (email, name, password_hash, is_admin, google_id, microsoft_id, facebook_id, avatar_url, email_verified, referred_by, referral_code, password_changed_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now'))`, email, String(name || '').slice(0, 120), passwordHash || '!', config.adminEmails.includes(email) ? 1 : 0,
+    googleId || null, microsoftId || null, facebookId || null, avatar || null, verified ? 1 : 0, referrer?.id || null, randomToken(4));
     const uid = Number(u.lastInsertRowid);
     const w = run('INSERT INTO workspaces (name, owner_id, business_name, trial_ends_at) VALUES (?,?,?,?)',
       String(company || `${name || email.split('@')[0]}'s shop`).slice(0, 120), uid, String(company || '').slice(0, 120), trialEnds);

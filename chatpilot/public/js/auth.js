@@ -30,15 +30,21 @@ function nextUrl() {
   const n = q.get('next');
   if (n && /^\/(app|admin)([/#?]|$)/.test(n)) return n;
   if (q.get('plan')) return `/app#billing?plan=${encodeURIComponent(q.get('plan'))}&interval=${encodeURIComponent(q.get('interval') || 'monthly')}`;
-  return '/app';
+  return form?.dataset.mode === 'signup' ? '/app#welcome' : '/app'; // new accounts go straight to "connect your page"
 }
 
 const G = '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.6 13.3l7.8 6C12.3 13.6 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4 7.1-10 7.1-17.5z"/><path fill="#FBBC05" d="M10.4 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.2.8-4.7l-7.8-6C.9 16.6 0 20.2 0 24s.9 7.4 2.6 10.7l7.8-6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.8 2.3-8.4 2.3-6.4 0-11.7-4.1-13.6-9.8l-7.8 6C6.6 42.6 14.6 48 24 48z"/></svg>';
 const MS = '<svg width="18" height="18" viewBox="0 0 23 23" aria-hidden="true"><path fill="#f35325" d="M1 1h10v10H1z"/><path fill="#81bc06" d="M12 1h10v10H12z"/><path fill="#05a6f0" d="M1 12h10v10H1z"/><path fill="#ffba08" d="M12 12h10v10H12z"/></svg>';
+const FB = '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#fff"/><path fill="#0a7cff" d="M24 12a12 12 0 1 0-13.9 11.9v-8.4H7.1V12h3V9.4c0-3 1.8-4.7 4.5-4.7 1.3 0 2.7.2 2.7.2v3h-1.5c-1.5 0-2 .9-2 1.9V12h3.4l-.5 3.5h-2.9v8.4A12 12 0 0 0 24 12z"/></svg>';
 const box = document.querySelector('.oauth-buttons');
 if (box) {
-  fetch('/api/auth/providers').then((r) => r.json()).then((p) => {
+  Promise.all([fetch('/api/auth/providers').then((r) => r.json()), fetch('/api/public/config').then((r) => r.json())]).then(([p, cfg]) => {
     const btns = [];
+    // One step: create the account AND connect every Facebook Page / Instagram account the user picks in Facebook.
+    if (cfg.facebookSignup && !invite) {
+      const ref = q.get('ref') ? `?ref=${encodeURIComponent(q.get('ref'))}` : '';
+      btns.push(`<a class="btn oauth fb" href="/api/oauth/meta/signup${ref}">${FB} Continue with Facebook</a><p class="hint fb-note">Creates your account and connects your Pages & Instagram in one step.</p>`);
+    }
     if (p.google?.login) btns.push(`<a class="btn oauth" href="/api/oauth/google/login">${G} Continue with Google</a>`);
     if (p.microsoft?.login) btns.push(`<a class="btn oauth" href="/api/oauth/microsoft/login">${MS} Continue with Microsoft</a>`);
     if (btns.length) box.innerHTML = `${btns.join('')}<div class="divider"><span>or with email</span></div>`;

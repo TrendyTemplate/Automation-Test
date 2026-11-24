@@ -59,8 +59,9 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   await page.waitForSelector('#err:has-text("10 characters")');
   await page.fill('#password', PW);
   await page.click('#auth-form button[type=submit]');
-  await page.waitForURL('**/app');
-  await page.waitForSelector('text=Get your assistant selling');
+  await page.waitForURL(/\/app(#.*)?$/);
+  await page.waitForURL('**/app#welcome');
+  await page.waitForSelector('h1:has-text("Connect your Facebook Page")');
 
   // Add a product through the modal
   await page.goto(`${base}/app#catalog`);
@@ -119,7 +120,7 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   assert.equal(sent.length, 1);
 
   // Every page renders; no console errors
-  for (const v of ['dashboard', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
+  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('h1', { timeout: 5000 });
   }
@@ -154,7 +155,7 @@ test('team invitation: invite → /join → sign up → member of the team with 
   const owner = await browser.newPage();
   await owner.goto(`${base}/login`);
   await owner.fill('#email', 'uma@ui.test'); await owner.fill('#password', PW);
-  await owner.click('#auth-form button[type=submit]'); await owner.waitForURL('**/app');
+  await owner.click('#auth-form button[type=submit]'); await owner.waitForURL(/\/app(#.*)?$/);
   const wsId = await owner.evaluate(async () => (await (await fetch('/api/auth/me')).json()).workspace.id);
   const { run } = await import('../src/db.js');
   run(`UPDATE workspaces SET plan='pro', subscription_status='active', billing_interval='monthly' WHERE id = ?`, wsId);
@@ -168,7 +169,7 @@ test('team invitation: invite → /join → sign up → member of the team with 
   assert.equal(await guest.evaluate(() => document.getElementById('email').readOnly), true, 'invited email is locked');
   await guest.fill('#name', 'Nia'); await guest.fill('#password', PW);
   await guest.click('#auth-form button[type=submit]');
-  await guest.waitForURL('**/app');
+  await guest.waitForURL(/\/app(#.*)?$/);
   await guest.waitForFunction(() => /UI Shop/.test(document.getElementById('ws-name').textContent) || /UI Shop/.test(document.querySelector('#ws-switch option:checked')?.textContent || ''));
   const nav = (await guest.textContent('#nav')) + (await guest.textContent('#rail-foot'));
   assert.ok(!nav.includes('Channels') && !nav.includes('Alerts & API'), 'members do not see setup pages');
@@ -185,7 +186,7 @@ test('phone layout: bottom tab bar, More sheet, chat opens full screen', { skip:
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/login`);
   await page.fill('#email', 'uma@ui.test'); await page.fill('#password', PW);
-  await page.click('#auth-form button[type=submit]'); await page.waitForURL('**/app');
+  await page.click('#auth-form button[type=submit]'); await page.waitForURL(/\/app(#.*)?$/);
   await page.waitForSelector('#tabbar a:has-text("Chats")');
   assert.equal(await page.isVisible('#rail'), false, 'rail is hidden on phones');
   await page.click('#more-btn');
@@ -197,7 +198,7 @@ test('phone layout: bottom tab bar, More sheet, chat opens full screen', { skip:
   assert.equal(await page.isVisible('.convo-list'), false, 'list hides while reading');
   await page.click('.chat-back');
   await page.waitForSelector('.convo:not(.reading) .convo-list');
-  for (const v of ['dashboard', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'billing', 'security']) {
+  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'billing', 'security']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('h1');
     const w = await page.evaluate(() => document.documentElement.scrollWidth);

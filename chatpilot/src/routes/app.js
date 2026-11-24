@@ -41,6 +41,13 @@ r.get('/dashboard', (req, res) => {
     hotLeads: all(`SELECT v.id, v.customer_name, v.customer_id, v.intent, v.lead_score, v.stage, ch.platform FROM conversations v JOIN channels ch ON ch.id = v.channel_id
       WHERE v.workspace_id = ? AND v.lead_score >= 70 AND v.stage NOT IN ('ordered', 'lost') AND v.last_inbound_at > datetime('now','-3 days') ORDER BY v.lead_score DESC LIMIT 6`, id),
     activity: all('SELECT * FROM activity WHERE workspace_id = ? ORDER BY id DESC LIMIT 12', id),
+    pages: all(`SELECT c.id, c.name, c.platform, c.mode, c.enabled, c.last_error, c.history_status,
+        (SELECT COUNT(*) FROM conversations v WHERE v.channel_id = c.id AND v.last_inbound_at > datetime('now','-1 day')) AS today,
+        (SELECT COUNT(*) FROM conversations v WHERE v.channel_id = c.id AND v.status = 'needs_human') AS needs_human,
+        (SELECT COUNT(*) FROM learn_examples e WHERE e.channel_id = c.id AND e.weight > 0) AS learned,
+        (SELECT COUNT(*) FROM orders o JOIN conversations v ON v.id = o.conversation_id WHERE v.channel_id = c.id AND o.created_at > datetime('now','-30 days') AND o.status != 'cancelled') AS orders30
+      FROM channels c WHERE c.workspace_id = ? ORDER BY c.id`, id),
+    learnedTotal: n('SELECT COUNT(*) AS n FROM learn_examples WHERE workspace_id = ? AND weight > 0', id),
   });
 });
 

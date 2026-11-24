@@ -14,7 +14,8 @@ import adminRoutes from './routes/admin.js';
 import oauthRoutes from './routes/oauth.js';
 import { webhookRouter as socialWebhook } from './routes/sales.js';
 import metaCallbacks, { deletionStatusPage } from './routes/meta.js';
-import { appUrl, appName, getSetting } from './settings.js';
+import { appUrl, appName, getSetting, getBool } from './settings.js';
+import { metaConnectAvailable } from './services/meta.js';
 import fs from 'node:fs';
 import { aiEnabled } from './services/ai.js';
 import { stripe } from './routes/billing.js';
@@ -91,7 +92,7 @@ export function createApp() {
   // API keys are for the data API only — never for account, OAuth, billing or admin routes.
   app.use(['/api/auth', '/api/oauth', '/api/billing', '/api/admin'], (req, res, next) =>
     (/^Bearer\s+cp_live_/i.test(req.headers.authorization || '') ? res.status(403).json({ error: 'API keys cannot access this endpoint' }) : next()));
-  app.get('/api/public/config', (req, res) => res.json({ appName: appName() }));
+  app.get('/api/public/config', (req, res) => res.json({ appName: appName(), facebookSignup: metaConnectAvailable() && getBool('signup_enabled') }));
   app.use('/api/oauth', rateLimit({ windowMs: 15 * 60_000, limit: 60 }), oauthRoutes);
   app.use('/api/auth', rateLimit({ windowMs: 15 * 60_000, limit: Number(process.env.AUTH_RATE_LIMIT || 30), standardHeaders: true, legacyHeaders: false }), authRoutes);
   app.use('/api/billing', billingRoutes);

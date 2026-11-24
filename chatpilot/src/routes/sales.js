@@ -5,10 +5,11 @@ import { requireRole } from '../auth.js';
 import { randomToken } from '../crypto.js';
 import { seal, open } from '../vault.js';
 import { appUrl, getSetting } from '../settings.js';
-import { metaConnectAvailable, subscribePage, subscribeWaba } from '../services/meta.js';
+import { metaConnectAvailable } from '../services/meta.js';
 import { PLATFORMS, parseWebhook, verifySignature, insideWindow, testChannel } from '../services/social.js';
 import { handleEvents, deliver, storeOutbound, decide, priceOrder, orderSummary, decryptChat, STAGES } from '../services/sales.js';
 import { aiEnabled } from '../services/ai.js';
+import { learnFromReply, learnFromDraft, latestProfile, forgetFact, maybeDistill, queueImport } from '../services/learning.js';
 import { effectivePlan } from '../plans.js';
 
 // ---------------------------------------------------------------- webhook
@@ -58,7 +59,8 @@ const bad = (res, msg) => res.status(400).json({ error: msg });
 
 const channelOut = (c) => ({
   id: c.id, platform: c.platform, platform_label: PLATFORMS[c.platform].label, name: c.name, external_id: c.external_id, send_id: c.send_id,
-  mode: c.mode, enabled: Boolean(c.enabled), managed: Boolean(c.managed), followup_hours: c.followup_hours, greeting: c.greeting,
+  mode: c.mode, comment_mode: c.comment_mode, enabled: Boolean(c.enabled), managed: Boolean(c.managed),
+  history_status: c.history_status, history_stats: c.history_stats ? JSON.parse(c.history_stats) : null, followup_hours: c.followup_hours, greeting: c.greeting,
   last_event_at: c.last_event_at, last_error: c.last_error, created_at: c.created_at,
   verify_token: c.verify_token, webhook_url: `${appUrl()}/api/social/webhook`,
 });
@@ -95,6 +97,7 @@ function channelInput(b, existing = null) {
   if (b.access_token) out.access_token = s(b.access_token, 2000);
   if (b.app_secret) { out.app_secret = s(b.app_secret, 200); if (!/^[0-9a-f]{16,64}$/i.test(out.app_secret)) throw new Error('App secret should be the hex string from Meta app → Settings → Basic'); }
   if (b.mode !== undefined) { if (!['off', 'draft', 'auto'].includes(b.mode)) throw new Error('Invalid mode'); out.mode = b.mode; }
+  if (b.comment_mode !== undefined) { if (!['off', 'draft', 'auto'].includes(b.comment_mode)) throw new Error('Invalid comment mode'); out.comment_mode = b.comment_mode; }
   if (b.enabled !== undefined) out.enabled = b.enabled ? 1 : 0;
   if (b.followup_hours !== undefined) out.followup_hours = Math.max(0, Math.min(20, int(b.followup_hours) || 0));
   if (b.greeting !== undefined) out.greeting = s(b.greeting, 500) || null;
@@ -121,6 +124,7 @@ r.post('/channels', manage, async (req, res) => {
   seal(wsId(req), 'channels.access_token', v.access_token), seal(wsId(req), 'channels.app_secret', v.app_secret),
   `mp_${randomToken(24)}`, v.mode || 'draft', v.followup_hours || 0, v.greeting || null).lastInsertRowid);
   audit(req, 'channel.connect', id, { platform: v.platform });
+  queueImport(id);
   logActivity(wsId(req), 'channel_added', { platform: v.platform, name });
   res.json(channelOut(one('SELECT * FROM channels WHERE id = ?', id)));
 });
@@ -131,7 +135,7 @@ r.put('/channels/:id', manage, (req, res) => {
   let v;
   try { v = channelInput(req.body || {}, ch); } catch (e) { return bad(res, e.message); }
   const sets = []; const vals = [];
-  for (const k of ['name', 'send_id', 'mode', 'enabled', 'followup_hours', 'greeting']) if (k in v) { sets.push(`${k} = ?`); vals.push(v[k]); }
+  for (const k of ['name', 'send_id', 'mode', 'comment_mode', 'enabled', 'followup_hours', 'greeting']) if (k in v) { sets.push(`${k} = ?`); vals.push(v[k]); }
   if (v.access_token) { sets.push('access_token_enc = ?'); vals.push(seal(ch.workspace_id, 'channels.access_token', v.access_token)); }
   if (v.app_secret) { sets.push('app_secret_enc = ?'); vals.push(seal(ch.workspace_id, 'channels.app_secret', v.app_secret)); }
   if (sets.length) run(`UPDATE channels SET ${sets.join(', ')} WHERE id = ?`, ...vals, ch.id);
@@ -147,62 +151,37 @@ r.delete('/channels/:id', manage, (req, res) => {
 });
 
 // ----- "Connect with Facebook": pick which Pages / Instagram accounts / WhatsApp numbers to connect
+r.get('/pages', (req, res) => res.json(all('SELECT id, name, platform, mode, comment_mode, enabled, history_status FROM channels WHERE workspace_id = ? ORDER BY id', wsId(req))));
 r.get('/meta/status', (req, res) => res.json({ available: metaConnectAvailable() }));
-const pendingOf = (req) => {
-  const p = one(`SELECT * FROM meta_pending WHERE id = ? AND workspace_id = ? AND user_id = ? AND expires_at > datetime('now')`, String(req.params.id), wsId(req), req.user.id);
-  return p ? { ...p, data: JSON.parse(open(p.workspace_id, 'meta_pending.data', p.data_enc)) } : null;
-};
-r.get('/meta/pending/:id', manage, (req, res) => {
-  const p = pendingOf(req);
-  if (!p) return res.status(404).json({ error: 'This connection request expired — please click Connect again.' });
-  const taken = (platform, id) => {
-    const c = one('SELECT workspace_id FROM channels WHERE platform = ? AND external_id = ?', platform, id);
-    return c ? (c.workspace_id === wsId(req) ? 'here' : 'elsewhere') : null;
-  };
-  res.json({ kind: p.kind, items: p.data.items.map((it) => (p.kind === 'whatsapp'
-    ? { id: it.id, name: it.name, phone: it.phone, connected: taken('whatsapp', it.id) }
-    : { id: it.id, name: it.name, connected: taken('messenger', it.id), instagram: it.instagram ? { ...it.instagram, connected: taken('instagram', it.instagram.id) } : null })) });
+
+
+// ----- learning: what the assistant has learned from each page (fully automatic; this is for transparency)
+r.get('/learning', (req, res) => {
+  const id = wsId(req);
+  const channels = all('SELECT id, platform, name, history_status, history_stats, created_at FROM channels WHERE workspace_id = ? ORDER BY id', id).map((c) => {
+    const p = one('SELECT * FROM learned_profiles WHERE workspace_id = ? AND channel_id = ? ORDER BY id DESC LIMIT 1', id, c.id);
+    const lp = p ? latestProfile(id, c.id) : null;
+    return { ...c, history_stats: c.history_stats ? JSON.parse(c.history_stats) : null,
+      examples: one('SELECT COUNT(*) AS n FROM learn_examples WHERE channel_id = ? AND weight > 0', c.id).n,
+      from_history: one(`SELECT COUNT(*) AS n FROM learn_examples WHERE channel_id = ? AND source = 'history'`, c.id).n,
+      from_live: one(`SELECT COUNT(*) AS n FROM learn_examples WHERE channel_id = ? AND source != 'history' AND weight > 0`, c.id).n,
+      corrections: one(`SELECT COUNT(*) AS n FROM learn_examples WHERE channel_id = ? AND source IN ('ai_edited', 'ai_rejected')`, c.id).n,
+      learned_at: p?.created_at || null, profile: lp?.profile || null };
+  });
+  const recent = all(`SELECT id, channel_id, kind, source, weight, outcome, happened_at, question_enc, answer_enc FROM learn_examples WHERE workspace_id = ? AND source != 'history' ORDER BY id DESC LIMIT 15`, id)
+    .map((x) => ({ id: x.id, channel_id: x.channel_id, kind: x.kind, source: x.source, weight: x.weight, outcome: x.outcome, happened_at: x.happened_at,
+      question: open(id, 'learn.question', x.question_enc).slice(0, 200), answer: open(id, 'learn.answer', x.answer_enc).slice(0, 300) }));
+  res.json({ channels, recent, total: one('SELECT COUNT(*) AS n FROM learn_examples WHERE workspace_id = ? AND weight > 0', id).n });
 });
-r.post('/meta/pending/:id/connect', manage, async (req, res) => {
-  const p = pendingOf(req);
-  if (!p) return res.status(404).json({ error: 'This connection request expired — please click Connect again.' });
-  const mode = ['off', 'draft', 'auto'].includes(req.body?.mode) ? req.body.mode : 'draft';
-  const plan = effectivePlan(req.workspace);
-  const want = [];
-  const pick = new Set((Array.isArray(req.body?.select) ? req.body.select : []).map(String)); // "messenger:<id>", "instagram:<id>", "whatsapp:<id>"
-  for (const it of p.data.items) {
-    if (p.kind === 'whatsapp') { if (pick.has(`whatsapp:${it.id}`)) want.push({ platform: 'whatsapp', external_id: it.id, name: it.name || it.phone, token: p.data.userToken, waba: it.waba }); continue; }
-    if (pick.has(`messenger:${it.id}`)) want.push({ platform: 'messenger', external_id: it.id, name: it.name, token: it.token, page: it });
-    if (it.instagram && pick.has(`instagram:${it.instagram.id}`)) want.push({ platform: 'instagram', external_id: it.instagram.id, send_id: it.id, name: it.instagram.username ? `@${it.instagram.username}` : it.name, token: it.token, page: it });
-  }
-  if (!want.length) return bad(res, 'Select at least one account');
-  const results = [];
-  const subscribed = new Set();
-  for (const w of want) {
-    const existing = one('SELECT * FROM channels WHERE platform = ? AND external_id = ?', w.platform, w.external_id);
-    if (existing && existing.workspace_id !== wsId(req)) { results.push({ name: w.name, error: 'already connected to another ChatPilot workspace' }); continue; }
-    if (!existing && one('SELECT COUNT(*) AS n FROM channels WHERE workspace_id = ?', wsId(req)).n >= plan.channels) {
-      results.push({ name: w.name, error: `your ${plan.name} plan allows ${plan.channels} channel(s)` }); continue;
-    }
-    try {
-      const subKey = w.page ? `page:${w.page.id}` : `waba:${w.waba}`;
-      if (!subscribed.has(subKey)) { await (w.page ? subscribePage(w.page.id, w.page.token) : subscribeWaba(w.waba, w.token)); subscribed.add(subKey); }
-    } catch (e) { results.push({ name: w.name, error: `Meta refused the webhook subscription: ${e.message}` }); continue; }
-    const tokenEnc = seal(wsId(req), 'channels.access_token', w.token);
-    if (existing) {
-      run(`UPDATE channels SET access_token_enc = ?, managed = 1, connected_by = ?, send_id = COALESCE(?, send_id), waba_id = COALESCE(?, waba_id), enabled = 1, last_error = NULL WHERE id = ?`,
-        tokenEnc, p.fb_user_id, w.send_id || null, w.waba || null, existing.id);
-      results.push({ name: w.name, ok: true, reconnected: true });
-    } else {
-      const id = Number(run(`INSERT INTO channels (workspace_id, platform, name, external_id, send_id, access_token_enc, app_secret_enc, verify_token, mode, managed, connected_by, waba_id)
-        VALUES (?,?,?,?,?,?,'',?,?,1,?,?)`, wsId(req), w.platform, w.name, w.external_id, w.send_id || null, tokenEnc, `cp_${randomToken(24)}`, mode, p.fb_user_id, w.waba || null).lastInsertRowid);
-      audit(req, 'channel.connect', id, { platform: w.platform, via: 'facebook_login' });
-      logActivity(wsId(req), 'channel_added', { platform: w.platform, name: w.name });
-      results.push({ name: w.name, ok: true });
-    }
-  }
-  run('DELETE FROM meta_pending WHERE id = ?', p.id);
-  res.json({ results });
+r.post('/learning/forget', manage, (req, res) => {
+  if (!s(req.body?.fact)) return bad(res, 'Which fact?');
+  forgetFact(wsId(req), s(req.body.fact, 300));
+  res.json({ ok: true });
+});
+r.post('/learning/refresh', manage, async (req, res) => {
+  for (const c of all('SELECT id, history_status FROM channels WHERE workspace_id = ?', wsId(req))) if (['failed', null].includes(c.history_status)) queueImport(c.id);
+  await maybeDistill(wsId(req), { force: true });
+  res.json({ ok: true });
 });
 
 // ----- products (catalog)
@@ -264,6 +243,8 @@ r.delete('/products/:id', manage, (req, res) => {
 r.get('/conversations', (req, res) => {
   const where = ['v.workspace_id = ?']; const p = [wsId(req)];
   if (PLATFORMS[req.query.platform]) { where.push('c.platform = ?'); p.push(req.query.platform); }
+  if (int(req.query.channel)) { where.push('c.id = ?'); p.push(int(req.query.channel)); }
+  if (['message', 'comment'].includes(req.query.kind)) { where.push('v.kind = ?'); p.push(req.query.kind); }
   if (['open', 'needs_human', 'closed'].includes(req.query.status)) { where.push('v.status = ?'); p.push(req.query.status); }
   if (req.query.view === 'drafts') where.push(`EXISTS (SELECT 1 FROM chat_messages m WHERE m.conversation_id = v.id AND m.status = 'draft')`);
   if (STAGES.includes(req.query.stage)) { where.push('v.stage = ?'); p.push(req.query.stage); }
@@ -296,29 +277,36 @@ r.post('/conversations/:id/reply', async (req, res) => {
   if (!v) return res.status(404).json({ error: 'Not found' });
   const body = s(req.body?.body, 4000);
   if (!body) return bad(res, 'Write a message first');
-  if (!insideWindow(v.last_inbound_at)) return res.status(409).json({ error: `${PLATFORMS[v.platform].label} only allows replies within 24 hours of the customer's last message.` });
+  if (v.kind !== 'comment' && !insideWindow(v.last_inbound_at)) return res.status(409).json({ error: `${PLATFORMS[v.platform].label} only allows replies within 24 hours of the customer's last message.` });
   // A person answering pauses the AI for this chat (default 12h) so it doesn't talk over them.
   run(`UPDATE chat_messages SET status = 'rejected' WHERE conversation_id = ? AND status = 'draft'`, v.id);
   const id = storeOutbound(v, body, { source: 'human', status: 'draft', userId: req.user.id });
   if (req.body.pause_ai !== false) run(`UPDATE conversations SET ai_paused_until = datetime('now', '+12 hours') WHERE id = ?`, v.id);
   try { await deliver(id, req.user.id); } catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
+  learnFromReply(v.id, id, 'human', 1); // every answer a person writes teaches the assistant
   res.json({ ok: true, id });
 });
 
 r.post('/messages/:id/approve', async (req, res) => {
   const m = one(`SELECT * FROM chat_messages WHERE id = ? AND workspace_id = ? AND status IN ('draft', 'failed')`, int(req.params.id), wsId(req));
   if (!m) return res.status(404).json({ error: 'Draft not found' });
+  const original = m.ai_original ? open(m.workspace_id, 'chat_messages.ai_original', m.ai_original) : open(m.workspace_id, 'chat_messages.body', m.body);
+  let final = open(m.workspace_id, 'chat_messages.body', m.body);
   if (req.body?.body != null) {
-    const body = s(req.body.body, 4000);
-    if (!body) return bad(res, 'Message is empty');
-    run('UPDATE chat_messages SET body = ? WHERE id = ?', seal(m.workspace_id, 'chat_messages.body', body), m.id);
+    final = s(req.body.body, 4000);
+    if (!final) return bad(res, 'Message is empty');
+    run('UPDATE chat_messages SET body = ? WHERE id = ?', seal(m.workspace_id, 'chat_messages.body', final), m.id);
   }
   try { await deliver(m.id, req.user.id); } catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
+  if (m.source === 'ai') learnFromDraft(m.conversation_id, m.id, { original, final, action: 'sent' });
   logActivity(wsId(req), 'chat_approved_sent', { conversation: m.conversation_id, by: req.user.name || req.user.email });
   res.json({ ok: true });
 });
 r.post('/messages/:id/reject', (req, res) => {
-  run(`UPDATE chat_messages SET status = 'rejected' WHERE id = ? AND workspace_id = ? AND status IN ('draft', 'failed')`, int(req.params.id), wsId(req));
+  const m = one(`SELECT * FROM chat_messages WHERE id = ? AND workspace_id = ? AND status IN ('draft', 'failed')`, int(req.params.id), wsId(req));
+  if (!m) return res.json({ ok: true });
+  run(`UPDATE chat_messages SET status = 'rejected' WHERE id = ?`, m.id);
+  if (m.source === 'ai') learnFromDraft(m.conversation_id, m.id, { original: open(m.workspace_id, 'chat_messages.body', m.body), action: 'rejected' });
   res.json({ ok: true });
 });
 

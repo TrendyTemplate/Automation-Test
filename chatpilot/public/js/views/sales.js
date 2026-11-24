@@ -6,7 +6,7 @@ const plBadge = (p) => `<span class="pf ${esc(p)}">${esc(PL[p]?.name || p)}</spa
 const STAGE_TONE = { ordered: 'ok', ordering: 'primary', negotiating: 'warn', interested: 'info', lost: 'bad', support: '' };
 const stageBadge = (s) => `<span class="badge ${STAGE_TONE[s] || ''}">${esc(label(s))}</span>`;
 const fmtMoney = (n, cur) => `${esc(cur)} ${Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-const who = (c) => c.customer_name || (c.platform === 'whatsapp' ? `+${c.customer_id}` : `${PL[c.platform]?.name || ''} customer ${String(c.customer_id).slice(-4)}`);
+const who = (c) => c.customer_name || (c.kind === 'comment' ? 'Commenter' : c.platform === 'whatsapp' ? `+${c.customer_id}` : `${PL[c.platform]?.name || ''} customer ${String(c.customer_id).slice(-4)}`);
 const initials = (c) => (c.customer_name ? c.customer_name.split(/\s+/).map((w) => w[0]).slice(0, 2).join('') : (PL[c.platform]?.name || '?')[0]);
 const HUES = [160, 15, 200, 280, 35, 330, 100];
 const cav = (c, cls = '') => `<span class="cav ${esc(c.platform)} ${cls}" style="background:hsl(${HUES[(Number(c.id) || 0) % HUES.length]} 55% 42%)" aria-hidden="true">${esc(initials(c))}</span>`;
@@ -15,28 +15,31 @@ const shortAgo = (d) => ago(d).replace(' ago', '').replace('just now', 'now');
 
 // ---------------------------------------------------------------- conversations
 export async function chats(ctx, params) {
-  const filters = Object.fromEntries(Object.entries({ platform: params.platform, status: params.status, view: params.view, q: params.q }).filter(([, v]) => v));
+  const filters = Object.fromEntries(Object.entries({ channel: params.channel, kind: params.kind, platform: params.platform, status: params.status, view: params.view, q: params.q }).filter(([, v]) => v));
   const sel = params.id ? await api(`/sales/conversations/${Number(params.id)}`).catch(() => null) : null; // first, so it is marked read
-  const [ov, list] = await Promise.all([api('/sales/overview'), api(`/sales/conversations?${new URLSearchParams(filters)}`)]);
+  const [ov, list, pages] = await Promise.all([api('/sales/overview'), api(`/sales/conversations?${new URLSearchParams(filters)}`), api('/sales/pages')]);
+  const many = pages.length > 1;
   const q = (over) => `#chats?${new URLSearchParams(Object.fromEntries(Object.entries({ ...filters, ...over }).filter(([, v]) => v)))}`;
   const f = (text, over, on) => `<a class="${on ? 'on' : ''}" href="${q({ ...over, id: '' })}">${text}</a>`;
-  const noFilter = !params.platform && !params.status && !params.view;
+  const noFilter = !params.platform && !params.status && !params.view && !params.kind;
   ctx.view.innerHTML = `
     <div class="convo ${sel ? 'reading' : ''}" id="convo">
       <section class="convo-list" aria-label="Conversations">
         <div class="convo-head">
           <div class="row nowrap"><h1>Chats</h1><span class="spacer"></span><a class="btn sm" href="#saleslab">${icon('flask', 'sm')}Test</a></div>
+          ${many ? `<select id="page-pick" aria-label="Page"><option value="">All pages (${pages.length})</option>${pages.map((p) => `<option value="${p.id}" ${String(p.id) === String(params.channel || '') ? 'selected' : ''}>${esc(p.name || PL[p.platform].name)} · ${esc(PL[p.platform].name)}</option>`).join('')}</select>` : ''}
           <form data-act="search" class="input-icon">${icon('search')}<input name="q" placeholder="Search name, phone, intent" value="${esc(params.q || '')}" aria-label="Search conversations"></form>
-          <div class="filters">${f('All', { platform: '', status: '', view: '' }, noFilter)}
+          <div class="filters">${f('All', { platform: '', status: '', view: '', kind: '' }, noFilter)}
             ${f(`Needs you <span class="n">${ov.needsHuman || ''}</span>`, { status: 'needs_human', view: '', platform: '' }, params.status === 'needs_human')}
-            ${f(`Drafts <span class="n">${ov.drafts || ''}</span>`, { view: 'drafts', status: '', platform: '' }, params.view === 'drafts')}
-            ${Object.entries(PL).map(([k, v]) => f(v.name, { platform: k, status: '', view: '' }, params.platform === k)).join('')}</div>
+            ${f(`Drafts <span class="n">${ov.drafts || ''}</span>`, { view: 'drafts', status: '', platform: '', kind: '' }, params.view === 'drafts')}
+            ${f('Comments', { kind: 'comment', view: '', status: '', platform: '' }, params.kind === 'comment')}
+            ${many ? '' : Object.entries(PL).map(([k, v]) => f(v.name, { platform: k, status: '', view: '', kind: '' }, params.platform === k)).join('')}</div>
         </div>
         ${setupHint(ov, ctx)}
         <div class="convo-items">${list.map((c) => `<a class="citem ${sel?.id === c.id ? 'on' : ''} ${c.unread ? 'unread' : ''}" href="${q({ id: c.id })}">
             ${cav(c)}<div class="body"><div class="top"><span class="name">${esc(who(c))}</span><span class="time">${shortAgo(c.last_inbound_at || c.created_at)}</span></div>
             <div class="row nowrap" style="gap:8px"><div class="last" style="flex:1">${esc(c.last_body || c.intent || '')}</div>${c.unread ? `<span class="count">${c.unread}</span>` : ''}</div>
-            <div class="tags">${c.status === 'needs_human' ? '<span class="tag human">Needs you</span>' : ''}${c.drafts ? '<span class="tag draft">Draft ready</span>' : ''}
+            <div class="tags">${c.kind === 'comment' ? `<span class="tag">${icon('chat', 'sm')} Comment</span>` : ''}${many ? `<span class="tag page">${esc(c.channel_name || '')}</span>` : ''}${c.status === 'needs_human' ? '<span class="tag human">Needs you</span>' : ''}${c.drafts ? '<span class="tag draft">Draft ready</span>' : ''}
               ${c.stage && !['new', 'browsing'].includes(c.stage) ? `<span class="tag stage">${esc(label(c.stage))}</span>` : ''}${c.lead_score >= 70 && c.stage !== 'ordered' ? `<span class="tag hot">${icon('flame', 'sm')} Hot</span>` : ''}</div></div></a>`).join('')
           || `<div class="convo-empty"><div><div class="art">${icon('chat')}</div><h3>No conversations yet</h3><p>Customer messages appear here as soon as a channel is connected.</p></div></div>`}</div>
       </section>
@@ -44,14 +47,14 @@ export async function chats(ctx, params) {
       ${sel ? customerPane(sel) : '<aside class="convo-side"></aside>'}
     </div>`;
   bind({ search: (form) => { location.hash = q({ q: formData(form).q, id: '' }).slice(1); } }, ctx.view);
+  $('#page-pick')?.addEventListener('change', (e) => { location.hash = q({ channel: e.target.value, id: '' }).slice(1); });
   if (sel) bindPane(ctx, sel);
 }
 
 function setupHint(ov, ctx) {
   const steps = [];
   if (!ov.aiEnabled) steps.push('AI is not configured on this server yet.');
-  if (!ov.channels.length) steps.push(canManage(ctx) ? '<a href="#channels">Connect your Page, Instagram or WhatsApp</a>' : 'Ask an owner/admin to connect a channel.');
-  if (!ov.products) steps.push(canManage(ctx) ? '<a href="#catalog">Add products & prices</a>' : 'No products yet.');
+  if (!ov.channels.length) steps.push(canManage(ctx) ? '<a href="#welcome">Connect your Facebook Page</a> — that\'s all it takes.' : 'Ask an owner/admin to connect a page.');
   return steps.length ? `<div class="callout primary" style="margin:12px 12px 0">${icon('sparkles')}<div>${steps.join('<br>')}</div></div>` : '';
 }
 
@@ -62,25 +65,25 @@ function chatPane(c, q) {
     const sep = day !== lastDay ? `<div class="day-sep">${esc(new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }))}</div>` : '';
     lastDay = day;
     if (m.direction === 'out' && ['draft', 'failed'].includes(m.status)) {
-      return `${sep}<div class="draft-card"><div class="dh">${icon(m.status === 'failed' ? 'alert' : 'sparkles', 'sm')}${m.status === 'failed' ? `Send failed${m.error ? ` — ${esc(m.error)}` : ''}` : 'AI draft — check and send'}${m.confidence != null ? `<span class="spacer"></span><span class="hint">${Math.round(m.confidence * 100)}% sure</span>` : ''}</div>
+      return `${sep}<div class="draft-card"><div class="dh">${icon(m.status === 'failed' ? 'alert' : 'sparkles', 'sm')}${m.status === 'failed' ? `Send failed${m.error ? ` — ${esc(m.error)}` : ''}` : m.delivery === 'private' ? 'AI draft — private reply to their inbox' : m.delivery === 'public' ? 'AI draft — public reply under the comment' : 'AI draft — check and send'}${m.confidence != null ? `<span class="spacer"></span><span class="hint">${Math.round(m.confidence * 100)}% sure</span>` : ''}</div>
         <textarea data-draft="${m.id}" rows="${Math.min(12, String(m.body).split('\n').length + 2)}" aria-label="Draft reply">${esc(m.body)}</textarea>
         ${m.guard?.length ? `<ul>${m.guard.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
         <div class="row mt-s"><button class="btn sm primary" data-act="approve" data-id="${m.id}">${icon('send', 'sm')}Send</button><button class="btn sm ghost" data-act="reject" data-id="${m.id}">Discard</button></div></div>`;
     }
     const out = m.direction === 'out';
-    const src = { ai: '<span class="ai">AI</span>', human: 'You', human_app: 'Staff (Meta inbox)' }[m.source] || '';
+    const src = `${{ ai: '<span class="ai">AI</span>', human: 'You', human_app: c.kind === 'comment' ? 'Page' : 'Staff (Meta inbox)' }[m.source] || ''}${m.delivery === 'private' ? ' · 📩 private reply' : m.delivery === 'public' ? ' · public reply' : ''}`;
     return `${sep}<div class="bubble-row ${out ? 'out' : 'in'}"><div class="bubble ${out ? `out ${m.source === 'ai' ? '' : 'staff'}` : 'in'}"><div class="bubble-t">${esc(m.body)}</div></div>
       <div class="bubble-meta">${src}${src ? '·' : ''}<span>${esc(new Date(`${String(m.created_at).replace(' ', 'T')}Z`).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }))}</span></div></div>`;
   }).join('');
   return `
     <header class="chat-head"><a class="btn ghost icon-only chat-back" href="${q({ id: '' })}" aria-label="Back to chats">${icon('chevronLeft')}</a>${cav(c, 'sm')}
-      <div class="who"><b>${esc(who(c))}</b><span>${plBadge(c.platform)} ${esc(c.intent || c.summary || '')}</span></div>
+      <div class="who"><b>${esc(who(c))}</b><span>${plBadge(c.platform)} ${c.kind === 'comment' ? `Comment on a post${c.post_id && c.platform === 'messenger' ? ` · <a href="https://www.facebook.com/${encodeURIComponent(c.post_id)}" target="_blank" rel="noopener">open post</a>` : ''} · ` : ''}${esc(c.channel_name || '')} · ${esc(c.intent || c.summary || '')}</span></div>
       <button class="btn sm ${c.ai_paused ? 'primary' : ''}" data-act="pause" title="${c.ai_paused ? 'Let the AI answer again' : 'Stop the AI for this chat'}">${icon(c.ai_paused ? 'play' : 'userCheck', 'sm')}<span>${c.ai_paused ? 'Resume AI' : 'Take over'}</span></button>
       <button class="btn sm ghost icon-only" data-act="close" title="${c.status === 'closed' ? 'Reopen' : 'Close chat'}" aria-label="${c.status === 'closed' ? 'Reopen' : 'Close chat'}">${icon(c.status === 'closed' ? 'undo' : 'archive', 'sm')}</button></header>
     ${c.status === 'needs_human' ? `<div class="callout warn chat-alert">${icon('alert')}<div><b>Needs you:</b> ${esc(c.handoff_reason || '')} <a href="#" data-act="resolve">Mark handled</a></div></div>` : ''}
     ${c.ai_paused ? `<div class="callout chat-alert">${icon('userCheck')}<div>You're handling this chat — the AI stays quiet until you resume it.</div></div>` : ''}
     <div class="bubbles" id="bubbles">${items || '<p class="hint">No messages.</p>'}</div>
-    ${c.can_reply ? `<form class="composer" data-act="reply"><textarea name="body" rows="1" placeholder="Write a reply… (the AI pauses for 12 h)" aria-label="Reply"></textarea><button class="btn primary" type="submit" aria-label="Send">${icon('send')}</button></form>`
+    ${c.can_reply || c.kind === 'comment' ? `<form class="composer" data-act="reply"><textarea name="body" rows="1" placeholder="${c.kind === 'comment' ? 'Reply publicly under the comment…' : 'Write a reply… (the AI pauses for 12 h)'}" aria-label="Reply"></textarea><button class="btn primary" type="submit" aria-label="Send">${icon('send')}</button></form>`
     : `<div class="window-closed">${icon('clock')}<span>Meta's 24-hour reply window has closed — you can answer when the customer writes again.</span></div>`}`;
 }
 
@@ -191,6 +194,12 @@ const HOWTO = {
     <li>Copy the <b>Phone number ID</b> from WhatsApp → API setup (not the phone number itself) and the <b>App secret</b>.</li>
     <li>Add the webhook below under WhatsApp → Configuration and subscribe to <code>messages</code>.</li></ol>`,
 };
+const learnLine = (c) => {
+  const st = c.history_stats || {};
+  return { pending: 'Getting ready to learn from this page…', running: 'Learning from past chats and comments…', unavailable: 'Learns from every new chat (WhatsApp has no past-chat access).',
+    failed: 'Could not read past chats — learning from every new chat instead.', done: `Learned from ${st.conversations || 0} past chats and ${st.comments || 0} comment threads; keeps learning from every reply.` }[c.history_status]
+    || 'Keeps learning from every reply your team sends.';
+};
 const CONNECT_ERRORS = {
   not_configured: 'One-click connect is not set up on this server yet — use "Connect manually" below, or ask the platform admin to add the Meta app in Admin → Settings → Meta.',
   expired: 'The connection took too long. Please try again.', forbidden: 'Only owners and admins can connect channels.',
@@ -218,6 +227,8 @@ export async function channels(ctx, params = {}) {
       <form data-act="save" data-id="${c.id}"><label>How should the assistant reply?</label>
         <div class="seg">${[['off', 'Off'], ['draft', 'I approve each reply'], ['auto', 'Auto-pilot']].map(([v, l]) => `<label style="padding:6px 12px;margin:0;cursor:pointer;font-weight:600"><input type="radio" name="mode" value="${v}" ${c.mode === v ? 'checked' : ''}> ${l}</label>`).join('')}</div>
         <p class="field-hint">Auto-pilot still holds a reply for you when a safety check fails (unknown price, low confidence, complaint, manipulation attempt).</p>
+        ${c.platform === 'whatsapp' ? '' : `<label>Post comments</label><div class="seg">${[['off', 'Ignore'], ['draft', 'I approve'], ['auto', 'Answer automatically']].map(([v, l]) => `<label style="padding:6px 12px;margin:0;cursor:pointer;font-weight:600"><input type="radio" name="comment_mode" value="${v}" ${c.comment_mode === v ? 'checked' : ''}> ${l}</label>`).join('')}</div>`}
+        <p class="field-hint">${icon('sparkles', 'sm')} ${learnLine(c)}</p>
         <div class="grid g2"><div><label>Follow up quiet buyers after (hours, 0 = off)</label><input name="followup_hours" type="number" min="0" max="20" value="${c.followup_hours}"></div>
           <div><label>Greeting for new chats <span class="hint">(optional)</span></label><input name="greeting" value="${esc(c.greeting || '')}" placeholder="আসসালামু আলাইকুম! কীভাবে সাহায্য করতে পারি?"></div></div>
         ${c.managed ? '' : '<details><summary class="hint">Replace token / app secret</summary><div class="grid g2"><div><label>New access token</label><input name="access_token" type="password" autocomplete="off"></div><div><label>New app secret</label><input name="app_secret" type="password" autocomplete="off"></div></div></details>'}
@@ -247,28 +258,6 @@ export async function channels(ctx, params = {}) {
     },
     del: async (b) => { if (await confirmBox('Disconnect this channel?', 'Its conversations are deleted from ChatPilot. Orders are kept.', { danger: true, ok: 'Disconnect' })) { await api(`/sales/channels/${b.dataset.id}`, { method: 'DELETE' }); ctx.route(); } },
   }, ctx.view);
-  if (params.pick) pickAccounts(ctx, params.pick);
-}
-
-/** After "Connect with Facebook": choose which Pages / Instagram accounts / numbers to connect. */
-async function pickAccounts(ctx, id) {
-  let data;
-  try { data = await api(`/sales/meta/pending/${encodeURIComponent(id)}`); } catch (e) { toast(e.message, true); location.hash = 'channels'; return; }
-  const row = (key, title, sub, state) => `<label class="pick-row" style="margin:0;font-weight:500"><input type="checkbox" name="sel" value="${esc(key)}" ${state === 'elsewhere' ? 'disabled' : state === 'here' ? '' : 'checked'}>
-    <div style="flex:1;min-width:0"><b>${esc(title)}</b><div class="hint">${esc(sub)}${state === 'here' ? ' · already connected (will refresh the token)' : state === 'elsewhere' ? ' · connected to another ChatPilot shop' : ''}</div></div></label>`;
-  const rows = data.kind === 'whatsapp'
-    ? data.items.map((n) => row(`whatsapp:${n.id}`, n.name || n.phone, `WhatsApp · ${n.phone}`, n.connected)).join('')
-    : data.items.map((p) => row(`messenger:${p.id}`, p.name, 'Facebook Page · Messenger', p.connected) + (p.instagram ? row(`instagram:${p.instagram.id}`, `@${p.instagram.username || p.instagram.id}`, `Instagram · linked to ${p.name}`, p.instagram.connected) : '')).join('');
-  modal(`<h2>Choose what to connect</h2><p class="hint">Facebook shared these with ChatPilot. Pick the ones the assistant should answer.</p>
-    <form data-act="go">${rows}<label>Start in</label><select name="mode"><option value="draft">I approve each reply (recommended first)</option><option value="auto">Auto-pilot</option></select>
-    <button class="btn primary mt" type="submit">Connect selected</button></form>`, (el, close) => bind({ go: async (form) => {
-    const select = $$('input[name=sel]:checked', form).map((i) => i.value);
-    const r = await api(`/sales/meta/pending/${encodeURIComponent(id)}/connect`, { method: 'POST', body: { select, mode: form.mode.value } });
-    const bad = r.results.filter((x) => !x.ok);
-    close();
-    toast(bad.length ? `${r.results.length - bad.length} connected · ${bad.map((x) => `${x.name}: ${x.error}`).join('; ')}` : `${r.results.length} channel${r.results.length > 1 ? 's' : ''} connected`, Boolean(bad.length));
-    location.hash = 'channels';
-  } }, el), { wide: true, onClose: () => { if (location.hash.includes('pick=')) history.replaceState(null, '', '#channels'); } });
 }
 
 // ---------------------------------------------------------------- test chat

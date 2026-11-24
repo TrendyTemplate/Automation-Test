@@ -2,6 +2,7 @@
 import { all, run } from '../db.js';
 import { salesFollowUps } from './sales.js';
 import { checkLifecycle } from './lifecycle.js';
+import { maybeDistill, queueImport } from './learning.js';
 
 export const workerState = { startedAt: null, lastTickAt: null, lastTickMs: 0, ticks: 0, lastError: null };
 const TICK_SEC = Number(process.env.WORKER_INTERVAL_SEC || 300);
@@ -10,6 +11,7 @@ const TICK_SEC = Number(process.env.WORKER_INTERVAL_SEC || 300);
 export function purgeOldData() {
   for (const ws of all('SELECT id, retention_days FROM workspaces WHERE retention_days > 0')) {
     run(`DELETE FROM chat_messages WHERE workspace_id = ? AND created_at < datetime('now', ?)`, ws.id, `-${ws.retention_days} days`);
+    run(`DELETE FROM learn_examples WHERE workspace_id = ? AND created_at < datetime('now', ?)`, ws.id, `-${ws.retention_days} days`);
   }
   run(`DELETE FROM activity WHERE created_at < datetime('now', '-180 days')`);
   run(`DELETE FROM tokens WHERE expires_at < datetime('now')`);
@@ -19,6 +21,9 @@ async function tick() {
   const t0 = Date.now();
   await salesFollowUps().catch((e) => console.error('[sales-followups]', e.message));
   await checkLifecycle().catch((e) => console.error('[lifecycle]', e.message));
+  // Continuous learning: re-distill pages with new examples; retry history imports that never finished.
+  for (const c of all(`SELECT id FROM channels WHERE history_status IN ('pending', 'running') AND created_at < datetime('now', '-30 minutes')`)) queueImport(c.id);
+  for (const w of all('SELECT DISTINCT workspace_id FROM learn_examples')) await maybeDistill(w.workspace_id).catch((e) => console.error('[learning]', e.message));
   if (workerState.ticks % 12 === 0) purgeOldData();
   workerState.ticks++;
   workerState.lastTickAt = new Date().toISOString();

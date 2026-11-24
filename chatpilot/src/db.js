@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT,
   password_hash TEXT NOT NULL,
   is_admin INTEGER NOT NULL DEFAULT 0,
-  google_id TEXT, microsoft_id TEXT, avatar_url TEXT,
+  google_id TEXT, microsoft_id TEXT, facebook_id TEXT, avatar_url TEXT,
   email_verified INTEGER NOT NULL DEFAULT 0, suspended INTEGER NOT NULL DEFAULT 0,
   totp_secret_enc TEXT, totp_enabled INTEGER NOT NULL DEFAULT 0,
   last_login_at TEXT, last_login_ip TEXT, referral_code TEXT, referred_by INTEGER,
@@ -192,6 +192,9 @@ CREATE TABLE IF NOT EXISTS channels (            -- a connected Facebook Page, I
   managed INTEGER NOT NULL DEFAULT 0,            -- 1 = connected with "Connect with Facebook" (uses the platform's Meta app secret)
   connected_by TEXT,                             -- Facebook user id that granted access (for Meta data-deletion / deauthorize callbacks)
   waba_id TEXT,                                  -- WhatsApp Business Account id (WhatsApp channels)
+  comment_mode TEXT NOT NULL DEFAULT 'auto',     -- off | draft | auto: answer public comments on posts (Page / Instagram)
+  history_status TEXT,                           -- learning from past chats & comments: pending | running | done | failed | unavailable
+  history_stats TEXT,                            -- JSON {conversations, comments, examples}
   last_event_at TEXT, last_error TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (platform, external_id)
@@ -229,7 +232,9 @@ CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-  customer_id TEXT NOT NULL,                     -- PSID / IGSID / WhatsApp number
+  customer_id TEXT NOT NULL,                     -- PSID / IGSID / WhatsApp number; "c:<comment id>" for a comment thread
+  kind TEXT NOT NULL DEFAULT 'message',          -- message | comment
+  post_id TEXT, comment_id TEXT,                 -- comment threads: the post and the top-level comment
   customer_name TEXT, customer_phone TEXT, customer_address TEXT,
   stage TEXT NOT NULL DEFAULT 'new',             -- new | browsing | interested | negotiating | ordering | ordered | support | lost
   lead_score INTEGER, intent TEXT, language TEXT, summary TEXT,
@@ -254,6 +259,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   body TEXT,                                     -- encrypted per workspace
   status TEXT NOT NULL DEFAULT 'received',       -- received | draft | sent | failed | rejected
   guard_json TEXT, error TEXT, confidence REAL,
+  delivery TEXT,                                 -- comment threads: public (reply under the comment) | private (to the commenter's inbox)
+  ai_original TEXT,                              -- the AI draft before a person edited it (encrypted), for learning
   sent_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -271,6 +278,38 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_orders_ws ON orders(workspace_id, id DESC);
+
+-- ---------------------------------------------------------------- the learning engine
+CREATE TABLE IF NOT EXISTS learn_examples (      -- "customer said X → the shop answered Y", collected automatically
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  channel_id INTEGER REFERENCES channels(id) ON DELETE CASCADE,
+  conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL DEFAULT 'message',          -- message | comment
+  source TEXT NOT NULL,                          -- history | human | human_app | ai_approved | ai_edited | ai_rejected
+  question_enc TEXT NOT NULL, answer_enc TEXT NOT NULL,  -- encrypted per workspace; phone numbers/addresses masked
+  weight REAL NOT NULL DEFAULT 1,                -- edited > human > approved; rejected drafts are negative
+  outcome TEXT,                                  -- ordered (the chat ended in an order)
+  dedupe TEXT NOT NULL,                          -- hash, so imports and retries never double count
+  happened_at TEXT NOT NULL DEFAULT (datetime('now')), created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (workspace_id, dedupe)
+);
+CREATE INDEX IF NOT EXISTS idx_learn_ws ON learn_examples(workspace_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_learn_conv ON learn_examples(conversation_id);
+
+CREATE TABLE IF NOT EXISTS learned_profiles (    -- what the AI distilled from the examples, per channel (versioned)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  channel_id INTEGER REFERENCES channels(id) ON DELETE CASCADE,
+  profile_enc TEXT NOT NULL,                     -- JSON {summary, style, facts[], faq[], avoid[], comment_style}
+  examples_used INTEGER NOT NULL DEFAULT 0, last_example_id INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_profiles ON learned_profiles(workspace_id, channel_id, id DESC);
+CREATE TABLE IF NOT EXISTS learned_forget (      -- facts the owner removed: never learned again
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 // node:sqlite rejects undefined/boolean bindings; normalise them.

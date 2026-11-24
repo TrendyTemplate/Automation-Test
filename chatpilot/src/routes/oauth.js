@@ -4,35 +4,64 @@ import { buildAuthUrl, verifyState, exchangeCode, oauthAvailability, PROVIDERS }
 import { getBool } from '../settings.js';
 import { createAccount, finishLogin } from './auth.js';
 import { requireAuth } from '../auth.js';
-import { randomToken } from '../crypto.js';
-import { seal } from '../vault.js';
+import { connectGranted } from '../services/connect.js';
 import { metaConnectAvailable, buildConnectUrl, verifyConnectState, exchangeCode as metaExchangeCode, listPages, listWhatsAppNumbers } from '../services/meta.js';
 
 const r = Router();
 
-// ---------- "Connect with Facebook" (Pages, Instagram, WhatsApp) — registered before the generic sign-in routes ----------
+// ---------- Facebook: "Continue with Facebook" (account + pages in one step) and "Connect" (signed-in users) ----------
 const managerOnly = (req, res, next) => (['owner', 'admin'].includes(req.role) && !req.viaApiKey ? next() : res.redirect('/app#channels?error=forbidden'));
+r.get('/meta/signup', (req, res) => {
+  if (!metaConnectAvailable()) return res.redirect('/signup?error=provider_disabled');
+  res.redirect(buildConnectUrl('signup', { ref: req.query.ref || req.cookies?.mp_ref || null }));
+});
 r.get('/meta/connect', requireAuth, managerOnly, (req, res) => {
   if (!metaConnectAvailable()) return res.redirect('/app#channels?error=not_configured');
   const kind = req.query.kind === 'whatsapp' ? 'whatsapp' : 'pages';
   res.redirect(buildConnectUrl(kind, { uid: req.user.id, wsId: req.workspace.id }));
 });
 r.get('/meta/callback', async (req, res) => {
-  const back = (q) => res.redirect(`/app#channels?${new URLSearchParams(q)}`);
+  let state = null;
+  try { state = verifyConnectState(String(req.query.state || '')); } catch { /* handled below */ }
+  const signup = state?.kind === 'signup';
+  const back = (q) => res.redirect(signup ? `/signup?${new URLSearchParams(q)}` : `/app#channels?${new URLSearchParams(q)}`);
   if (req.query.error) return back({ error: String(req.query.error_reason || req.query.error).slice(0, 80) });
-  let state;
-  try { state = verifyConnectState(String(req.query.state || '')); } catch { return back({ error: 'expired' }); }
-  const member = one('SELECT role FROM workspace_members WHERE user_id = ? AND workspace_id = ?', state.uid, state.wsId);
-  if (!member || !['owner', 'admin'].includes(member.role)) return back({ error: 'forbidden' });
+  if (!state) return back({ error: 'expired' });
   try {
     const u = await metaExchangeCode(String(req.query.code || ''));
-    const items = state.kind === 'whatsapp' ? await listWhatsAppNumbers(u.token) : await listPages(u.token);
-    if (!items.length) return back({ error: state.kind === 'whatsapp' ? 'no_whatsapp_numbers' : 'no_pages' });
-    const id = randomToken(16);
-    run(`INSERT INTO meta_pending (id, workspace_id, user_id, kind, fb_user_id, data_enc, expires_at) VALUES (?,?,?,?,?,?, datetime('now', '+15 minutes'))`,
-      id, state.wsId, state.uid, state.kind, u.fbUserId, seal(state.wsId, 'meta_pending.data', JSON.stringify({ userToken: u.token, items })));
-    run(`DELETE FROM meta_pending WHERE expires_at < datetime('now')`);
-    return back({ pick: id });
+    let wsId = state.wsId;
+    let user = null;
+    if (signup) {
+      // Find or create the ChatPilot account for this Facebook user. Existing email accounts are only linked after a
+      // password sign-in (a Facebook email is not proof of owning that ChatPilot account).
+      user = one('SELECT * FROM users WHERE facebook_id = ?', u.fbUserId);
+      if (!user) {
+        if (u.email && one('SELECT id FROM users WHERE email = ?', u.email)) return back({ error: 'account_exists_use_password' });
+        if (!getBool('signup_enabled')) return back({ error: 'signups_closed' });
+        user = createAccount({ email: u.email || `fb-${u.fbUserId}@facebook.invalid`, name: u.name, verified: Boolean(u.email), refCode: state.ref, facebookId: u.fbUserId });
+      }
+      if (user.suspended) return res.redirect('/login?error=suspended');
+      wsId = one(`SELECT workspace_id FROM workspace_members WHERE user_id = ? AND role IN ('owner', 'admin') ORDER BY (workspace_id = ?) DESC LIMIT 1`, user.id, user.current_workspace_id || 0)?.workspace_id;
+    } else {
+      const member = one('SELECT role FROM workspace_members WHERE user_id = ? AND workspace_id = ?', state.uid, state.wsId);
+      if (!member || !['owner', 'admin'].includes(member.role)) return back({ error: 'forbidden' });
+      run('UPDATE users SET facebook_id = COALESCE(facebook_id, ?) WHERE id = ? AND NOT EXISTS (SELECT 1 FROM users WHERE facebook_id = ?)', u.fbUserId, state.uid, u.fbUserId);
+    }
+    const kind = state.kind === 'whatsapp' ? 'whatsapp' : 'pages';
+    const items = kind === 'whatsapp' ? await listWhatsAppNumbers(u.token) : await listPages(u.token);
+    const results = items.length ? await connectGranted(req, wsId, { kind, fbUserId: u.fbUserId, userToken: u.token, items }) : [];
+    const ok = results.filter((x) => x.ok).length;
+    const q = { connected: String(ok), ...(results.some((x) => !x.ok) ? { problems: results.filter((x) => !x.ok).map((x) => `${x.name}: ${x.error}`).join(' · ').slice(0, 300) } : {}),
+      ...(!items.length ? { error: kind === 'whatsapp' ? 'no_whatsapp_numbers' : 'no_pages' } : {}) };
+    if (signup) {
+      if (user.totp_enabled) {
+        const jwt = (await import('jsonwebtoken')).default;
+        const { config } = await import('../config.js');
+        return res.redirect(`/login?twofa=${encodeURIComponent(jwt.sign({ uid: user.id, pending2fa: true }, config.jwtSecret, { expiresIn: '10m' }))}`);
+      }
+      finishLogin(req, res, user, 'facebook');
+    }
+    return res.redirect(`/app#welcome?${new URLSearchParams(q)}`);
   } catch (e) {
     console.error('[meta-connect]', e.message);
     return back({ error: e.message.slice(0, 120) });

@@ -453,3 +453,31 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--surface-2); 
 }
 .row.nowrap > div { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 520px) { .card .row.nowrap { flex-wrap: wrap; } .card .row.nowrap > .nowrap { white-space: normal; } }
+.btn.oauth.fb { background: #0a7cff; border-color: #0a7cff; color: #fff; height: 50px; font-size: 15.5px; }
+.btn.oauth.fb:hover { background: #0868d6; }
+.fb-note { text-align: center; margin: 6px 0 4px; }
+
+/* ---------- Welcome (one-step onboarding) & learning ---------- */
+.welcome { max-width: 640px; margin: 4vh auto 0; text-align: center; }
+.welcome h1 { font-size: clamp(30px, 4vw, 42px); margin-bottom: 10px; }
+.welcome .lead-w { font-size: 17px; color: var(--text-2); margin-bottom: 26px; }
+.welcome-art { width: 96px; height: 96px; border-radius: 32px; display: grid; place-items: center; margin: 0 auto 20px; background: var(--primary-soft); color: var(--primary-text); }
+.welcome-art.ok { background: var(--ok-soft); color: var(--ok); }
+.welcome-art .icon { width: 46px; height: 46px; stroke-width: 1.6; }
+.btn.fbig { height: 58px; padding: 0 30px; font-size: 17px; background: #0a7cff; border-color: #0a7cff; color: #fff; margin-bottom: 12px; }
+.btn.fbig:hover { background: #0868d6; }
+.welcome-steps { list-style: none; padding: 0; margin: 34px 0 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; counter-reset: s; text-align: left; }
+.welcome-steps li { counter-increment: s; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 14px; font-size: 13.5px; color: var(--text-2); }
+.welcome-steps li::before { content: counter(s); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--primary); color: #fff; font-weight: 800; margin-bottom: 8px; }
+.welcome-pages { display: grid; gap: 8px; text-align: left; }
+.wp { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; align-items: center; padding: 14px 16px; border-radius: 18px; background: var(--surface); border: 1px solid var(--border); }
+.wp .hint { grid-column: 2; display: flex; gap: 5px; align-items: center; }
+.learn-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.learn-grid h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.fact { display: flex; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.fact span:first-child { flex: 1; }
+.qa { display: flex; flex-direction: column; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; } .qa span { color: var(--text-2); }
+.lesson { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px; } .lesson.neg { opacity: .75; } .lesson.neg b { color: var(--bad); }
+.tag.page { background: var(--surface-2); color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+.page-card { display: flex; flex-direction: column; gap: 6px; }
+@media (max-width: 860px) { .welcome-steps, .learn-grid { grid-template-columns: 1fr; } }

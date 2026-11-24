@@ -7,6 +7,10 @@ AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp 
 > ChatPilot is a separate product from MailPilot AI (the email assistant at the repository root). It shares the same account, billing, admin and security foundation, but has its own database, plans, pages and deployment.
 
 ## What it does
+- **One step to start** — "Continue with Facebook" creates the account and connects every Page (plus linked Instagram) the owner selects; the shop profile is filled from the Page and the assistant is live immediately.
+- **Learns by itself, continuously** — from the Page's past chats and comment replies on connect, then from every reply the team sends (in ChatPilot or in Facebook/Instagram), every edited or discarded AI draft, and which chats end in orders. Per-page playbooks (style, facts, FAQs, comment style, "never say") are re-distilled automatically; similar past replies are recalled for each new message. Personal data is masked; everything is encrypted per workspace. See the **Learning** page.
+- **Many pages, one account** — filter chats by page, per-page cards on Home, per-page learning and settings.
+- **Post comments** — public reply under the comment plus an optional private inbox reply, in the page's own learned style.
 - **Answers in seconds, day and night** — price, size, colour, stock, delivery charge, payment method; Bangla, Banglish, English and 40+ languages.
 - **Takes the order** — asks only for what's missing, appends an exact order summary computed by the server from catalog prices, and records the order when the customer confirms. Stock is reduced (and restored when an order is cancelled).
 - **Safe by design** — invented prices or discounts, unknown links, "never say" phrases, low confidence, complaints/refunds and prompt-injection attempts are held as drafts for a person. Even on Auto-pilot.
@@ -23,7 +27,7 @@ AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp 
 cd chatpilot
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test             # 43 tests: unit, API, security, webhook→AI→Graph pipeline, Meta connect & deletion callbacks, browser + phone layout (Playwright)
+npm test             # 46 tests (learning engine, comments and one-step Facebook sign-up included): unit, API, security, webhook→AI→Graph pipeline, Meta connect & deletion callbacks, browser + phone layout (Playwright)
 ANTHROPIC_API_KEY=sk-ant-… npm run check:ai   # 10 real conversations against the live Claude API (quality check, nothing is sent)
 ```
 Without an Anthropic key, customer messages are stored but not answered. Keys can be entered in **Admin → Settings** instead of `.env`.
@@ -53,6 +57,8 @@ src/
     auth.js · oauth.js (sign-in + Connect with Facebook) · billing.js · admin.js
   services/
     social.js          webhook parsing (Messenger / Instagram / WhatsApp), signature check, Graph API send, 24h window
+    learning.js        the learning engine: collect examples, recall similar replies, distill per-page playbooks, history import
+    connect.js         connect every granted Page / Instagram / WhatsApp at once, fill the shop profile, start learning
     meta.js            Connect with Facebook (Pages, Instagram, WhatsApp), webhook subscriptions, signed_request
     sales.js           the assistant: catalog-grounded structured replies, guards, server-priced orders, hand-off, follow-ups
     ai.js              Claude client, privacy masking, usage tracking
