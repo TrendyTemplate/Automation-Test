@@ -7,6 +7,7 @@ import { aiEnabled, writeFollowUp, writeBriefing } from './ai.js';
 import { sendSystemEmail, sendTelegram, sendSlack } from './notify.js';
 import { open } from '../vault.js';
 import { checkLifecycle } from './lifecycle.js';
+import { salesFollowUps } from './sales.js';
 import { appUrl, appName } from '../settings.js';
 
 const busy = new Set();
@@ -153,6 +154,7 @@ async function tick() {
   }
   await sendDigests().catch((e) => console.error('[digest]', e.message));
   await checkSla().catch((e) => console.error('[sla]', e.message));
+  if (workerState.ticks % 5 === 1) await salesFollowUps().catch((e) => console.error('[sales-followups]', e.message));
   if (workerState.ticks % 5 === 1) await checkLifecycle().catch((e) => console.error('[lifecycle]', e.message));
   workerState.lastTickAt = new Date().toISOString();
   workerState.lastTickMs = Date.now() - t0;

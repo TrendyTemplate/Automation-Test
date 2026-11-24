@@ -72,7 +72,7 @@ export function redact(text) {
 }
 export const countRedactions = (text) => REDACTIONS.reduce((n, [re]) => n + (String(text || '').match(new RegExp(re.source, re.flags)) || []).length, 0);
 
-async function call(ws, { system, user, schema, maxTokens = 4000, purpose = 'other', messageId = null, redactions = 0 }) {
+export async function call(ws, { system, user, schema, maxTokens = 4000, purpose = 'other', messageId = null, redactions = 0 }) {
   const c = getClient();
   if (!c) throw new Error('AI is not configured');
   const params = {

@@ -3,7 +3,7 @@
 Multi-mailbox email automation SaaS. Customers connect all their email accounts (Gmail, Outlook, Yahoo, iCloud, Zoho, Yandex, any custom-domain IMAP/SMTP), and the AI (Anthropic Claude) reads, classifies, prioritizes and replies automatically — or drafts replies for one-click approval.
 
 > 🇧🇩 বাংলা: **[লঞ্চ চেকলিস্ট](docs/LAUNCH_CHECKLIST_BN.md)** · **[ব্যবসায়িক গাইড ও প্রতিযোগী বিশ্লেষণ](docs/BUSINESS_GUIDE_BN.md)** · **[গবেষণা: কেন অন্যরা ব্যর্থ হয়েছে](docs/RESEARCH_BN.md)**
-> 🔒 **[Security architecture](docs/SECURITY.md)**
+> 🔒 **[Security architecture](docs/SECURITY.md)** · 💬 **[AI সেলস অ্যাসিস্ট্যান্ট (Messenger/Instagram/WhatsApp) সেটআপ](docs/SOCIAL_SALES_BN.md)**
 
 ## What makes it different
 - **Any provider**: Gmail, Outlook/M365, Yahoo, iCloud, Zoho, Yandex and any IMAP/cPanel/custom domain — plus one-click Google & Microsoft OAuth.
@@ -22,6 +22,8 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 - **Security**: per-workspace envelope encryption (AES-256-GCM + AAD) for credentials *and* email content, server-side revocable sessions, lockout, 2FA (required for admins), consent-based support access, emergency lockdown, SSRF-proof networking — see [docs/SECURITY.md](docs/SECURITY.md).
 
 - **Automation, not just drafting**: a live **Automation Center** (pipeline, real-time activity feed, auto-replies counting down with *Send now / Stop*, automation-readiness score, per-rule run counts), **10 one-click recipes**, **plain-language rules** ("when a customer is angry, assign it to me and draft an apology" → a validated rule you review), and **emails become tasks** (the AI extracts action items with due dates, linked to the email and assignable).
+
+- **AI sales assistant on Messenger, Instagram & WhatsApp**: answers product questions in the customer's language, recommends from your catalog, collects name/phone/address and records confirmed orders. Totals are computed on the server from catalog prices (the AI never sets prices); invented prices, manipulation attempts, complaints and low confidence are held for approval; human takeover pauses the AI; Meta's 24-hour window is enforced; signed webhooks (X-Hub-Signature-256). See [docs/SOCIAL_SALES_BN.md](docs/SOCIAL_SALES_BN.md).
 
 ## Features
 
@@ -50,7 +52,7 @@ Multi-mailbox email automation SaaS. Customers connect all their email accounts 
 ```bash
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test             # 56 tests: unit, API, workflows, security attacks, real IMAP/SMTP end-to-end, browser (Playwright)
+npm test             # 65 tests: unit, API, workflows, security attacks, real IMAP/SMTP end-to-end, browser (Playwright)
 # Optional: explore with demo data (login demo@mailpilot.test / Demo-Pass-2026, platform admin)
 DB_PATH=./data/demo.db node scripts/seed-demo.js && DB_PATH=./data/demo.db npm start
 ```
@@ -103,6 +105,8 @@ src/
     worker.js          sync loop, scheduled sends, follow-ups, daily briefing, retention purge
     oauth.js           Google/Microsoft OAuth + XOAUTH2 token refresh
     notify.js          system email, Telegram, Slack
+    social.js          Messenger / Instagram / WhatsApp webhook parsing, signature check, Graph API send
+    sales.js           AI sales assistant: catalog-grounded replies, guards, orders, handoff, follow-ups
     totp.js            2FA (RFC 6238)
 public/                landing, auth pages, customer app (/app, js/views/*) and admin panel (/admin); vanilla JS ES modules, no build step
 test/                  unit, api, security, e2e-mail (real IMAP+SMTP servers), ui (Playwright), ai-pipeline
@@ -113,6 +117,7 @@ scripts/seed-demo.js   demo data for screenshots and sales demos
 | Sidebar | Tabs / contents | Who |
 |---|---|---|
 | Home | setup checklist, KPIs, hot leads, activity | everyone |
+| Social sales | Conversations · Orders · Products · Channels (owner/admin) · Test chat | everyone |
 | Inbox | two-pane inbox; views: inbox, mine, unassigned, overdue, awaiting reply, flagged, snoozed; bulk actions | everyone |
 | Approvals | AI drafts, follow-ups, scheduled autopilot replies (undo) | everyone |
 | Tasks | open · assigned to me · done; AI-extracted and manual to-dos | everyone |

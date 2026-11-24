@@ -5,6 +5,7 @@ import * as crm from './views/crm.js';
 import * as setup from './views/setup.js';
 import * as account from './views/account.js';
 import * as automation from './views/automation.js';
+import * as sales from './views/sales.js';
 
 const ctx = { me: null, view: $('#view'), counts: {} };
 const MANAGERS = ['owner', 'admin'];
@@ -13,6 +14,7 @@ const MANAGERS = ['owner', 'admin'];
 const NAV = [
   { id: 'dashboard', label: 'Home', icon: 'home' },
   { id: 'inbox', label: 'Inbox', icon: 'inbox', count: 'inbox' },
+  { id: 'chats', label: 'Social sales', icon: 'chat', count: 'chats' },
   { id: 'approvals', label: 'Approvals', icon: 'checkCircle', count: 'approvals' },
   { id: 'tasks', label: 'Tasks', icon: 'listCheck', count: 'tasks' },
   { id: 'automation', label: 'Automation Center', icon: 'workflow' },
@@ -33,11 +35,12 @@ const NAV = [
 const SECTIONS = {
   brain: [['brain', 'Business & voice', 'wand'], ['knowledge', 'Knowledge base', 'book'], ['templates', 'Templates', 'file']],
   automation: [['automation', 'Live pipeline', 'activity'], ['recipes', 'Recipes', 'sparkles', MANAGERS], ['rules', 'Rules', 'zap', MANAGERS], ['autopilot', 'Autopilot & safety', 'shieldCheck', MANAGERS], ['simulator', 'Test lab', 'flask']],
+  chats: [['chats', 'Conversations', 'chat'], ['orders', 'Orders', 'card'], ['catalog', 'Products', 'layers'], ['channels', 'Channels', 'plug', MANAGERS], ['saleslab', 'Test chat', 'flask']],
   profile: [['profile', 'Profile', 'users'], ['team', 'Team', 'users'], ['billing', 'Plan & billing', 'card', MANAGERS], ['security', 'Security & privacy', 'lock'], ['referrals', 'Refer & earn', 'gift']],
 };
-const PARENT = { message: 'inbox', contact: 'contacts', ticket: 'support' };
+const PARENT = { message: 'inbox', contact: 'contacts', ticket: 'support', chat: 'chats' };
 for (const [parent, tabs] of Object.entries(SECTIONS)) for (const [id] of tabs) PARENT[id] = parent;
-const ROLE_ONLY = { mailboxes: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, templates: MANAGERS, autopilot: MANAGERS, rules: MANAGERS, recipes: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
+const ROLE_ONLY = { mailboxes: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, templates: MANAGERS, autopilot: MANAGERS, rules: MANAGERS, recipes: MANAGERS, integrations: MANAGERS, billing: MANAGERS, channels: MANAGERS };
 
 const ROUTES = {
   dashboard: home.dashboard, ask: home.ask, approvals: home.approvals,
@@ -45,6 +48,7 @@ const ROUTES = {
   contacts: crm.contacts, contact: crm.contact, analytics: crm.analytics, declutter: crm.declutter, simulator: crm.simulator,
   mailboxes: setup.mailboxes, brain: setup.brain, autopilot: setup.autopilot, knowledge: setup.knowledge, templates: setup.templates,
   rules: setup.rules, integrations: setup.integrations,
+  chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: sales.orders, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
   automation: automation.automation, recipes: automation.recipes, tasks: automation.tasks,
   profile: account.profile, team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
 };
@@ -64,8 +68,8 @@ function sectionTabs(name) {
 
 async function refreshCounts() {
   try {
-    const [q, c, t] = await Promise.all([api('/replies?status=queue'), api('/messages/counts'), api('/tasks/counts')]);
-    ctx.counts = { approvals: q.length, inbox: c.unassigned || 0, ...c, tasks: t.open || 0 };
+    const [q, c, t, s] = await Promise.all([api('/replies?status=queue'), api('/messages/counts'), api('/tasks/counts'), api('/sales/overview').catch(() => ({}))]);
+    ctx.counts = { approvals: q.length, inbox: c.unassigned || 0, ...c, tasks: t.open || 0, chats: (s.needsHuman || 0) + (s.drafts || 0) };
   } catch { /* ignore */ }
   renderNav(currentRoute().parent);
 }
@@ -203,6 +207,8 @@ async function init() {
       { label: 'Connect an email account', icon: 'plus', run: () => { location.hash = 'mailboxes'; } },
       { label: 'Ask AI about my inbox', icon: 'sparkles', run: () => { location.hash = 'ask'; } },
       { label: 'Test how the AI would reply', icon: 'flask', run: () => { location.hash = 'simulator'; } },
+      { label: 'Connect Messenger / Instagram / WhatsApp', icon: 'chat', run: () => { location.hash = 'channels'; } },
+      { label: 'Add products for the sales assistant', icon: 'layers', run: () => { location.hash = 'catalog'; } },
       { label: 'Toggle dark mode', icon: 'moon', run: () => setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark') },
     ].filter((a) => !ql || a.label.toLowerCase().includes(ql)).map((a) => ({ ...a, group: 'Actions' }));
     let mails = [];

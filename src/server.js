@@ -12,6 +12,7 @@ import appRoutes from './routes/app.js';
 import billingRoutes, { webhookRouter } from './routes/billing.js';
 import adminRoutes from './routes/admin.js';
 import oauthRoutes from './routes/oauth.js';
+import { webhookRouter as socialWebhook } from './routes/sales.js';
 import { appUrl, appName, getSetting } from './settings.js';
 import fs from 'node:fs';
 import { aiEnabled } from './services/ai.js';
@@ -56,6 +57,8 @@ export function createApp() {
   });
 
   app.use('/api/billing/webhook', webhookRouter); // raw body, before json parser
+  // Messenger / Instagram / WhatsApp webhooks: raw body is needed to verify Meta's X-Hub-Signature-256.
+  app.use('/api/social/webhook', rateLimit({ windowMs: 60_000, limit: 3000 }), socialWebhook);
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
 
@@ -63,7 +66,7 @@ export function createApp() {
   // own origin. Uses Fetch Metadata where available and the Origin header otherwise.
   app.use('/api', (req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-    if (req.path.startsWith('/billing/webhook')) return next();
+    if (req.path.startsWith('/billing/webhook') || req.path.startsWith('/social/webhook')) return next();
     const site = req.headers['sec-fetch-site'];
     if (site && !['same-origin', 'none'].includes(site)) return res.status(403).json({ error: 'Cross-site request blocked' });
     const origin = req.headers.origin;
