@@ -189,11 +189,29 @@ CREATE TABLE IF NOT EXISTS channels (            -- a connected Facebook Page, I
   enabled INTEGER NOT NULL DEFAULT 1,
   followup_hours INTEGER NOT NULL DEFAULT 0,     -- nudge quiet buyers once inside the 24h window (0 = off)
   greeting TEXT,
+  managed INTEGER NOT NULL DEFAULT 0,            -- 1 = connected with "Connect with Facebook" (uses the platform's Meta app secret)
+  connected_by TEXT,                             -- Facebook user id that granted access (for Meta data-deletion / deauthorize callbacks)
+  waba_id TEXT,                                  -- WhatsApp Business Account id (WhatsApp channels)
   last_event_at TEXT, last_error TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (platform, external_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_verify ON channels(verify_token);
+CREATE INDEX IF NOT EXISTS idx_channels_fbuser ON channels(connected_by);
+
+CREATE TABLE IF NOT EXISTS meta_pending (        -- accounts found after "Connect with Facebook", waiting for the user to pick (15 min)
+  id TEXT PRIMARY KEY,                           -- random
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,                            -- pages | whatsapp
+  fb_user_id TEXT, data_enc TEXT NOT NULL,       -- JSON with tokens, encrypted per workspace
+  expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meta_deletions (      -- Meta "data deletion request" callbacks and their status page
+  code TEXT PRIMARY KEY, fb_user_id TEXT NOT NULL, channels_deleted INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'completed', created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

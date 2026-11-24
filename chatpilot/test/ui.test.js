@@ -85,7 +85,7 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   await page.fill('.modal [name=app_secret]', SECRET);
   await page.click('.modal button[type=submit]');
   await page.waitForSelector('h3:has-text("UI Shop Page")');
-  const verify = await page.textContent('dd code >> nth=2');
+  const verify = await page.textContent('dd code >> nth=1');
   const ok = await fetch(`${base}/api/social/webhook?hub.mode=subscribe&hub.verify_token=${verify.trim()}&hub.challenge=777`);
   assert.equal(await ok.text(), '777');
 
@@ -98,7 +98,7 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
 
   // Conversations → open chat → edit & approve the AI draft
   await page.goto(`${base}/app#chats`);
-  await page.click('.chat-item');
+  await page.click('.citem');
   await page.waitForSelector('textarea[data-draft]');
   assert.match(await page.inputValue('textarea[data-draft]'), /BDT 1,200/);
   assert.equal(await page.evaluate(() => window.__xss), undefined, 'no script from customer content executed');
@@ -114,14 +114,14 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   // Test chat answers without sending anything
   await page.goto(`${base}/app#saleslab`);
   await page.fill('[name=text]', 'hoodie ache?');
-  await page.click('form[data-act=say] button[type=submit]');
+  await page.press('[name=text]', 'Enter');
   await page.waitForSelector('#lab-b .bubble.out');
   assert.equal(sent.length, 1);
 
   // Every page renders; no console errors
   for (const v of ['dashboard', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
     await page.goto(`${base}/app#${v}`);
-    await page.waitForSelector('.page-h h1', { timeout: 5000 });
+    await page.waitForSelector('h1', { timeout: 5000 });
   }
   // Grouped sections show their tabs
   await page.goto(`${base}/app#knowledge`);
@@ -169,13 +169,43 @@ test('team invitation: invite → /join → sign up → member of the team with 
   await guest.fill('#name', 'Nia'); await guest.fill('#password', PW);
   await guest.click('#auth-form button[type=submit]');
   await guest.waitForURL('**/app');
-  await guest.waitForSelector('#ws-name:has-text("UI Shop")');
-  const nav = await guest.textContent('#nav');
+  await guest.waitForFunction(() => /UI Shop/.test(document.getElementById('ws-name').textContent) || /UI Shop/.test(document.querySelector('#ws-switch option:checked')?.textContent || ''));
+  const nav = (await guest.textContent('#nav')) + (await guest.textContent('#rail-foot'));
   assert.ok(!nav.includes('Channels') && !nav.includes('Alerts & API'), 'members do not see setup pages');
-  assert.ok(nav.includes('Conversations') && nav.includes('Settings'));
+  assert.ok(nav.includes('Chats') && nav.includes('Settings'));
   await guest.goto(`${base}/app#channels`);
   await guest.waitForSelector('text=Owners and admins only');
   assert.deepEqual(errors, []);
+});
+
+test('phone layout: bottom tab bar, More sheet, chat opens full screen', { skip: !chromium && 'playwright not installed' }, async () => {
+  const ctxp = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await ctxp.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/login`);
+  await page.fill('#email', 'uma@ui.test'); await page.fill('#password', PW);
+  await page.click('#auth-form button[type=submit]'); await page.waitForURL('**/app');
+  await page.waitForSelector('#tabbar a:has-text("Chats")');
+  assert.equal(await page.isVisible('#rail'), false, 'rail is hidden on phones');
+  await page.click('#more-btn');
+  await page.click('.sheet a:has-text("Channels")');
+  await page.waitForSelector('h1:has-text("Channels")');
+  await page.click('#tabbar a:has-text("Chats")');
+  await page.click('.citem');
+  await page.waitForSelector('.convo.reading .chat-head');
+  assert.equal(await page.isVisible('.convo-list'), false, 'list hides while reading');
+  await page.click('.chat-back');
+  await page.waitForSelector('.convo:not(.reading) .convo-list');
+  for (const v of ['dashboard', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'billing', 'security']) {
+    await page.goto(`${base}/app#${v}`);
+    await page.waitForSelector('h1');
+    const w = await page.evaluate(() => document.documentElement.scrollWidth);
+    const wide = w > 391 ? await page.evaluate(() => [...document.querySelectorAll('body *')].filter((e) => e.getBoundingClientRect().right > 392).slice(0, 4).map((e) => `${e.tagName}.${e.className}`).join(' | ')) : '';
+    assert.ok(w <= 391, `#${v} overflows: ${w}px ${wide}`);
+  }
+  assert.deepEqual(errors, []);
+  await ctxp.close();
 });
 
 test('public pages: no horizontal overflow on phones, no errors', { skip: !chromium && 'playwright not installed' }, async () => {

@@ -13,6 +13,7 @@ import billingRoutes, { webhookRouter } from './routes/billing.js';
 import adminRoutes from './routes/admin.js';
 import oauthRoutes from './routes/oauth.js';
 import { webhookRouter as socialWebhook } from './routes/sales.js';
+import metaCallbacks, { deletionStatusPage } from './routes/meta.js';
 import { appUrl, appName, getSetting } from './settings.js';
 import fs from 'node:fs';
 import { aiEnabled } from './services/ai.js';
@@ -59,6 +60,7 @@ export function createApp() {
   app.use('/api/billing/webhook', webhookRouter); // raw body, before json parser
   // Messenger / Instagram / WhatsApp webhooks: raw body is needed to verify Meta's X-Hub-Signature-256.
   app.use('/api/social/webhook', rateLimit({ windowMs: 60_000, limit: 3000 }), socialWebhook);
+  app.use('/api/meta', rateLimit({ windowMs: 60_000, limit: 120 }), metaCallbacks); // Meta data-deletion / deauthorize callbacks
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
 
@@ -66,7 +68,7 @@ export function createApp() {
   // own origin. Uses Fetch Metadata where available and the Origin header otherwise.
   app.use('/api', (req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-    if (req.path.startsWith('/billing/webhook') || req.path.startsWith('/social/webhook')) return next();
+    if (req.path.startsWith('/billing/webhook') || req.path.startsWith('/social/webhook') || req.path.startsWith('/meta/')) return next();
     const site = req.headers['sec-fetch-site'];
     if (site && !['same-origin', 'none'].includes(site)) return res.status(403).json({ error: 'Cross-site request blocked' });
     const origin = req.headers.origin;
@@ -125,6 +127,7 @@ export function createApp() {
   app.get(['/app', '/app/*splat'], (req, res) => sendPage(res, 'app'));
   app.get(['/admin', '/admin/*splat'], (req, res) => sendPage(res, 'admin'));
   app.get('/', (req, res) => sendPage(res, 'index'));
+  app.get('/deletion', deletionStatusPage);
   app.get('/:page', (req, res, next) => {
     const name = req.params.page.replace(/\.html$/, '');
     if (PAGES.has(name) && !['app', 'admin', 'index', '404'].includes(name)) return sendPage(res, name);

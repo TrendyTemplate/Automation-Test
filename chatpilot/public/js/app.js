@@ -9,18 +9,19 @@ const MANAGERS = ['owner', 'admin'];
 // Sidebar: daily work first, then setup (owners/admins), then settings. Related pages share one entry + tabs.
 const NAV = [
   { id: 'dashboard', label: 'Home', icon: 'home' },
-  { id: 'chats', label: 'Conversations', icon: 'chat', count: 'chats' },
+  { id: 'chats', label: 'Chats', icon: 'chat', count: 'chats' },
   { id: 'orders', label: 'Orders', icon: 'card' },
   { id: 'catalog', label: 'Products', icon: 'layers' },
   { id: 'saleslab', label: 'Test chat', icon: 'flask' },
-  { group: 'Setup', roles: MANAGERS },
+  { sep: true, roles: MANAGERS },
   { id: 'channels', label: 'Channels', icon: 'plug', roles: MANAGERS },
   { id: 'brain', label: 'Assistant', icon: 'brain', roles: MANAGERS },
-  { id: 'integrations', label: 'Alerts & API', icon: 'bell', roles: MANAGERS },
-  { group: 'Account' },
+  { id: 'integrations', label: 'Alerts', icon: 'bell', roles: MANAGERS },
+  { foot: true },
   { id: 'profile', label: 'Settings', icon: 'settings' },
-  { id: 'support', label: 'Help & support', icon: 'lifebuoy' },
+  { id: 'support', label: 'Help', icon: 'lifebuoy' },
 ];
+const TABS = ['dashboard', 'chats', 'orders', 'catalog']; // phone bottom bar; everything else lives under "More"
 // Pages grouped under one sidebar entry, shown as tabs.
 const SECTIONS = {
   brain: [['brain', 'Shop & safety', 'brain'], ['knowledge', 'Knowledge base', 'book']],
@@ -38,9 +39,30 @@ const ROUTES = {
 const allowed = (roles) => !roles || roles.includes(ctx.me?.role);
 
 function renderNav(active) {
-  $('#nav').innerHTML = NAV.filter((n) => allowed(n.roles)).map((n) => (n.group ? `<div class="nav-group">${esc(n.group)}</div>`
-    : `<a class="nav-link ${active === n.id ? 'on' : ''}" href="#${n.id}">${icon(n.icon)}<span>${esc(n.label)}</span>${n.count && ctx.counts[n.count] ? `<span class="badge warn">${ctx.counts[n.count]}</span>` : ''}</a>`)).join('')
-    + (ctx.me?.user.is_admin ? `<div class="nav-group">Platform</div><a class="nav-link" href="/admin">${icon('server')}<span>Admin panel</span></a>` : '');
+  const items = NAV.filter((n) => allowed(n.roles));
+  const link = (n) => `<a class="rail-link ${active === n.id ? 'on' : ''}" href="#${n.id}" title="${esc(n.label)}">${icon(n.icon)}<span>${esc(n.label)}</span>${n.count && ctx.counts[n.count] ? `<span class="dot">${ctx.counts[n.count] > 99 ? '99+' : ctx.counts[n.count]}</span>` : ''}</a>`;
+  const footAt = items.findIndex((n) => n.foot);
+  $('#nav').innerHTML = items.slice(0, footAt).map((n) => (n.sep ? '<div class="rail-sep"></div>' : link(n))).join('');
+  $('#rail-foot').innerHTML = items.slice(footAt + 1).map(link).join('')
+    + (ctx.me?.user.is_admin ? `<a class="rail-link" href="/admin" title="Admin panel">${icon('server')}<span>Admin</span></a>` : '');
+  const tab = (id) => { const n = NAV.find((x) => x.id === id); return `<a href="#${id}" class="${active === id ? 'on' : ''}">${icon(n.icon)}<span>${esc(n.label)}</span>${n.count && ctx.counts[n.count] ? `<span class="dot">${ctx.counts[n.count]}</span>` : ''}</a>`; };
+  const more = !TABS.includes(active);
+  $('#tabbar').innerHTML = TABS.map(tab).join('') + `<button type="button" id="more-btn" class="${more ? 'on' : ''}">${icon('menu')}<span>More</span></button>`;
+  $('#more-btn').addEventListener('click', openMore);
+}
+
+function openMore() {
+  const items = NAV.filter((n) => n.id && !TABS.includes(n.id) && allowed(n.roles));
+  const bg = document.createElement('div');
+  bg.className = 'sheet-bg';
+  bg.innerHTML = `<div class="sheet" role="dialog" aria-label="More"><div class="sheet-grid">${items.map((n) => `<a href="#${n.id}">${icon(n.icon)}<span>${esc(n.label)}</span></a>`).join('')}
+    ${ctx.me?.user.is_admin ? `<a href="/admin">${icon('server')}<span>Admin</span></a>` : ''}<a href="#" data-x="theme">${icon('moon')}<span>Theme</span></a></div></div>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.addEventListener('click', (e) => {
+    if (e.target === bg || e.target.closest('a[href^="#"]:not([data-x])') || e.target.closest('a[href="/admin"]')) close();
+    if (e.target.closest('[data-x=theme]')) { e.preventDefault(); close(); setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'); }
+  });
 }
 
 function sectionTabs(name) {
@@ -68,8 +90,9 @@ export async function route() {
   const { name, params, parent } = currentRoute();
   const seq = ++routeSeq;
   renderNav(parent);
-  $('#side').classList.remove('open');
-  const full = false;
+  const full = name === 'chats' || name === 'chat';
+  $('#content').classList.toggle('full', full);
+  $('#banners').hidden = full;
   const keepInbox = false;
   if (!keepInbox) ctx.view.innerHTML = '<div class="skeleton" style="height:28px;width:220px;margin-bottom:18px"></div><div class="grid g4">' + '<div class="skeleton" style="height:96px"></div>'.repeat(4) + '</div>';
   const tab = Object.values(SECTIONS).flat().find((t) => t[0] === name);
@@ -121,7 +144,6 @@ function themeIcon() {
 async function init() {
   applyTheme();
   $('#brand-mark').innerHTML = icon('logo');
-  $('#menu-btn').innerHTML = icon('menu');
   $('#search-icon').innerHTML = icon('search');
   $('#help-btn').innerHTML = icon('help');
   themeIcon();
@@ -137,13 +159,15 @@ async function init() {
   if (me.impersonatedBy) $('#imp').innerHTML = `<div class="imp-bar">Support view: you are signed in as ${esc(me.user.email)}. <a href="#" id="stop-imp">End session</a></div>`;
   const sw = $('#ws-switch');
   if (me.workspaces.length > 1) {
-    sw.hidden = false;
+    sw.hidden = false; $('#ws-name').hidden = true;
     sw.innerHTML = me.workspaces.map((w) => `<option value="${w.id}" ${w.id === me.workspace.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('');
     sw.addEventListener('change', async () => { await api(`/auth/workspaces/${sw.value}/switch`, { method: 'POST' }); location.hash = 'dashboard'; location.reload(); });
   }
   const plan = me.effectivePlan;
-  $('#side-foot').innerHTML = `<div class="usage-mini"><div class="row" style="justify-content:space-between"><b>${esc(plan.name)} plan</b>${MANAGERS.includes(me.role) ? `<a href="#billing">${me.workspace.plan === 'trial' || plan.key === 'expired' ? 'Upgrade' : 'Manage'}</a>` : `<span class="hint">${esc(label(me.role))}</span>`}</div></div>`;
-  $('#user-btn').innerHTML = `${avatar(me.user.name, me.user.email, 'sm')}<span class="truncate" style="max-width:140px">${esc(me.user.name || me.user.email)}</span>${icon('chevron', 'sm')}`;
+  const pill = $('#plan-pill');
+  pill.textContent = me.workspace.plan === 'trial' && plan.key !== 'expired' ? `Trial · ${Math.max(0, Math.ceil((new Date(me.workspace.trial_ends_at) - Date.now()) / 86400_000))}d left` : plan.key === 'expired' ? 'Plan expired' : plan.name;
+  if (!MANAGERS.includes(me.role)) pill.removeAttribute('href');
+  $('#user-btn').innerHTML = avatar(me.user.name, me.user.email, 'sm');
   renderBanners();
 
   const logout = async (e) => { e?.preventDefault?.(); await api('/auth/logout', { method: 'POST' }); location.href = me.impersonatedBy ? '/admin' : '/login'; };
@@ -179,7 +203,6 @@ async function init() {
   $('#theme-btn').addEventListener('click', (e) => dropdown(e.currentTarget, [
     { label: 'Light', icon: 'sun', run: () => setTheme('light') }, { label: 'Dark', icon: 'moon', run: () => setTheme('dark') }, { label: 'System', icon: 'monitor', run: () => setTheme('system') },
   ]));
-  $('#menu-btn').addEventListener('click', () => $('#side').classList.toggle('open'));
 
   const palette = commandPalette(async (q) => {
     const ql = q.toLowerCase();

@@ -4,7 +4,8 @@ import { one, all, run, logActivity, audit } from '../db.js';
 import { requireRole } from '../auth.js';
 import { randomToken } from '../crypto.js';
 import { seal, open } from '../vault.js';
-import { appUrl } from '../settings.js';
+import { appUrl, getSetting } from '../settings.js';
+import { metaConnectAvailable, subscribePage, subscribeWaba } from '../services/meta.js';
 import { PLATFORMS, parseWebhook, verifySignature, insideWindow, testChannel } from '../services/social.js';
 import { handleEvents, deliver, storeOutbound, decide, priceOrder, orderSummary, decryptChat, STAGES } from '../services/sales.js';
 import { aiEnabled } from '../services/ai.js';
@@ -17,8 +18,9 @@ export const webhookRouter = Router();
 webhookRouter.get('/', (req, res) => {
   const token = String(req.query['hub.verify_token'] || '');
   const challenge = String(req.query['hub.challenge'] || '');
+  const platformToken = getSetting('meta_verify_token');
   const ok = req.query['hub.mode'] === 'subscribe' && token.length >= 20 && /^[\w.-]{1,200}$/.test(challenge)
-    && one('SELECT id FROM channels WHERE verify_token = ?', token);
+    && ((platformToken && token === platformToken) || one('SELECT id FROM channels WHERE verify_token = ?', token));
   if (!ok) return res.status(403).type('text').send('Forbidden');
   res.type('text').send(challenge);
 });
@@ -35,7 +37,9 @@ webhookRouter.post('/', express.raw({ type: '*/*', limit: '2mb' }), (req, res) =
     const [platform, externalId] = key.split(/:(.*)/s);
     const ch = one('SELECT * FROM channels WHERE platform = ? AND external_id = ? AND enabled = 1', platform, externalId);
     if (!ch) continue;
-    if (verifySignature(raw, req.headers['x-hub-signature-256'], open(ch.workspace_id, 'channels.app_secret', ch.app_secret_enc))) verified.set(key, ch);
+    // Channels connected with "Connect with Facebook" are signed with the platform's app secret.
+    const secret = ch.managed ? getSetting('meta_app_secret') : open(ch.workspace_id, 'channels.app_secret', ch.app_secret_enc);
+    if (verifySignature(raw, req.headers['x-hub-signature-256'], secret)) verified.set(key, ch);
     else rejected++;
   }
   // Wrong signature = forged request. Unknown accounts are acknowledged so Meta doesn't retry forever.
@@ -54,7 +58,7 @@ const bad = (res, msg) => res.status(400).json({ error: msg });
 
 const channelOut = (c) => ({
   id: c.id, platform: c.platform, platform_label: PLATFORMS[c.platform].label, name: c.name, external_id: c.external_id, send_id: c.send_id,
-  mode: c.mode, enabled: Boolean(c.enabled), followup_hours: c.followup_hours, greeting: c.greeting,
+  mode: c.mode, enabled: Boolean(c.enabled), managed: Boolean(c.managed), followup_hours: c.followup_hours, greeting: c.greeting,
   last_event_at: c.last_event_at, last_error: c.last_error, created_at: c.created_at,
   verify_token: c.verify_token, webhook_url: `${appUrl()}/api/social/webhook`,
 });
@@ -140,6 +144,65 @@ r.delete('/channels/:id', manage, (req, res) => {
   run('DELETE FROM channels WHERE id = ?', ch.id);
   audit(req, 'channel.delete', ch.id, { platform: ch.platform });
   res.json({ ok: true });
+});
+
+// ----- "Connect with Facebook": pick which Pages / Instagram accounts / WhatsApp numbers to connect
+r.get('/meta/status', (req, res) => res.json({ available: metaConnectAvailable() }));
+const pendingOf = (req) => {
+  const p = one(`SELECT * FROM meta_pending WHERE id = ? AND workspace_id = ? AND user_id = ? AND expires_at > datetime('now')`, String(req.params.id), wsId(req), req.user.id);
+  return p ? { ...p, data: JSON.parse(open(p.workspace_id, 'meta_pending.data', p.data_enc)) } : null;
+};
+r.get('/meta/pending/:id', manage, (req, res) => {
+  const p = pendingOf(req);
+  if (!p) return res.status(404).json({ error: 'This connection request expired — please click Connect again.' });
+  const taken = (platform, id) => {
+    const c = one('SELECT workspace_id FROM channels WHERE platform = ? AND external_id = ?', platform, id);
+    return c ? (c.workspace_id === wsId(req) ? 'here' : 'elsewhere') : null;
+  };
+  res.json({ kind: p.kind, items: p.data.items.map((it) => (p.kind === 'whatsapp'
+    ? { id: it.id, name: it.name, phone: it.phone, connected: taken('whatsapp', it.id) }
+    : { id: it.id, name: it.name, connected: taken('messenger', it.id), instagram: it.instagram ? { ...it.instagram, connected: taken('instagram', it.instagram.id) } : null })) });
+});
+r.post('/meta/pending/:id/connect', manage, async (req, res) => {
+  const p = pendingOf(req);
+  if (!p) return res.status(404).json({ error: 'This connection request expired — please click Connect again.' });
+  const mode = ['off', 'draft', 'auto'].includes(req.body?.mode) ? req.body.mode : 'draft';
+  const plan = effectivePlan(req.workspace);
+  const want = [];
+  const pick = new Set((Array.isArray(req.body?.select) ? req.body.select : []).map(String)); // "messenger:<id>", "instagram:<id>", "whatsapp:<id>"
+  for (const it of p.data.items) {
+    if (p.kind === 'whatsapp') { if (pick.has(`whatsapp:${it.id}`)) want.push({ platform: 'whatsapp', external_id: it.id, name: it.name || it.phone, token: p.data.userToken, waba: it.waba }); continue; }
+    if (pick.has(`messenger:${it.id}`)) want.push({ platform: 'messenger', external_id: it.id, name: it.name, token: it.token, page: it });
+    if (it.instagram && pick.has(`instagram:${it.instagram.id}`)) want.push({ platform: 'instagram', external_id: it.instagram.id, send_id: it.id, name: it.instagram.username ? `@${it.instagram.username}` : it.name, token: it.token, page: it });
+  }
+  if (!want.length) return bad(res, 'Select at least one account');
+  const results = [];
+  const subscribed = new Set();
+  for (const w of want) {
+    const existing = one('SELECT * FROM channels WHERE platform = ? AND external_id = ?', w.platform, w.external_id);
+    if (existing && existing.workspace_id !== wsId(req)) { results.push({ name: w.name, error: 'already connected to another ChatPilot workspace' }); continue; }
+    if (!existing && one('SELECT COUNT(*) AS n FROM channels WHERE workspace_id = ?', wsId(req)).n >= plan.channels) {
+      results.push({ name: w.name, error: `your ${plan.name} plan allows ${plan.channels} channel(s)` }); continue;
+    }
+    try {
+      const subKey = w.page ? `page:${w.page.id}` : `waba:${w.waba}`;
+      if (!subscribed.has(subKey)) { await (w.page ? subscribePage(w.page.id, w.page.token) : subscribeWaba(w.waba, w.token)); subscribed.add(subKey); }
+    } catch (e) { results.push({ name: w.name, error: `Meta refused the webhook subscription: ${e.message}` }); continue; }
+    const tokenEnc = seal(wsId(req), 'channels.access_token', w.token);
+    if (existing) {
+      run(`UPDATE channels SET access_token_enc = ?, managed = 1, connected_by = ?, send_id = COALESCE(?, send_id), waba_id = COALESCE(?, waba_id), enabled = 1, last_error = NULL WHERE id = ?`,
+        tokenEnc, p.fb_user_id, w.send_id || null, w.waba || null, existing.id);
+      results.push({ name: w.name, ok: true, reconnected: true });
+    } else {
+      const id = Number(run(`INSERT INTO channels (workspace_id, platform, name, external_id, send_id, access_token_enc, app_secret_enc, verify_token, mode, managed, connected_by, waba_id)
+        VALUES (?,?,?,?,?,?,'',?,?,1,?,?)`, wsId(req), w.platform, w.name, w.external_id, w.send_id || null, tokenEnc, `cp_${randomToken(24)}`, mode, p.fb_user_id, w.waba || null).lastInsertRowid);
+      audit(req, 'channel.connect', id, { platform: w.platform, via: 'facebook_login' });
+      logActivity(wsId(req), 'channel_added', { platform: w.platform, name: w.name });
+      results.push({ name: w.name, ok: true });
+    }
+  }
+  run('DELETE FROM meta_pending WHERE id = ?', p.id);
+  res.json({ results });
 });
 
 // ----- products (catalog)

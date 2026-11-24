@@ -15,12 +15,11 @@
 ## সেটআপ (একবার)
 1. **Products** ট্যাবে প্রোডাক্ট যোগ করুন (বা CSV ইমপোর্ট: `name,price,stock,sku,variants,description`)।
 2. **Assistant → Knowledge base**-এ ডেলিভারি চার্জ (ঢাকার ভিতরে/বাইরে), পেমেন্ট মেথড (COD, bKash), রিটার্ন পলিসি লিখুন।
-3. [developers.facebook.com](https://developers.facebook.com) এ একটি **Business** অ্যাপ বানান। App settings → Basic থেকে **App secret** কপি করুন।
-4. **Channels → Connect channel**:
-   - **Messenger**: অ্যাপে Messenger যোগ করুন → Page কানেক্ট → Page access token (`pages_messaging`, `pages_manage_metadata`)। Page ID দিন।
-   - **Instagram**: Professional অ্যাকাউন্ট, Facebook Page-এর সাথে লিংক করা। Account ID = Instagram অ্যাকাউন্ট ID, Send ID = লিংক করা Page ID। Instagram → Settings → Messages → *Allow access to messages* চালু করুন।
-   - **WhatsApp**: অ্যাপে WhatsApp যোগ করুন → Business settings-এ System user বানিয়ে স্থায়ী টোকেন (`whatsapp_business_messaging`)। **Phone number ID** দিন (ফোন নম্বর নয়)।
-5. সেভ করার পর চ্যানেল কার্ডে দেখানো **Callback URL** (`https://আপনার-ডোমেইন/api/social/webhook`) ও **Verify token** Meta অ্যাপের Webhooks-এ বসান এবং `messages` (Messenger-এ `message_echoes`-ও) সাবস্ক্রাইব করুন।
+3. **Channels → Facebook Page / Instagram / WhatsApp → Connect** চাপুন। Facebook-এর ডায়ালগে নিজের Page (আর লিংক করা Instagram) বা WhatsApp নম্বর বেছে নিন → ChatPilot-এ ফিরে এসে কোনগুলো কানেক্ট করবেন টিক দিন → **Connect selected**। Webhook নিজে থেকেই চালু হয়ে যায়।
+   - Instagram: অ্যাকাউন্টটা Professional হতে হবে ও Facebook Page-এর সাথে লিংক করা থাকতে হবে; Instagram → Settings → Messages → *Allow access to messages* চালু করুন।
+   - "Manual only" দেখালে প্ল্যাটফর্ম অ্যাডমিন এখনো Meta অ্যাপ সেট করেননি ([META_APP_REVIEW_BN.md](META_APP_REVIEW_BN.md))। তখন **Connect manually** দিয়ে নিজের developer app-এর token বসানো যায় (পুরনো পদ্ধতি, নিচে)।
+4. (শুধু manual) developers.facebook.com-এ নিজের Business অ্যাপ বানিয়ে Page token / System-user token, App secret আর Page ID / Phone number ID দিন; চ্যানেল কার্ডের *Webhook details* থেকে Callback URL ও Verify token Meta-তে বসান।
+5. শুরুতে **I approve each reply** মোডে রাখুন।
 6. Test chat-এ কয়েকটা প্রশ্ন করে দেখুন, তারপর Draft মোডে কয়েকদিন চালিয়ে Auto-pilot চালু করুন।
 
 > লাইভে যাওয়ার আগে Meta App Review লাগবে (`pages_messaging`, `instagram_manage_messages`, `whatsapp_business_messaging`)। Review-এর আগে শুধু অ্যাপের admin/tester-রা মেসেজ পাঠাতে পারবে।

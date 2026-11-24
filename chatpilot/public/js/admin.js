@@ -409,7 +409,7 @@ views.announce = async () => {
 };
 
 // =============== Settings ===============
-const GROUPS = { general: 'General', security: 'Security', ai: 'AI', oauth: 'Google & Microsoft sign-in', email: 'System email (SMTP)', payments: 'Payments', notifications: 'Notifications' };
+const GROUPS = { general: 'General', security: 'Security', ai: 'AI', oauth: 'Google & Microsoft sign-in', meta: 'Meta (Facebook / Instagram / WhatsApp)', email: 'System email (SMTP)', payments: 'Payments', notifications: 'Notifications' };
 views.settings = async (params) => {
   const list = await api('/admin/settings');
   const group = params.g || 'general';
@@ -420,8 +420,13 @@ views.settings = async (params) => {
     return `<label>${esc(s.label)} ${s.secret && s.isSet ? `${badge('saved', 'ok')} <a href="#" data-act="clear" data-key="${s.key}" class="hint">clear</a>` : ''}</label>${input}${s.help ? `<p class="hint">${esc(s.help)}</p>` : ''}`;
   };
   const help = {
-    oauth: `<div class="banner"><b>Redirect URIs</b> to register:<br>Google: <code>${esc(location.origin)}/api/oauth/google/callback</code><br>Microsoft: <code>${esc(location.origin)}/api/oauth/microsoft/callback</code><br>
-      Google "Sign in" uses basic scopes (no review needed). One-click Gmail connection uses the restricted Gmail scope: it works for up to 100 test users right away; beyond that Google requires app verification + an annual CASA security assessment. App passwords always work as a fallback.</div>`,
+    oauth: `<div class="banner"><b>Redirect URIs</b> to register:<br>Google: <code>${esc(location.origin)}/api/oauth/google/callback</code><br>Microsoft: <code>${esc(location.origin)}/api/oauth/microsoft/callback</code><br>Sign-in uses basic scopes only (no review needed).</div>`,
+    meta: `<div class="banner"><b>Your Meta app</b> (developers.facebook.com → Business app with Messenger, Instagram and WhatsApp products):<br>
+      Valid OAuth redirect URI: <code>${esc(location.origin)}/api/oauth/meta/callback</code><br>
+      Webhook callback URL: <code>${esc(location.origin)}/api/social/webhook</code> (verify token = the value below; subscribe to <i>messages</i>, <i>message_echoes</i>)<br>
+      Data deletion callback: <code>${esc(location.origin)}/api/meta/data-deletion</code> · Deauthorize callback: <code>${esc(location.origin)}/api/meta/deauthorize</code><br>
+      Privacy policy: <code>${esc(location.origin)}/privacy</code> · Terms: <code>${esc(location.origin)}/terms</code><br>
+      Until App Review is approved, only people with a role on the app can connect. See <code>docs/META_APP_REVIEW_BN.md</code>.</div>`,
     payments: `<div class="banner">Stripe webhook URL: <code>${esc(location.origin)}/api/billing/webhook</code> — events: checkout.session.completed, customer.subscription.*, invoice.paid, invoice.payment_failed, charge.refunded.</div>`,
     notifications: '<div class="banner">Create a Telegram bot with @BotFather and paste its token here. Customers then add their own chat ID in Settings → Alerts to get instant alerts on their phone.</div>',
   };

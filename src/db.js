@@ -454,3 +454,12 @@ CREATE TABLE IF NOT EXISTS tasks (               -- to-dos the AI pulled out of 
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_ws ON tasks(workspace_id, done, id DESC);
 `);
+
+// ---------------------------------------------------------------------------
+// Cleanup: the Messenger/Instagram/WhatsApp sales assistant moved to its own product (ChatPilot AI, chatpilot/).
+// Databases created while it briefly lived here may still have its tables; drop them only when they are empty.
+// ---------------------------------------------------------------------------
+for (const t of ['chat_messages', 'orders', 'conversations', 'products', 'channels']) {
+  const exists = one(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, t);
+  if (exists && one(`SELECT COUNT(*) AS n FROM ${t}`).n === 0) db.exec(`DROP TABLE ${t}`);
+}

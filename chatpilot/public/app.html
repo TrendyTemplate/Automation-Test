@@ -12,21 +12,20 @@
 <body>
   <div id="imp"></div>
   <div class="shell">
-    <nav class="side" id="side" aria-label="Main">
-      <a class="brand" href="#dashboard"><span class="brand-mark" id="brand-mark"></span><span>ChatPilot AI<small id="ws-name"></small></span></a>
-      <div class="ws-switch"><select id="ws-switch" aria-label="Switch workspace" hidden></select></div>
-      <div id="nav"></div>
-      <div class="side-foot" id="side-foot"></div>
+    <nav class="rail" id="rail" aria-label="Main">
+      <a class="brand-mark" href="#dashboard" id="brand-mark" aria-label="ChatPilot AI home"></a>
+      <div id="nav" style="display:contents"></div>
+      <div class="rail-foot" id="rail-foot"></div>
     </nav>
     <div class="main">
       <header class="topbar">
-        <button class="btn ghost icon-only menu-btn" id="menu-btn" aria-label="Open menu"></button>
-        <button class="search-trigger" id="search-trigger" type="button"><span id="search-icon"></span><span>Search customers, pages…</span><span class="k"><kbd>Ctrl</kbd> <kbd>K</kbd></span></button>
+        <div class="ws-chip"><b id="ws-name"></b><select id="ws-switch" aria-label="Switch shop" hidden></select><a class="plan-pill" id="plan-pill" href="#billing"></a></div>
         <span class="spacer"></span>
+        <button class="search-trigger" id="search-trigger" type="button" aria-label="Search"><span id="search-icon"></span><span>Search customers, pages…</span><span class="k"><kbd>Ctrl</kbd> <kbd>K</kbd></span></button>
         <button class="btn ghost icon-only" id="bell-btn" aria-label="Notifications" title="Notifications" style="position:relative"></button>
         <button class="btn ghost icon-only" id="theme-btn" aria-label="Change theme" title="Theme"></button>
         <a class="btn ghost icon-only" href="#support" aria-label="Help" title="Help & support" id="help-btn"></a>
-        <button class="btn ghost" id="user-btn" aria-label="Account menu"></button>
+        <button class="btn ghost icon-only" id="user-btn" aria-label="Account menu"></button>
       </header>
       <div class="content" id="content">
         <div class="banner-zone" id="banners"></div>
@@ -34,6 +33,7 @@
       </div>
     </div>
   </div>
+  <nav class="tabbar" id="tabbar" aria-label="Main"></nav>
   <script src="/js/app.js" type="module"></script>
 </body>
 </html>

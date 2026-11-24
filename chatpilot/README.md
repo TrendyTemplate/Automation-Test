@@ -2,7 +2,7 @@
 
 AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp Business**. Shops connect their Page / Instagram account / WhatsApp number, add their products, and the assistant (Anthropic Claude) answers customers 24/7 in their own language, recommends products from the catalog, collects name, phone and address, and records confirmed orders — prices always come from the catalog, never from the AI.
 
-> 🇧🇩 বাংলা: **[সেটআপ গাইড](docs/SETUP_BN.md)** · 🔒 **[Security architecture](docs/SECURITY.md)**
+> 🇧🇩 বাংলা: **[সেটআপ গাইড](docs/SETUP_BN.md)** · **[Meta App Review গাইড](docs/META_APP_REVIEW_BN.md)** · 🔒 **[Security architecture](docs/SECURITY.md)**
 >
 > ChatPilot is a separate product from MailPilot AI (the email assistant at the repository root). It shares the same account, billing, admin and security foundation, but has its own database, plans, pages and deployment.
 
@@ -13,6 +13,7 @@ AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp 
 - **Hands off to you** — "Needs human" queue with Telegram/Slack alerts; when anyone replies (in ChatPilot or in Meta's own inbox) the AI stays quiet for 12 hours.
 - **Meta-compliant** — signed webhooks (X-Hub-Signature-256), 24-hour messaging window enforced in code, retries de-duplicated, message bursts debounced into one answer.
 - **Brings buyers back** — optional one-time follow-up for quiet buyers inside the 24-hour window.
+- **One-click "Connect with Facebook"** — shops connect their Page, Instagram and WhatsApp (Embedded Signup) through the platform's Meta app; webhooks are subscribed automatically. Manual token entry remains as an advanced option. Meta's data-deletion and deauthorize callbacks are built in.
 - **Draft → Auto-pilot** — every channel starts in Draft mode (one-click approve/edit); switch to Auto-pilot when you trust it.
 - **Test chat** — chat as a customer and see stage, lead score, order and safety decisions without sending anything.
 - **SaaS foundation** — sign-up (email or Google/Microsoft), teams & roles, agency workspaces, Stripe subscriptions + yearly + lifetime + manual bKash/bank payments, affiliate program, platform admin panel, lifecycle emails, 2FA, per-workspace AES-256-GCM encryption, GDPR export/delete, REST API with `cp_live_…` keys.
@@ -22,7 +23,8 @@ AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp 
 cd chatpilot
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test             # 38 tests: unit, API, security, webhook→AI→Graph pipeline, browser (Playwright)
+npm test             # 43 tests: unit, API, security, webhook→AI→Graph pipeline, Meta connect & deletion callbacks, browser + phone layout (Playwright)
+ANTHROPIC_API_KEY=sk-ant-… npm run check:ai   # 10 real conversations against the live Claude API (quality check, nothing is sent)
 ```
 Without an Anthropic key, customer messages are stored but not answered. Keys can be entered in **Admin → Settings** instead of `.env`.
 
@@ -30,8 +32,12 @@ Without an Anthropic key, customer messages are stored but not answered. Keys ca
 1. Copy `.env.example` to `.env`; generate secrets with `openssl rand -hex 32`. **Back up `ENCRYPTION_KEY`.**
 2. `docker compose up -d --build` behind HTTPS (Caddy / Nginx / Cloudflare). Set `APP_URL` to the public URL — the Meta callback URL is `APP_URL/api/social/webhook`.
 3. Sign up with an email listed in `ADMIN_EMAILS` to get the **Platform admin** page.
-4. Create a Meta app (Business type) with Messenger / Instagram / WhatsApp products and pass **App Review** (`pages_messaging`, `instagram_manage_messages`, `whatsapp_business_messaging`) and Business Verification before onboarding public customers. Each shop pastes its own Page/System-user token and app secret under **Channels** — see [docs/SETUP_BN.md](docs/SETUP_BN.md).
-5. Stripe: create Starter / Pro / Business (monthly + yearly) and Lifetime prices, paste them in **Admin → Plans & pricing**, add the webhook `APP_URL/api/billing/webhook`.
+4. Create **one** Meta app (Business type) for the platform, put its App ID / secret / webhook verify token in **Admin → Settings → Meta**, and pass Business Verification + **App Review** — step by step in [docs/META_APP_REVIEW_BN.md](docs/META_APP_REVIEW_BN.md). Shops then just click **Connect** under Channels.
+5. To move ChatPilot to its own repository with history: `chatpilot/scripts/move-to-own-repo.sh <new-repo-url>`.
+6. Stripe: create Starter / Pro / Business (monthly + yearly) and Lifetime prices, paste them in **Admin → Plans & pricing**, add the webhook `APP_URL/api/billing/webhook`.
+
+## Design
+ChatPilot has its own design language ("Bazaar"), separate from MailPilot: warm paper surfaces, deep teal brand with a coral accent, rounded pill controls, and self-hosted Onest + Bricolage Grotesque + **Hind Siliguri** (Bangla) fonts. The app is chat-first and mobile-first: an icon rail on desktop, a bottom tab bar with a "More" sheet on phones, and a three-pane Conversations view (list · chat · customer & orders) that turns into a full-screen messenger on phones. Platform colours (Messenger blue, Instagram magenta, WhatsApp green) mark every chat.
 
 ## Architecture
 ```
@@ -43,9 +49,11 @@ src/
   routes/
     sales.js           Meta webhook + /api/sales (channels, products, conversations, orders, test chat)
     app.js             dashboard, knowledge base, assistant settings, team, notifications, API keys, tickets, referrals
-    auth.js · oauth.js · billing.js · admin.js
+    meta.js            Meta data-deletion / deauthorize callbacks + /deletion status page
+    auth.js · oauth.js (sign-in + Connect with Facebook) · billing.js · admin.js
   services/
     social.js          webhook parsing (Messenger / Instagram / WhatsApp), signature check, Graph API send, 24h window
+    meta.js            Connect with Facebook (Pages, Instagram, WhatsApp), webhook subscriptions, signed_request
     sales.js           the assistant: catalog-grounded structured replies, guards, server-priced orders, hand-off, follow-ups
     ai.js              Claude client, privacy masking, usage tracking
     guard.js           deterministic outbound checks and injection detection

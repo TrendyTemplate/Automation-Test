@@ -3,8 +3,41 @@ import { one, run } from '../db.js';
 import { buildAuthUrl, verifyState, exchangeCode, oauthAvailability, PROVIDERS } from '../services/oauth.js';
 import { getBool } from '../settings.js';
 import { createAccount, finishLogin } from './auth.js';
+import { requireAuth } from '../auth.js';
+import { randomToken } from '../crypto.js';
+import { seal } from '../vault.js';
+import { metaConnectAvailable, buildConnectUrl, verifyConnectState, exchangeCode as metaExchangeCode, listPages, listWhatsAppNumbers } from '../services/meta.js';
 
 const r = Router();
+
+// ---------- "Connect with Facebook" (Pages, Instagram, WhatsApp) — registered before the generic sign-in routes ----------
+const managerOnly = (req, res, next) => (['owner', 'admin'].includes(req.role) && !req.viaApiKey ? next() : res.redirect('/app#channels?error=forbidden'));
+r.get('/meta/connect', requireAuth, managerOnly, (req, res) => {
+  if (!metaConnectAvailable()) return res.redirect('/app#channels?error=not_configured');
+  const kind = req.query.kind === 'whatsapp' ? 'whatsapp' : 'pages';
+  res.redirect(buildConnectUrl(kind, { uid: req.user.id, wsId: req.workspace.id }));
+});
+r.get('/meta/callback', async (req, res) => {
+  const back = (q) => res.redirect(`/app#channels?${new URLSearchParams(q)}`);
+  if (req.query.error) return back({ error: String(req.query.error_reason || req.query.error).slice(0, 80) });
+  let state;
+  try { state = verifyConnectState(String(req.query.state || '')); } catch { return back({ error: 'expired' }); }
+  const member = one('SELECT role FROM workspace_members WHERE user_id = ? AND workspace_id = ?', state.uid, state.wsId);
+  if (!member || !['owner', 'admin'].includes(member.role)) return back({ error: 'forbidden' });
+  try {
+    const u = await metaExchangeCode(String(req.query.code || ''));
+    const items = state.kind === 'whatsapp' ? await listWhatsAppNumbers(u.token) : await listPages(u.token);
+    if (!items.length) return back({ error: state.kind === 'whatsapp' ? 'no_whatsapp_numbers' : 'no_pages' });
+    const id = randomToken(16);
+    run(`INSERT INTO meta_pending (id, workspace_id, user_id, kind, fb_user_id, data_enc, expires_at) VALUES (?,?,?,?,?,?, datetime('now', '+15 minutes'))`,
+      id, state.wsId, state.uid, state.kind, u.fbUserId, seal(state.wsId, 'meta_pending.data', JSON.stringify({ userToken: u.token, items })));
+    run(`DELETE FROM meta_pending WHERE expires_at < datetime('now')`);
+    return back({ pick: id });
+  } catch (e) {
+    console.error('[meta-connect]', e.message);
+    return back({ error: e.message.slice(0, 120) });
+  }
+});
 
 // "Sign in with Google / Microsoft"
 r.get('/:provider/login', (req, res) => {
