@@ -125,7 +125,7 @@ export async function decide(ws, channel, conv, msgs) {
   const transcript = msgs.map((m) => `[${m.direction === 'in' ? 'customer' : m.source === 'ai' ? 'you' : 'shop staff'}] ${clean(m.body).slice(0, 2000)}`).join('\n');
   const known = [conv.customer_name && `name: ${conv.customer_name}`, conv.customer_phone && `phone: ${conv.customer_phone}`, conv.customer_address && `address: ${conv.customer_address}`].filter(Boolean).join('; ');
   const user = `${known ? `<customer_profile>${known}</customer_profile>\n` : ''}<chat>\n${transcript}\n</chat>\nWrite the next message to the customer.`;
-  const out = await call(ws, { system: systemPrompt(ws, channel), user, schema: SALES_SCHEMA, maxTokens: 3000, purpose: 'sales_chat',
+  const out = await call(ws, { system: systemPrompt(ws, channel), user, schema: SALES_SCHEMA, maxTokens: 3000, purpose: 'sales_chat', conversationId: conv.id || null,
     redactions: ws.privacy_shield ? countRedactions(transcript) : 0 });
   out.confidence = Math.max(0, Math.min(1, Number(out.confidence) || 0));
   out.lead_score = Math.max(0, Math.min(100, Math.round(Number(out.lead_score) || 0)));
@@ -150,6 +150,7 @@ export async function deliver(chatMessageId, userId = null) {
     const ids = await sendText(channel, open(channel.workspace_id, 'channels.access_token', channel.access_token_enc), conv.customer_id, m.body);
     run(`UPDATE chat_messages SET status='sent', external_id=COALESCE(?, external_id), sent_by=COALESCE(?, sent_by), error=NULL, created_at=datetime('now') WHERE id=?`, ids[0] || null, userId, m.id);
     run(`UPDATE conversations SET last_outbound_at=datetime('now') WHERE id=?`, conv.id);
+    bumpUsage(conv.workspace_id, { messages_sent: ids.length });
     run('UPDATE channels SET last_error=NULL WHERE id = ?', channel.id);
     return { sent: true, ids };
   } catch (e) {

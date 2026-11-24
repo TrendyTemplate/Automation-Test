@@ -8,6 +8,7 @@ import { appUrl } from '../settings.js';
 import { PLATFORMS, parseWebhook, verifySignature, insideWindow, testChannel } from '../services/social.js';
 import { handleEvents, deliver, storeOutbound, decide, priceOrder, orderSummary, decryptChat, STAGES } from '../services/sales.js';
 import { aiEnabled } from '../services/ai.js';
+import { effectivePlan } from '../plans.js';
 
 // ---------------------------------------------------------------- webhook
 export const webhookRouter = Router();
@@ -100,6 +101,10 @@ function channelInput(b, existing = null) {
 r.post('/channels', manage, async (req, res) => {
   let v;
   try { v = channelInput(req.body || {}); } catch (e) { return bad(res, e.message); }
+  const plan = effectivePlan(req.workspace);
+  if (one('SELECT COUNT(*) AS n FROM channels WHERE workspace_id = ?', wsId(req)).n >= plan.channels) {
+    return res.status(402).json({ error: `Your ${plan.name} plan includes ${plan.channels} channel(s). Upgrade to connect more.` });
+  }
   if (one('SELECT id FROM channels WHERE platform = ? AND external_id = ?', v.platform, v.external_id)) return res.status(409).json({ error: 'This account is already connected (in this or another workspace).' });
   let name = v.name;
   if (req.body.test !== false) {
@@ -152,7 +157,9 @@ function productInput(b) {
   return p;
 }
 r.get('/products', (req, res) => res.json(all('SELECT * FROM products WHERE workspace_id = ? ORDER BY active DESC, name', wsId(req))));
+const productRoom = (req) => effectivePlan(req.workspace).products - one('SELECT COUNT(*) AS n FROM products WHERE workspace_id = ?', wsId(req)).n;
 r.post('/products', manage, (req, res) => {
+  if (productRoom(req) <= 0) return res.status(402).json({ error: `Your plan's product limit is reached (${effectivePlan(req.workspace).products}). Upgrade or remove old products.` });
   let p; try { p = productInput(req.body || {}); } catch (e) { return bad(res, e.message); }
   const id = run(`INSERT INTO products (workspace_id, name, sku, description, variants, price, currency, stock, image_url, active) VALUES (?,?,?,?,?,?,?,?,?,?)`,
     wsId(req), p.name, p.sku, p.description, p.variants, p.price, p.currency, p.stock, p.image_url, p.active).lastInsertRowid;
@@ -163,14 +170,16 @@ r.post('/products/import', manage, (req, res) => {
   const lines = String(req.body?.csv || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 1000);
   const parse = (line) => { const out = []; let cur = ''; let q = false; for (const ch of line) { if (ch === '"') q = !q; else if (ch === ',' && !q) { out.push(cur); cur = ''; } else cur += ch; } out.push(cur); return out.map((x) => x.trim()); };
   let added = 0; const errors = [];
+  let room = productRoom(req);
   lines.forEach((line, i) => {
     const [name, price, stock, sku, variants, description] = parse(line);
     if (i === 0 && /^name$/i.test(name)) return;
+    if (room <= 0) { errors.push(`line ${i + 1}: plan product limit reached`); return; }
     try {
       const p = productInput({ name, price, stock, sku, variants, description, currency: req.body.currency });
       run(`INSERT INTO products (workspace_id, name, sku, description, variants, price, currency, stock) VALUES (?,?,?,?,?,?,?,?)`,
         wsId(req), p.name, p.sku, p.description, p.variants, p.price, p.currency, p.stock);
-      added++;
+      added++; room--;
     } catch (e) { errors.push(`line ${i + 1}: ${e.message}`); }
   });
   res.json({ added, errors: errors.slice(0, 20) });

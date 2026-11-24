@@ -6,8 +6,6 @@ const FEED = {
   draft_created: ['file', 'info', 'Draft ready for review'], rule_fired: ['zap', 'primary', 'Automation ran'], tasks_extracted: ['listCheck', 'primary', 'Tasks created'],
   phishing_blocked: ['shield', 'bad', 'Phishing blocked'], send_failed: ['alert', 'bad', 'Send failed'], sync_error: ['alert', 'bad', 'Sync problem'], error: ['alert', 'bad', 'Processing error'],
   automation_installed: ['sparkles', 'primary', 'Automation installed'], auto_send_cancelled: ['x', 'warn', 'Auto-send cancelled'], sla_breach: ['clock', 'warn', 'Response target missed'],
-  chat_auto_reply: ['chat', 'ok', 'Chat answered by AI'], chat_approved_sent: ['chat', 'ok', 'Chat reply approved & sent'], chat_draft: ['chat', 'info', 'Chat reply ready for review'],
-  chat_handoff: ['userCheck', 'warn', 'Chat needs a human'], order_created: ['card', 'ok', 'New order from chat'], channel_added: ['plug', 'info', 'Channel connected'],
   forwarded: ['send', 'info', 'Forwarded'], assigned: ['userCheck', 'info', 'Assigned'], mailbox_added: ['mail', 'info', 'Email account connected'], followup_drafted: ['reply', 'info', 'Follow-up drafted'],
 };
 function feedText(a) {
@@ -19,7 +17,7 @@ function feedText(a) {
 const feedRow = (a, fresh = false) => {
   const [ic, tone, t] = FEED[a.type] || ['activity', 'info', label(a.type)];
   let link = '';
-  try { const d = JSON.parse(a.detail || '{}'); if (d.message) link = `#message?id=${Number(d.message)}`; else if (d.conversation) link = `#chats?id=${Number(d.conversation)}`; } catch { /* none */ }
+  try { const d = JSON.parse(a.detail || '{}'); if (d.message) link = `#message?id=${Number(d.message)}`; } catch { /* none */ }
   return `<a class="feed-row ${fresh ? 'fresh' : ''}" ${link ? `href="${link}"` : ''} data-id="${a.id}"><span class="feed-ic ${tone}">${icon(ic, 'sm')}</span>
     <span class="feed-t"><b>${esc(t)}</b><span class="hint truncate">${esc(feedText(a))}</span></span><span class="hint nowrap">${ago(a.created_at)}</span></a>`;
 };

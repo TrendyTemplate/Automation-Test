@@ -30,7 +30,7 @@ export async function chats(ctx, params) {
   const chip = (text, over, on) => `<a class="chip ${on ? 'on' : ''}" href="${q(over)}" ${on ? 'style="border-color:var(--primary);color:var(--primary-text)"' : ''}>${text}</a>`;
   const stat = (ic, l, n) => `<div class="card stat"><div class="ic">${icon(ic)}</div><div class="l">${esc(l)}</div><div class="n">${n}</div></div>`;
   ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Social sales</h1><p>Your AI sales assistant answers Messenger, Instagram and WhatsApp customers, recommends products and takes orders — prices only from your catalog.</p></div>
+    <div class="page-h"><div><h1>Conversations</h1><p>Every Messenger, Instagram and WhatsApp chat in one place. The assistant answers, recommends products and takes orders — you step in when it asks.</p></div>
       <div class="actions"><a class="btn" href="#saleslab">${icon('flask')}Test chat</a></div></div>
     ${setupHint(ov, ctx)}
     <div class="grid g4 mb">${stat('chat', 'Conversations (30d)', num(ov.conversations))}${stat('send', 'AI replies sent (30d)', num(ov.aiSent))}

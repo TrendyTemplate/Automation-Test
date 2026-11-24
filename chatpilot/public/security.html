@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security · ChatPilot AI</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/css/style.css"><link rel="stylesheet" href="/css/landing.css"><script src="/js/theme-boot.js"></script></head>
+<body>
+  <nav class="lp-nav"><div class="container"><a class="brand" href="/"><span class="brand-mark">✉</span><span>ChatPilot AI</span></a><span class="spacer"></span><a href="/login" class="btn ghost">Sign in</a><a href="/signup" class="btn primary">Start free trial</a></div></nav>
+  <main class="container" style="max-width:820px;padding:56px 20px 80px">
+    <span class="kicker" style="color:var(--primary-text);font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:.08em">Trust center</span>
+    <h1 style="font-size:38px;letter-spacing:-.02em;margin-top:8px">How we protect your shop and your customers</h1>
+    <p class="muted" style="font-size:17px">Your page and your customers' chats are your business. These are the safeguards built into ChatPilot AI.</p>
+    <h2 class="mt">Encryption</h2>
+    <ul><li>Page / WhatsApp access tokens, app secrets and every chat message are encrypted at rest with AES-256-GCM.</li>
+      <li>Every workspace has its own data key, which is itself encrypted by a master key kept outside the database. Each encrypted value is bound to its purpose, so it can't be moved or reused.</li>
+      <li>Deleting a workspace destroys its key, making any remaining data unreadable (crypto-shredding).</li>
+      <li>All connections use TLS 1.2+ with certificate verification — including every call to Meta's Graph API.</li></ul>
+    <h2>Account protection</h2>
+    <ul><li>Two-factor authentication with any authenticator app; required for platform administrators.</li>
+      <li>Server-side sessions you can see and revoke; alerts on sign-ins from new devices; automatic sign-out of other devices after a password change.</li>
+      <li>Brute-force protection with progressive account lockout and rate limiting; passwords hashed with bcrypt.</li>
+      <li>Emergency lockdown: one click wipes all channel tokens, stops the assistant, deletes API keys and signs out everyone.</li></ul>
+    <h2>Least privilege</h2>
+    <ul><li>Our staff can only access your account if you grant time-limited support access. Every visit is recorded in your security log.</li>
+      <li>Every incoming webhook must carry Meta's HMAC-SHA256 signature for your app; forged requests are rejected.</li>
+      <li>API keys only reach your data API — never billing, account or admin functions.</li></ul>
+    <h2>AI safety</h2>
+    <ul><li>Card numbers, IBANs, passwords and one-time codes are masked before any chat reaches the AI (Privacy Shield).</li>
+      <li>The AI cannot choose recipients, call tools or reach the internet: replies always go back to the customer who wrote.</li>
+      <li>The AI never sets prices: order totals are calculated by the server from your product catalog.</li>
+      <li>Messages that try to instruct the AI (prompt injection) are detected and held for a human.</li>
+      <li>Every automatic reply passes deterministic checks for unverified prices, unknown links, third-party addresses, secrets and your "never say" list.</li>
+      <li>A transparency log shows every time the AI read one of your chats. Your data is never used to train AI models.</li></ul>
+    <h2>Application security</h2>
+    <ul><li>Strict Content Security Policy with no third-party scripts, fonts or trackers; HSTS; clickjacking protection.</li>
+      <li>Cross-site request forgery protection on every state-changing request.</li>
+      <li>Meta's 24-hour messaging window is enforced in code, so the platform never breaks Meta's policies on your behalf.</li></ul>
+    <h2>Your control</h2>
+    <ul><li>Export all your data or delete your account at any time, self-service.</li>
+      <li>Configurable automatic deletion of chat messages after 30–365 days.</li></ul>
+    <p class="muted mt">Found a vulnerability? Please report it responsibly to {{SUPPORT_EMAIL}}.</p>
+  </main>
+  <footer class="lp-footer"><div class="container"><span>© {{COMPANY}}</span><span class="spacer"></span><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/security">Security</a></div></footer>
+</body></html>

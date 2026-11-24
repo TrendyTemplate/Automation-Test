@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>ChatPilot AI</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/js/theme-boot.js"></script>
+</head>
+<body>
+  <div id="imp"></div>
+  <div class="shell">
+    <nav class="side" id="side" aria-label="Main">
+      <a class="brand" href="#dashboard"><span class="brand-mark" id="brand-mark"></span><span>ChatPilot AI<small id="ws-name"></small></span></a>
+      <div class="ws-switch"><select id="ws-switch" aria-label="Switch workspace" hidden></select></div>
+      <div id="nav"></div>
+      <div class="side-foot" id="side-foot"></div>
+    </nav>
+    <div class="main">
+      <header class="topbar">
+        <button class="btn ghost icon-only menu-btn" id="menu-btn" aria-label="Open menu"></button>
+        <button class="search-trigger" id="search-trigger" type="button"><span id="search-icon"></span><span>Search customers, pages…</span><span class="k"><kbd>Ctrl</kbd> <kbd>K</kbd></span></button>
+        <span class="spacer"></span>
+        <button class="btn ghost icon-only" id="bell-btn" aria-label="Notifications" title="Notifications" style="position:relative"></button>
+        <button class="btn ghost icon-only" id="theme-btn" aria-label="Change theme" title="Theme"></button>
+        <a class="btn ghost icon-only" href="#support" aria-label="Help" title="Help & support" id="help-btn"></a>
+        <button class="btn ghost" id="user-btn" aria-label="Account menu"></button>
+      </header>
+      <div class="content" id="content">
+        <div class="banner-zone" id="banners"></div>
+        <div id="view"></div>
+      </div>
+    </div>
+  </div>
+  <script src="/js/app.js" type="module"></script>
+</body>
+</html>

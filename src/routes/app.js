@@ -16,10 +16,8 @@ import { detectInjection } from '../services/guard.js';
 import { seal, open, openMessage, openReply } from '../vault.js';
 import { getBool, getNum, appUrl } from '../settings.js';
 import { validateRule, FIELDS, OPS, ACTIONS } from '../services/rules.js';
-import salesRoutes from './sales.js';
 
 const r = Router();
-r.use('/sales', salesRoutes); // AI sales assistant for Messenger, Instagram & WhatsApp
 const manage = requireRole('owner', 'admin');
 const wsId = (req) => req.workspace.id;
 const int = (v) => Number.parseInt(v, 10);
