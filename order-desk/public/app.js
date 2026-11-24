@@ -1,3 +1,5 @@
+import { initSettings } from './settings.js';
+
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...kids) => {
   const n = Object.assign(document.createElement(tag), props);
@@ -5,8 +7,12 @@ const el = (tag, props = {}, ...kids) => {
   return n;
 };
 
+// Inside Shopify admin, App Bridge provides a short-lived session token for every request.
+const embedded = Boolean(window.shopify?.idToken);
 async function api(path, opts = {}) {
-  const res = await fetch(path, { credentials: 'same-origin', ...opts });
+  const headers = { ...(opts.headers || {}) };
+  if (embedded && path.startsWith('/api/')) headers.Authorization = `Bearer ${await window.shopify.idToken()}`;
+  const res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
   if (res.status === 401 && path !== '/session') { showLogin(); throw new Error('Signed out'); }
   const body = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
   if (!res.ok) throw new Error(body?.error || `Error ${res.status}`);
@@ -40,7 +46,11 @@ async function boot() {
     $('catalog').textContent = `${me.catalog_count} products${me.catalog_synced_at ? ` · synced ${me.catalog_synced_at}` : ''}`;
     $('sync').textContent = me.platform === 'csv' ? 'Upload catalog CSV' : 'Sync catalog';
     $('sync').dataset.platform = me.platform;
+    $('logout').hidden = embedded;
+    renderSettings(me);
     await Promise.all([loadList(), loadStats()]);
+    const deep = Number(new URLSearchParams(location.search).get('po'));
+    if (deep) openPo(deep).catch(() => {});
   } catch { /* showLogin already called on 401 */ }
 }
 
@@ -185,5 +195,7 @@ $('login-form').onsubmit = async (e) => {
   try { await api('/session', json('POST', { api_key: $('api-key').value })); $('login-error').textContent = ''; boot(); } catch (err) { $('login-error').textContent = err.message; }
 };
 $('logout').onclick = async () => { await fetch('/session/logout', { method: 'POST' }); showLogin(); };
+
+const renderSettings = initSettings({ $, el, api, json, badge, boot, embedded });
 
 boot();

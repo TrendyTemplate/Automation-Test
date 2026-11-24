@@ -3,7 +3,10 @@ import express from 'express';
 import { config } from '../config.js';
 import { get, run } from '../db.js';
 import { encrypt, hmacHex, hmacBase64, randomToken, safeEqual, sign, unsign } from '../crypto.js';
-import { syncCatalog, getStore } from '../core/pipeline.js';
+import { getStore } from '../core/pipeline.js';
+import { enqueue } from '../core/jobs.js';
+import { shopify } from '../connectors/shopify.js';
+import { PLANS } from '../plans.js';
 
 export const shopifyRoutes = express.Router();
 const SHOP_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
@@ -55,8 +58,10 @@ shopifyRoutes.get('/shopify/callback', async (req, res, next) => {
     }
     run('UPDATE stores SET access_token_enc = ? WHERE id = ?', encrypt(token, `store:${store.id}:token`), store.id);
     res.cookie('od_store', sign(String(store.id)), cookieOpts);
-    syncCatalog(getStore(store.id)).catch((e) => console.error('[shopify] catalog sync failed', shop, e.message));
-    res.redirect('/');
+    enqueue('sync_catalog', { storeId: store.id });
+    // Back into Shopify admin, where the app opens embedded.
+    const host = String(req.query.host || '');
+    res.redirect(host ? `/?shop=${encodeURIComponent(shop)}&host=${encodeURIComponent(host)}` : '/');
   } catch (e) { next(e); }
 });
 
@@ -69,9 +74,17 @@ shopifyRoutes.post('/shopify/webhooks', express.raw({ type: () => true, limit: '
   const topic = req.get('x-shopify-topic') || '';
   const shop = String(req.get('x-shopify-shop-domain') || '').toLowerCase();
   const store = get("SELECT * FROM stores WHERE platform = 'shopify' AND shop_domain = ?", shop);
+  if (store && topic === 'app_subscriptions/update') {
+    let body = {};
+    try { body = JSON.parse(req.body.toString('utf8')); } catch { /* ignore */ }
+    const sub = body.app_subscription || {};
+    if (sub.admin_graphql_api_id && sub.admin_graphql_api_id === store.billing_subscription_id && ['CANCELLED', 'DECLINED', 'EXPIRED', 'FROZEN'].includes(String(sub.status).toUpperCase())) {
+      run("UPDATE stores SET plan = 'free', billing_subscription_id = NULL WHERE id = ?", store.id);
+    }
+  }
   if (store && (topic === 'shop/redact' || topic === 'app/uninstalled')) {
     if (topic === 'shop/redact') run('DELETE FROM stores WHERE id = ?', store.id);
-    else run('UPDATE stores SET access_token_enc = NULL WHERE id = ?', store.id);
+    else run("UPDATE stores SET access_token_enc = NULL, plan = 'free', billing_subscription_id = NULL WHERE id = ?", store.id);
   }
   if (store && topic === 'customers/redact') {
     let body = {};
@@ -83,4 +96,47 @@ shopifyRoutes.post('/shopify/webhooks', express.raw({ type: () => true, limit: '
     }
   }
   res.status(200).end();
+});
+
+// ---------- Shopify Billing ----------
+// Paid plans for Shopify stores are charged through Shopify (required for App Store apps).
+export const billing = express.Router();
+
+billing.post('/billing/subscribe', express.json(), async (req, res, next) => {
+  try {
+    const store = req.store;
+    const plan = PLANS[String(req.body?.plan || '')];
+    if (!plan) return res.status(400).json({ error: 'Unknown plan' });
+    if (store.platform !== 'shopify') return res.status(400).json({ error: 'Billing for non-Shopify stores is handled by our team for now: contact support' });
+    if (plan.price === 0) {
+      if (store.billing_subscription_id) await shopify.cancelSubscription(store, store.billing_subscription_id);
+      run("UPDATE stores SET plan = 'free', billing_subscription_id = NULL WHERE id = ?", store.id);
+      return res.json({ ok: true, plan: 'free' });
+    }
+    const state = sign(`${store.id}:${plan.id}`);
+    const { confirmationUrl } = await shopify.createSubscription(store, plan, {
+      returnUrl: `${config.appUrl}/shopify/billing/return?state=${encodeURIComponent(state)}`,
+      test: config.shopifyBillingTest,
+    });
+    res.json({ ok: true, confirmation_url: confirmationUrl });
+  } catch (e) { next(e); }
+});
+
+// Shopify sends the merchant here after they approve (or decline) the charge. Never trust the URL alone:
+// confirm with Shopify which subscription is actually active.
+shopifyRoutes.get('/shopify/billing/return', async (req, res, next) => {
+  try {
+    const [storeId, planId] = String(unsign(req.query.state) || '').split(':');
+    const store = storeId ? getStore(Number(storeId)) : null;
+    const plan = PLANS[planId];
+    if (!store || !plan) return res.status(400).send('Invalid billing return');
+    const active = (await shopify.activeSubscriptions(store)).find((s) => s.status === 'ACTIVE' && s.name === `${plan.name} plan`);
+    if (active) {
+      if (store.billing_subscription_id && store.billing_subscription_id !== active.id) {
+        await shopify.cancelSubscription(store, store.billing_subscription_id).catch(() => {});
+      }
+      run('UPDATE stores SET plan = ?, billing_subscription_id = ? WHERE id = ?', plan.id, active.id, store.id);
+    }
+    res.redirect(`https://admin.shopify.com/store/${store.shop_domain.replace('.myshopify.com', '')}/apps/${config.shopify.apiKey}`);
+  } catch (e) { next(e); }
 });

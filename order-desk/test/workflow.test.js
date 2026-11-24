@@ -2,6 +2,10 @@ import { makeStore, fakeAi, poFixture, startServer } from './helpers.js';
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
+import { drainJobs } from '../src/core/jobs.js';
+import { get } from '../src/db.js';
+
+const latestPo = (storeId) => get('SELECT id FROM purchase_orders WHERE store_id = ? ORDER BY id DESC LIMIT 1', storeId)?.id;
 
 const srv = await startServer();
 after(() => srv.close());
@@ -144,9 +148,10 @@ test('inbound email: CSV attachment becomes a PO; auto-create when enabled and c
   const anon = srv.client(null);
   assert.equal((await anon('/inbound/not-a-token', { method: 'POST', body: Buffer.from(raw), headers: { 'Content-Type': 'message/rfc822' } })).status, 404);
   const r = await anon(`/inbound/${s.inbound}`, { method: 'POST', body: Buffer.from(raw), headers: { 'Content-Type': 'message/rfc822' } });
-  assert.equal(r.status, 200);
-  assert.equal(r.data.purchase_orders.length, 1);
-  const po = (await srv.client(s.apiKey)(`/api/pos/${r.data.purchase_orders[0]}`)).data;
+  assert.equal(r.status, 202, 'accepted and queued');
+  assert.equal(latestPo(s.id), undefined, 'nothing processed until the worker runs');
+  await drainJobs();
+  const po = (await srv.client(s.apiKey)(`/api/pos/${latestPo(s.id)}`)).data;
   assert.equal(po.sender_email, 'dana@cornergrocer.com');
   assert.equal(po.status, 'created', 'auto-created because every line matched exactly');
 });
@@ -156,7 +161,9 @@ test('inbound email without attachments is read from the body', async () => {
   const calls = fakeAi(poFixture({ lines: [{ code: '', description: 'Ceramic Tea Mug White', quantity: 12, unit: '', unit_price: null }] }));
   const raw = 'From: owner@gmail.com\r\nSubject: order\r\nContent-Type: text/plain\r\n\r\nHi, please send 12 white ceramic mugs. Thanks!\r\n';
   const r = await srv.client(null)(`/inbound/${s.inbound}`, { method: 'POST', body: Buffer.from(raw) });
-  assert.equal(r.data.purchase_orders.length, 1);
+  assert.equal(r.status, 202);
+  await drainJobs();
+  assert.ok(latestPo(s.id));
   assert.match(calls[0].messages[0].content[0].text, /12 white ceramic mugs/);
 });
 

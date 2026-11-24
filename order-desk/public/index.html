@@ -23,6 +23,21 @@
       <button>Sign in</button>
     </form>
     <p id="login-error" class="error"></p>
+    <hr>
+    <h2>New here? Create an account</h2>
+    <p class="muted">For WooCommerce, QuickBooks, Xero, or a spreadsheet catalog.</p>
+    <form id="signup-form" class="stack">
+      <input id="su-name" placeholder="Business name" required maxlength="100">
+      <select id="su-platform">
+        <option value="woocommerce">WooCommerce</option>
+        <option value="quickbooks">QuickBooks Online</option>
+        <option value="xero">Xero</option>
+        <option value="csv">No platform (CSV catalog and export)</option>
+      </select>
+      <input id="su-currency" placeholder="Currency (USD)" maxlength="3">
+      <button>Create account</button>
+    </form>
+    <p id="signup-msg"></p>
   </section>
 
   <section id="app" hidden>
@@ -55,6 +70,60 @@
       <table class="list"><thead><tr><th>PO</th><th>Buyer</th><th>Lines</th><th>Status</th><th>Received</th></tr></thead><tbody id="pos"></tbody></table>
       <p id="empty" class="muted" hidden>Nothing here yet.</p>
     </div>
+
+    <details class="card" id="settings">
+      <summary><h2>Settings</h2></summary>
+
+      <section class="settings-block" id="conn-block">
+        <h3>Store connection</h3>
+        <p id="conn-status" class="muted"></p>
+        <form id="woo-form" class="stack" hidden>
+          <input id="woo-url" placeholder="https://your-store.com" required>
+          <input id="woo-key" placeholder="Consumer key (ck_…)" required autocomplete="off">
+          <input id="woo-secret" type="password" placeholder="Consumer secret (cs_…)" required autocomplete="off">
+          <button>Connect WooCommerce</button>
+        </form>
+        <a id="oauth-connect" class="button" hidden>Connect</a>
+      </section>
+
+      <section class="settings-block">
+        <h3>Plan</h3>
+        <p id="plan-status"></p>
+        <div id="plan-buttons" class="row"></div>
+      </section>
+
+      <section class="settings-block">
+        <h3>Alerts and confirmations</h3>
+        <form id="settings-form" class="stack">
+          <label>Email for "PO needs review" alerts<input id="s-email" type="email" placeholder="team@yourbrand.com"></label>
+          <label>Slack incoming webhook<input id="s-slack" placeholder="https://hooks.slack.com/services/…"></label>
+          <label class="check"><input id="s-auto" type="checkbox"> Create orders automatically when every line is certain</label>
+          <label class="check"><input id="s-confirm" type="checkbox"> Email the buyer an order confirmation</label>
+          <label>Confirmation message<textarea id="s-message" rows="2" maxlength="1000" placeholder="We will let you know when it ships."></textarea></label>
+          <p id="s-mail-warning" class="muted" hidden>Email sending is not configured on this server (SMTP_URL), so emails are skipped.</p>
+          <button>Save</button>
+        </form>
+      </section>
+
+      <section class="settings-block">
+        <h3>Read a mailbox directly (IMAP)</h3>
+        <p class="muted">Instead of a forwarding rule. Only new mail is read. Use an app password where your provider requires one.</p>
+        <table><tbody id="mailboxes"></tbody></table>
+        <form id="mailbox-form" class="stack">
+          <input id="mb-host" placeholder="imap.gmail.com" required>
+          <div class="row"><input id="mb-port" type="number" value="993" min="1" max="65535"><input id="mb-folder" value="INBOX"></div>
+          <input id="mb-user" placeholder="orders@yourbrand.com" required autocomplete="off">
+          <input id="mb-pass" type="password" placeholder="Password or app password" required autocomplete="off">
+          <button>Add mailbox</button>
+        </form>
+      </section>
+
+      <section class="settings-block" id="failures-block" hidden>
+        <h3>Recent background errors</h3>
+        <ul id="failures" class="muted"></ul>
+      </section>
+      <p id="settings-msg"></p>
+    </details>
 
     <div class="card" id="detail" hidden>
       <div class="row">

@@ -5,7 +5,15 @@ import { config } from '../config.js';
 import { importCatalogRows } from '../connectors/csv.js';
 import { parseCsv } from '../core/extract.js';
 import { label } from '../core/match.js';
-import { getStore, syncCatalog, ingestFile, ingestEmail, correctLine, approve, reject, refreshStatus, maybeAutoCreate } from '../core/pipeline.js';
+import { getStore, syncCatalog, ingestFile, correctLine, approve, reject, refreshStatus, afterIngest } from '../core/pipeline.js';
+import { enqueue, recentFailures } from '../core/jobs.js';
+import { verifySessionToken } from '../core/session-token.js';
+import { addMailbox, listMailboxes, removeMailbox } from '../core/mailbox.js';
+import { isEmail, isSlackWebhook, mailEnabled } from '../core/notify.js';
+import { PLANS, planOf, ordersThisMonth } from '../plans.js';
+import { rateLimit } from '../ratelimit.js';
+import { connectionStatus, connectWoocommerce } from './connect.js';
+import { billing } from './shopify.js';
 
 export const api = express.Router();
 const raw = express.raw({ type: () => true, limit: config.maxAttachmentBytes });
@@ -13,23 +21,27 @@ const raw = express.raw({ type: () => true, limit: config.maxAttachmentBytes });
 // ---------- inbound email (no session: the secret token in the address authenticates the store) ----------
 // Point a forwarding rule or an inbound-email service (Postmark, Mailgun, SES) at POST /inbound/<token> with the raw message.
 export const inbound = express.Router();
-inbound.post('/inbound/:token', express.raw({ type: () => true, limit: '30mb' }), async (req, res, next) => {
-  try {
-    const store = get('SELECT * FROM stores WHERE inbound_token = ?', String(req.params.token));
+// The message is queued and processed in the background, so the sender's mail service gets a fast answer.
+inbound.post('/inbound/:token', rateLimit({ windowMs: 3600_000, max: 500, key: (req) => `in:${req.params.token}` }),
+  express.raw({ type: () => true, limit: '30mb' }), (req, res) => {
+    const store = get('SELECT id FROM stores WHERE inbound_token = ?', String(req.params.token));
     if (!store) return res.status(404).json({ error: 'Unknown address' });
     if (!req.body?.length) return res.status(400).json({ error: 'Empty message' });
-    const ids = await ingestEmail(store, req.body);
-    for (const id of ids) await maybeAutoCreate(store, id);
-    res.json({ ok: true, purchase_orders: ids });
-  } catch (e) { next(e); }
-});
+    const job = enqueue('ingest_email', { storeId: store.id, payload: { raw: req.body.toString('base64') } });
+    res.status(202).json({ ok: true, queued: job });
+  });
 
 // ---------- auth: Bearer API key or signed session cookie ----------
+api.use(rateLimit({ windowMs: 60_000, max: 300, key: (req) => `api:${req.get('authorization') || req.cookies?.od_store || req.ip}` }));
 api.use((req, res, next) => {
   let store = null;
   const auth = req.get('authorization') || '';
-  if (auth.startsWith('Bearer ')) store = get('SELECT * FROM stores WHERE api_key_hash = ?', sha256(auth.slice(7).trim()));
-  else {
+  if (auth.startsWith('Bearer od_')) store = get('SELECT * FROM stores WHERE api_key_hash = ?', sha256(auth.slice(7).trim()));
+  else if (auth.startsWith('Bearer ')) {
+    // Embedded in Shopify admin: App Bridge session token.
+    const shop = verifySessionToken(auth.slice(7).trim());
+    if (shop) store = get("SELECT * FROM stores WHERE platform = 'shopify' AND shop_domain = ? AND access_token_enc IS NOT NULL", shop);
+  } else {
     const id = unsign(req.cookies?.od_store);
     if (id) store = getStore(Number(id));
   }
@@ -43,18 +55,54 @@ const poOf = (req) => get('SELECT * FROM purchase_orders WHERE id = ? AND store_
 
 api.get('/me', (req, res) => {
   const s = req.store;
+  const plan = planOf(s);
   res.json({
-    id: s.id, name: s.name, platform: s.platform, shop_domain: s.shop_domain, currency: s.currency, auto_create: Boolean(s.auto_create),
+    id: s.id, name: s.name, platform: s.platform, shop_domain: s.shop_domain, currency: s.currency,
     catalog_synced_at: s.catalog_synced_at,
     catalog_count: get('SELECT COUNT(*) AS n FROM catalog_items WHERE store_id = ?', s.id).n,
     inbound_url: `${config.appUrl}/inbound/${s.inbound_token}`,
+    connection: connectionStatus(s),
+    plan: { ...plan, used: ordersThisMonth(s.id) },
+    plans: Object.values(PLANS),
+    settings: {
+      auto_create: Boolean(s.auto_create), notify_email: s.notify_email || '', slack_webhook_url: s.slack_webhook_url ? 'set' : '',
+      confirm_buyer: Boolean(s.confirm_buyer), confirm_message: s.confirm_message || '', email_enabled: mailEnabled(),
+    },
+    mailboxes: listMailboxes(s.id),
+    recent_failures: recentFailures(s.id),
   });
 });
 
 api.patch('/settings', express.json(), (req, res) => {
-  if (typeof req.body?.auto_create === 'boolean') run('UPDATE stores SET auto_create = ? WHERE id = ?', req.body.auto_create ? 1 : 0, req.store.id);
+  const b = req.body || {};
+  const id = req.store.id;
+  if (typeof b.auto_create === 'boolean') run('UPDATE stores SET auto_create = ? WHERE id = ?', b.auto_create ? 1 : 0, id);
+  if (typeof b.confirm_buyer === 'boolean') run('UPDATE stores SET confirm_buyer = ? WHERE id = ?', b.confirm_buyer ? 1 : 0, id);
+  if (typeof b.confirm_message === 'string') run('UPDATE stores SET confirm_message = ? WHERE id = ?', b.confirm_message.slice(0, 1000) || null, id);
+  if (typeof b.notify_email === 'string') {
+    if (b.notify_email && !isEmail(b.notify_email)) return res.status(400).json({ error: 'Enter a valid email address' });
+    run('UPDATE stores SET notify_email = ? WHERE id = ?', b.notify_email.trim() || null, id);
+  }
+  if (typeof b.slack_webhook_url === 'string') {
+    if (b.slack_webhook_url && !isSlackWebhook(b.slack_webhook_url)) return res.status(400).json({ error: 'Paste a Slack incoming-webhook URL (https://hooks.slack.com/…)' });
+    run('UPDATE stores SET slack_webhook_url = ? WHERE id = ?', b.slack_webhook_url || null, id);
+  }
   res.json({ ok: true });
 });
+
+// ---------- mailboxes (IMAP) ----------
+api.get('/mailboxes', (req, res) => res.json(listMailboxes(req.store.id)));
+api.post('/mailboxes', express.json(), wrap(async (req, res) => {
+  const id = await addMailbox(req.store.id, req.body || {});
+  res.status(201).json({ ok: true, id });
+}));
+api.delete('/mailboxes/:id', (req, res) => {
+  if (!removeMailbox(req.store.id, Number(req.params.id))) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+
+api.use(billing);
+api.post('/connect/woocommerce', express.json(), connectWoocommerce);
 
 api.get('/stats', (req, res) => {
   const id = req.store.id;
@@ -74,6 +122,7 @@ api.get('/stats', (req, res) => {
 // ---------- catalog ----------
 api.post('/catalog/sync', wrap(async (req, res) => {
   if (req.store.platform === 'csv') return res.status(400).json({ error: 'Upload your catalog CSV instead' });
+  if (!connectionStatus(req.store).connected) return res.status(400).json({ error: 'Connect your store first' });
   res.json({ ok: true, items: await syncCatalog(req.store) });
 }));
 
@@ -110,7 +159,7 @@ api.post('/pos', raw, wrap(async (req, res) => {
   const filename = decodeURIComponent(req.get('x-filename') || 'upload');
   const id = await ingestFile(req.store, { filename, contentType: req.get('content-type') || '', content: req.body }, { source: 'upload' });
   if (!id) return res.status(422).json({ error: 'This does not look like a purchase order' });
-  await maybeAutoCreate(req.store, id);
+  await afterIngest(req.store, id);
   res.status(201).json({ id });
 }));
 

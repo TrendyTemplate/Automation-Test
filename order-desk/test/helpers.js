@@ -4,6 +4,11 @@ process.env.NODE_ENV = 'test';
 process.env.SHOPIFY_API_KEY = 'test-key';
 process.env.SHOPIFY_API_SECRET = 'test-secret';
 process.env.APP_URL = 'http://localhost:3100';
+process.env.DISABLE_RATE_LIMIT = 'true';
+process.env.QBO_CLIENT_ID = 'qbo-id';
+process.env.QBO_CLIENT_SECRET = 'qbo-secret';
+process.env.XERO_CLIENT_ID = 'xero-id';
+process.env.XERO_CLIENT_SECRET = 'xero-secret';
 
 const { run } = await import('../src/db.js');
 const { sha256, randomToken, encrypt } = await import('../src/crypto.js');
@@ -19,12 +24,13 @@ export const CATALOG = [
   { sku: 'MUG-CER-01', barcode: '', title: 'Ceramic Tea Mug', variant_title: 'White', price: 6, inventory: 30, case_pack: 1 },
 ];
 
-export function makeStore({ platform = 'csv', shop = null, token = null, autoCreate = 0 } = {}) {
+export function makeStore({ platform = 'csv', shop = null, token = null, autoCreate = 0, plan = 'pro' } = {}) {
   const apiKey = `od_${randomToken(8)}`;
   const inbound = randomToken(8);
   const { lastInsertRowid } = run('INSERT INTO stores (name, platform, shop_domain, api_key_hash, inbound_token, auto_create) VALUES (?,?,?,?,?,?)',
     'Test Store', platform, shop, sha256(apiKey), inbound, autoCreate);
   const id = Number(lastInsertRowid);
+  run('UPDATE stores SET plan = ? WHERE id = ?', plan, id);
   if (token) run('UPDATE stores SET access_token_enc = ? WHERE id = ?', encrypt(token, `store:${id}:token`), id);
   if (platform === 'csv') importCatalogRows(id, CATALOG);
   return { id, apiKey, inbound };

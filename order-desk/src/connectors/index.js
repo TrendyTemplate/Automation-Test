@@ -19,10 +19,14 @@
 //     lines: Array<{ external_id, sku, title, quantity, unit_price }>
 //   }): Promise<{ external_id: string, name: string, url?: string }>
 // }
+//   getPrices?(store, customer): Promise<Map<external_id, price>>   // optional: buyer-specific (B2B) prices
 import { shopify } from './shopify.js';
 import { csv } from './csv.js';
+import { woocommerce } from './woocommerce.js';
+import { quickbooks } from './quickbooks.js';
+import { xero } from './xero.js';
 
-const connectors = new Map([shopify, csv].map((c) => [c.id, c]));
+const connectors = new Map([shopify, csv, woocommerce, quickbooks, xero].map((c) => [c.id, c]));
 
 export function getConnector(platform) {
   const c = connectors.get(platform);

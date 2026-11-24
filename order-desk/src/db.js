@@ -101,6 +101,59 @@ CREATE TABLE IF NOT EXISTS po_lines (
 CREATE INDEX IF NOT EXISTS idx_lines_po ON po_lines(po_id, line_no);
 `);
 
+db.exec(`
+-- Background work: inbound email parsing, catalog sync, mailbox polling, notifications.
+CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+  payload TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'queued',   -- queued | running | done | failed
+  attempts INTEGER NOT NULL DEFAULT 0,
+  run_at TEXT NOT NULL DEFAULT (datetime('now')),
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_due ON jobs(status, run_at);
+
+-- Mailboxes polled over IMAP (alternative to forwarding).
+CREATE TABLE IF NOT EXISTS mailboxes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  host TEXT NOT NULL,
+  port INTEGER NOT NULL DEFAULT 993,
+  secure INTEGER NOT NULL DEFAULT 1,
+  username TEXT NOT NULL,
+  password_enc TEXT NOT NULL,
+  folder TEXT NOT NULL DEFAULT 'INBOX',
+  last_uid INTEGER,
+  uid_validity TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_polled_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+// Additive migrations for databases created by earlier versions.
+function addColumn(table, column, definition) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+addColumn('stores', 'plan', "TEXT NOT NULL DEFAULT 'free'");
+addColumn('stores', 'billing_subscription_id', 'TEXT');
+addColumn('stores', 'notify_email', 'TEXT');
+addColumn('stores', 'slack_webhook_url', 'TEXT');
+addColumn('stores', 'confirm_buyer', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('stores', 'confirm_message', 'TEXT');
+addColumn('stores', 'oauth_enc', 'TEXT');          // encrypted JSON: refresh token, expiry, realm/tenant (QuickBooks, Xero)
+addColumn('stores', 'site_url', 'TEXT');           // WooCommerce site
+addColumn('purchase_orders', 'email_message_id', 'TEXT');
+addColumn('purchase_orders', 'email_subject', 'TEXT');
+addColumn('purchase_orders', 'confirmation_sent_at', 'TEXT');
+addColumn('po_lines', 'expected_price', 'REAL');   // buyer-specific price (B2B price list) when known
+
 export const get = (sql, ...p) => db.prepare(sql).get(...p);
 export const all = (sql, ...p) => db.prepare(sql).all(...p);
 export const run = (sql, ...p) => db.prepare(sql).run(...p);

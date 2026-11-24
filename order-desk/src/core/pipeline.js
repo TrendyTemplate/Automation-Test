@@ -5,6 +5,8 @@ import { getConnector } from '../connectors/index.js';
 import { extractPo, kindOf } from './extract.js';
 import { matchLine, buildIndex, loadCatalog, customerKey, remember, label } from './match.js';
 import { config } from '../config.js';
+import { enqueue } from './jobs.js';
+import { planOf, ordersThisMonth } from '../plans.js';
 
 export const getStore = (id) => get('SELECT * FROM stores WHERE id = ?', id);
 
@@ -33,7 +35,7 @@ export async function syncCatalog(store) {
  * Process one PO document.
  * @returns {Promise<number|null>} purchase order id, or null when the document is not an order
  */
-export async function ingestFile(store, file, { source = 'upload', senderEmail = '', emailText = '' } = {}) {
+export async function ingestFile(store, file, { source = 'upload', senderEmail = '', emailText = '', messageId = null, subject = null } = {}) {
   const po = await extractPo(file);
   if (!po.is_purchase_order) return null;
 
@@ -54,24 +56,35 @@ export async function ingestFile(store, file, { source = 'upload', senderEmail =
   }
   if (/ignore (all|previous)|disregard|system prompt|instructions/i.test(`${po.notes} ${emailText}`)) flags.push('suspicious_instructions');
 
-  const catalog = loadCatalog(store.id);
+  let catalog = loadCatalog(store.id);
   if (!catalog.length) flags.push('catalog_empty');
+  // Buyer-specific prices (e.g. a Shopify B2B price list for the company location) replace list prices for checks.
+  const connector = getConnector(store.platform);
+  if (customer && typeof connector.getPrices === 'function') {
+    try {
+      const prices = await connector.getPrices(store, customer);
+      if (prices?.size) catalog = catalog.map((c) => (prices.has(c.external_id) ? { ...c, price: prices.get(c.external_id) } : c));
+    } catch { flags.push('price_list_unavailable'); }
+  }
   const index = buildIndex(catalog);
 
   return tx(() => {
     const { lastInsertRowid: poId } = run(`INSERT INTO purchase_orders (store_id, source, source_filename, sender_email, buyer_email, customer_key,
-        customer_external_id, customer_name, company_name, po_number, po_date, requested_ship_date, currency, ship_to_json, notes, flags_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        customer_external_id, customer_name, company_name, po_number, po_date, requested_ship_date, currency, ship_to_json, notes, flags_json,
+        email_message_id, email_subject)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     store.id, source, file.filename || null, senderEmail || null, buyerEmail || null, custKey || null, customer?.external_id || null,
     customer?.name || po.buyer.name || null, customer?.company || po.buyer.company || null, po.po_number || null, po.po_date || null,
-    po.requested_ship_date || null, po.currency || store.currency, JSON.stringify(po.ship_to), po.notes || null, JSON.stringify(flags));
+    po.requested_ship_date || null, po.currency || store.currency, JSON.stringify(po.ship_to), po.notes || null, JSON.stringify(flags),
+    messageId, subject ? String(subject).slice(0, 300) : null);
 
     po.lines.forEach((line, i) => {
       const m = matchLine(store.id, custKey, line, catalog, index);
       run(`INSERT INTO po_lines (po_id, line_no, raw_code, raw_description, quantity, unit, unit_price, matched_external_id,
-           final_quantity, confidence, match_method, flags_json, candidates_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           final_quantity, confidence, match_method, flags_json, candidates_json, expected_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       poId, i + 1, line.code || null, line.description || null, line.quantity, line.unit || null, line.unit_price,
-      m.matched_external_id, m.final_quantity, m.confidence, m.match_method, JSON.stringify(m.flags), JSON.stringify(m.candidates));
+      m.matched_external_id, m.final_quantity, m.confidence, m.match_method, JSON.stringify(m.flags), JSON.stringify(m.candidates),
+      m.matched_external_id ? index.byId.get(m.matched_external_id)?.price ?? null : null);
     });
     refreshStatus(Number(poId));
     return Number(poId);
@@ -84,6 +97,7 @@ export async function ingestEmail(store, raw) {
   const sender = mail.from?.value?.[0]?.address || '';
   const subject = mail.subject || '';
   const ids = [];
+  const meta = { source: 'email', senderEmail: sender, messageId: mail.messageId || null, subject };
   // Skip small inline images (logos, signatures); keep PDFs, spreadsheets and real photos of orders.
   const files = (mail.attachments || []).filter((a) => {
     const kind = kindOf(a.filename, a.contentType);
@@ -92,12 +106,12 @@ export async function ingestEmail(store, raw) {
   });
   for (const a of files.slice(0, 5)) {
     const id = await ingestFile(store, { filename: a.filename, contentType: a.contentType, content: a.content },
-      { source: 'email', senderEmail: sender, emailText: mail.text || '' });
+      { ...meta, emailText: mail.text || '' });
     if (id) ids.push(id);
   }
   if (!ids.length && (mail.text || '').trim()) {
     const id = await ingestFile(store, { filename: 'email.txt', contentType: 'text/plain', content: `Subject: ${subject}\n\n${mail.text}` },
-      { source: 'email', senderEmail: sender });
+      meta);
     if (id) ids.push(id);
   }
   return ids;
@@ -153,6 +167,11 @@ export async function approve(store, poId) {
   const orderLines = lines.filter((l) => l.final_quantity > 0);
   if (!orderLines.length) throw httpError(400, 'Nothing to order');
 
+  const plan = planOf(store);
+  if (ordersThisMonth(store.id) >= plan.orders) {
+    throw httpError(402, `Your ${plan.name} plan includes ${plan.orders} orders a month. Upgrade to create more.`);
+  }
+
   // Claim the PO first so two clicks can't create two orders.
   const claimed = run("UPDATE purchase_orders SET status = 'creating', updated_at = datetime('now') WHERE id = ? AND status IN ('ready','needs_review','failed')", poId);
   if (!claimed.changes) throw httpError(409, 'Order is already being created');
@@ -177,12 +196,13 @@ export async function approve(store, poId) {
       ship_to: JSON.parse(po.ship_to_json || '{}'),
       note,
       currency: po.currency,
-      lines: orderLines.map((l) => ({ external_id: l.matched_external_id, sku: l.sku, title: label(l), quantity: l.final_quantity, unit_price: l.price })),
+      lines: orderLines.map((l) => ({ external_id: l.matched_external_id, sku: l.sku, title: label(l), quantity: l.final_quantity, unit_price: l.expected_price ?? l.price })),
     });
     // Approved lines confirm what the buyer meant: strengthen memory for every matched line.
     for (const l of orderLines) remember(store.id, po.customer_key, { code: l.raw_code, description: l.raw_description }, l.matched_external_id);
     run(`UPDATE purchase_orders SET status = 'created', order_external_id = ?, order_name = ?, order_url = ?, error = NULL,
          updated_at = datetime('now') WHERE id = ?`, result.external_id, result.name, result.url || null, poId);
+    if (store.confirm_buyer && po.buyer_email) enqueue('confirm_buyer', { storeId: store.id, payload: { poId } });
     return result;
   } catch (e) {
     run("UPDATE purchase_orders SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ?", String(e.message).slice(0, 500), poId);
@@ -201,6 +221,15 @@ export async function maybeAutoCreate(store, poId) {
   const po = get('SELECT status FROM purchase_orders WHERE id = ?', poId);
   if (po?.status !== 'ready') return null;
   return approve(store, poId).catch(() => null);
+}
+
+/** After a PO is saved: auto-create if allowed, otherwise alert the team when it needs a human. */
+export async function afterIngest(store, poId) {
+  await maybeAutoCreate(store, poId);
+  const po = get('SELECT status FROM purchase_orders WHERE id = ?', poId);
+  if (po?.status === 'needs_review' && (store.slack_webhook_url || store.notify_email)) {
+    enqueue('notify_review', { storeId: store.id, payload: { poId } });
+  }
 }
 
 export function httpError(status, message) {

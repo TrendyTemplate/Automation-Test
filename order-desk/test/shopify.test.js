@@ -127,3 +127,100 @@ test('a new platform only needs a connector', async () => {
   assert.deepEqual(created[0].lines.map((l) => [l.sku, l.quantity]), [['WC-SKU', 3]]);
   assert.equal(getConnector('woocommerce').label, 'WooCommerce (test double)');
 });
+
+// ---------------- embedded app, billing, B2B prices ----------------
+import { signSessionToken, verifySessionToken } from '../src/core/session-token.js';
+import { PLANS } from '../src/plans.js';
+import { get as dbGet } from '../src/db.js';
+
+test('shopify: session tokens authenticate embedded requests', async () => {
+  fakeShopify();
+  makeStore({ platform: 'shopify', shop: 'embed.myshopify.com', token: 't' });
+  const good = signSessionToken('embed.myshopify.com');
+  assert.equal(verifySessionToken(good), 'embed.myshopify.com');
+  assert.equal(verifySessionToken(signSessionToken('embed.myshopify.com', { exp: Math.floor(Date.now() / 1000) - 120 })), null, 'expired');
+  assert.equal(verifySessionToken(signSessionToken('embed.myshopify.com', { aud: 'other-app' })), null, 'wrong audience');
+  assert.equal(verifySessionToken(`${good.slice(0, -2)}xx`), null, 'bad signature');
+  const me = await srv.client(null)('/api/me', { headers: { Authorization: `Bearer ${good}` } });
+  assert.equal(me.status, 200);
+  assert.equal(me.data.shop_domain, 'embed.myshopify.com');
+  const stranger = await srv.client(null)('/api/me', { headers: { Authorization: `Bearer ${signSessionToken('nobody.myshopify.com')}` } });
+  assert.equal(stranger.status, 401);
+});
+
+test('shopify: embedded page loads App Bridge; unknown shops are sent to install', async () => {
+  const page = await fetch(`${srv.base}/?shop=embed.myshopify.com&host=abc`);
+  const html = await page.text();
+  assert.match(html, /<meta name="shopify-api-key" content="test-key">/);
+  assert.match(html, /cdn\.shopify\.com\/shopifycloud\/app-bridge\.js/);
+  assert.match(page.headers.get('content-security-policy'), /frame-ancestors https:\/\/embed\.myshopify\.com https:\/\/admin\.shopify\.com/);
+  const install = await (await fetch(`${srv.base}/?shop=newbie.myshopify.com&host=abc`)).text();
+  assert.match(install, /\/shopify\/install\?shop=newbie\.myshopify\.com/);
+  const plain = await fetch(`${srv.base}/`);
+  assert.doesNotMatch(await plain.text(), /app-bridge/);
+  assert.match(plain.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+});
+
+test('shopify: billing subscribe → approve → plan active; cancellation webhook downgrades', async () => {
+  const requests = fakeShopify();
+  const base = shopify.fetch;
+  shopify.fetch = async (url, init) => {
+    const { query } = JSON.parse(init.body);
+    if (query.includes('appSubscriptionCreate')) {
+      requests.push({ query, variables: JSON.parse(init.body).variables });
+      return new Response(JSON.stringify({ data: { appSubscriptionCreate: { confirmationUrl: 'https://billing.shopify.test/confirm', appSubscription: { id: 'gid://shopify/AppSubscription/1', status: 'PENDING' }, userErrors: [] } } }));
+    }
+    if (query.includes('activeSubscriptions')) {
+      return new Response(JSON.stringify({ data: { currentAppInstallation: { activeSubscriptions: [{ id: 'gid://shopify/AppSubscription/1', name: 'Growth plan', status: 'ACTIVE' }] } } }));
+    }
+    return base(url, init);
+  };
+  const s = makeStore({ platform: 'shopify', shop: 'billing.myshopify.com', token: 't', plan: 'free' });
+  const call = srv.client(s.apiKey);
+  const sub = await call('/api/billing/subscribe', { method: 'POST', body: { plan: 'growth' } });
+  assert.equal(sub.data.confirmation_url, 'https://billing.shopify.test/confirm');
+  const vars = requests.find((r) => r.query?.includes('appSubscriptionCreate')).variables;
+  assert.equal(vars.lineItems[0].plan.appRecurringPricingDetails.price.amount, PLANS.growth.price);
+  assert.equal(vars.test, true);
+  const returnUrl = new URL(vars.returnUrl);
+
+  const tampered = await fetch(`${srv.base}/shopify/billing/return?state=${encodeURIComponent(`${s.id}:pro.forged`)}`, { redirect: 'manual' });
+  assert.equal(tampered.status, 400);
+  const back = await fetch(`${srv.base}${returnUrl.pathname}${returnUrl.search}`, { redirect: 'manual' });
+  assert.equal(back.status, 302);
+  assert.equal(dbGet('SELECT plan FROM stores WHERE id = ?', s.id).plan, 'growth');
+
+  const body = Buffer.from(JSON.stringify({ app_subscription: { admin_graphql_api_id: 'gid://shopify/AppSubscription/1', status: 'CANCELLED' } }));
+  const sig = crypto.createHmac('sha256', 'test-secret').update(body).digest('base64');
+  await srv.client(null)('/shopify/webhooks', { method: 'POST', body, headers: { 'X-Shopify-Hmac-Sha256': sig, 'X-Shopify-Topic': 'app_subscriptions/update', 'X-Shopify-Shop-Domain': 'billing.myshopify.com' } });
+  assert.equal(dbGet('SELECT plan FROM stores WHERE id = ?', s.id).plan, 'free');
+});
+
+test('shopify: B2B price list of the buyer company is used for price checks and the order', async () => {
+  const requests = fakeShopify();
+  const base = shopify.fetch;
+  shopify.fetch = async (url, init) => {
+    const { query } = JSON.parse(init.body);
+    if (query.includes('companyLocation')) {
+      requests.push({ query });
+      return new Response(JSON.stringify({ data: { companyLocation: { catalogs: { nodes: [{ status: 'ACTIVE', priceList: { id: 'pl', prices: {
+        nodes: [{ variant: { id: 'gid://shopify/ProductVariant/1' }, price: { amount: '3.60' } }], pageInfo: { hasNextPage: false, endCursor: null },
+      } } }] } } } }));
+    }
+    return base(url, init);
+  };
+  const s = makeStore({ platform: 'shopify', shop: 'pricing.myshopify.com', token: 't' });
+  await syncCatalog(getStore(s.id));
+  const call = srv.client(s.apiKey);
+  // Buyer writes their negotiated price (3.60): no mismatch, although list price is 4.50.
+  fakeAi(poFixture({ po_number: 'B2B-1', lines: [{ code: 'TEA-GRN-12', description: '', quantity: 10, unit: '', unit_price: 3.6 }] }));
+  const r = await call('/api/pos', { method: 'POST', body: Buffer.from('%PDF'), headers: { 'Content-Type': 'application/pdf' } });
+  const po = (await call(`/api/pos/${r.data.id}`)).data;
+  assert.deepEqual(po.lines[0].flags, []);
+  assert.equal(po.lines[0].expected_price, 3.6);
+  assert.equal(po.status, 'ready');
+  // A buyer writing the list price instead gets flagged.
+  fakeAi(poFixture({ po_number: 'B2B-2', lines: [{ code: 'TEA-GRN-12', description: '', quantity: 10, unit: '', unit_price: 4.5 }] }));
+  const r2 = await call('/api/pos', { method: 'POST', body: Buffer.from('%PDF'), headers: { 'Content-Type': 'application/pdf' } });
+  assert.ok((await call(`/api/pos/${r2.data.id}`)).data.lines[0].flags.includes('price_mismatch'));
+});

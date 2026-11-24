@@ -35,3 +35,16 @@ th { font-weight:600; color:var(--muted); font-size:12px; }
 .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .stats div { padding:8px; border:1px solid var(--line); border-radius:8px; }
 .stats b { display:block; font-size:20px; }
+
+hr { border:0; border-top:1px solid var(--line); margin:20px 0; }
+.stack { display:flex; flex-direction:column; gap:8px; max-width:520px; }
+.stack label { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:13px; }
+.stack label.check { flex-direction:row; align-items:center; color:var(--text); }
+.stack label.check input { width:auto; }
+textarea { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--text); }
+details summary { cursor:pointer; list-style:none; } details summary h2 { display:inline; }
+details summary::before { content:'▸ '; color:var(--muted); } details[open] summary::before { content:'▾ '; }
+.settings-block { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
+h3 { font-size:14px; margin:0 0 6px; }
+.secret { font-family:ui-monospace, monospace; background:var(--bg); padding:8px; border-radius:6px; overflow-wrap:anywhere; display:block; }
+[hidden] { display:none !important; }

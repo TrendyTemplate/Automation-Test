@@ -25,6 +25,27 @@ const DRAFT_CREATE = `mutation Draft($input: DraftOrderInput!) {
   }
 }`;
 
+const PRICE_LIST_QUERY = `query Prices($id: ID!, $after: String) {
+  companyLocation(id: $id) {
+    catalogs(first: 5) { nodes { status priceList { id prices(first: 250, after: $after) {
+      nodes { variant { id } price { amount } }
+      pageInfo { hasNextPage endCursor }
+    } } } }
+  }
+}`;
+
+const SUBSCRIBE = `mutation Subscribe($name: String!, $returnUrl: URL!, $test: Boolean, $lineItems: [AppSubscriptionLineItemInput!]!) {
+  appSubscriptionCreate(name: $name, returnUrl: $returnUrl, test: $test, lineItems: $lineItems) {
+    confirmationUrl
+    appSubscription { id status }
+    userErrors { field message }
+  }
+}`;
+
+const ACTIVE_SUBSCRIPTIONS = `query { currentAppInstallation { activeSubscriptions { id name status } } }`;
+
+const CANCEL = `mutation Cancel($id: ID!) { appSubscriptionCancel(id: $id) { appSubscription { id status } userErrors { field message } } }`;
+
 export const shopify = {
   id: 'shopify',
   label: 'Shopify',
@@ -83,6 +104,49 @@ export const shopify = {
         ? { purchasingCompany: { companyId: profile.company.id, companyContactId: profile.id, companyLocationId: location.id } }
         : { customerId: c.id },
     };
+  },
+
+  /** B2B: prices from the price lists of the buyer's company location (Shopify catalogs). Map variantId → price. */
+  async getPrices(store, customer) {
+    const locationId = customer?.ref?.purchasingCompany?.companyLocationId;
+    const prices = new Map();
+    if (!locationId) return prices;
+    let after = null;
+    for (let page = 0; page < 40; page += 1) {
+      const data = await this.graphql(store, PRICE_LIST_QUERY, { id: locationId, after });
+      const catalogs = (data.companyLocation?.catalogs?.nodes || []).filter((c) => c.status !== 'ARCHIVED' && c.priceList);
+      if (!catalogs.length) break;
+      // The first active catalog's price list wins (Shopify applies the lowest; good enough for a mismatch check).
+      const list = catalogs[0].priceList.prices;
+      for (const p of list.nodes) if (!prices.has(p.variant.id)) prices.set(p.variant.id, Number(p.price.amount));
+      if (!list.pageInfo.hasNextPage) break;
+      after = list.pageInfo.endCursor;
+    }
+    return prices;
+  },
+
+  /** Shopify Billing API: returns the URL where the merchant approves the charge. */
+  async createSubscription(store, plan, { returnUrl, test }) {
+    const data = await this.graphql(store, SUBSCRIBE, {
+      name: `${plan.name} plan`,
+      returnUrl,
+      test,
+      lineItems: [{ plan: { appRecurringPricingDetails: { price: { amount: plan.price, currencyCode: 'USD' }, interval: 'EVERY_30_DAYS' } } }],
+    });
+    const r = data.appSubscriptionCreate;
+    if (r.userErrors?.length) throw new Error(`Shopify billing: ${r.userErrors.map((e) => e.message).join('; ')}`);
+    return { confirmationUrl: r.confirmationUrl, id: r.appSubscription?.id };
+  },
+
+  async activeSubscriptions(store) {
+    const data = await this.graphql(store, ACTIVE_SUBSCRIPTIONS);
+    return data.currentAppInstallation?.activeSubscriptions || [];
+  },
+
+  async cancelSubscription(store, id) {
+    const data = await this.graphql(store, CANCEL, { id });
+    const errs = data.appSubscriptionCancel?.userErrors || [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join('; '));
   },
 
   async createOrder(store, order) {

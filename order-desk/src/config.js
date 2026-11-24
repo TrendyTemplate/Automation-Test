@@ -36,6 +36,25 @@ export const config = {
     scopes: process.env.SHOPIFY_SCOPES || 'read_products,read_inventory,read_customers,write_draft_orders,read_companies',
   },
 
+  // Outgoing email (alerts, buyer confirmations). e.g. smtps://user:pass@smtp.postmarkapp.com:465
+  smtpUrl: process.env.SMTP_URL || '',
+  mailFrom: process.env.MAIL_FROM || 'AI Order Desk <orders@localhost>',
+
+  // true = Shopify test charges (development stores). Must be false in production.
+  shopifyBillingTest: process.env.SHOPIFY_BILLING_TEST !== 'false',
+
+  quickbooks: {
+    clientId: process.env.QBO_CLIENT_ID || '',
+    clientSecret: process.env.QBO_CLIENT_SECRET || '',
+    sandbox: process.env.QBO_ENV !== 'production',
+  },
+  xero: {
+    clientId: process.env.XERO_CLIENT_ID || '',
+    clientSecret: process.env.XERO_CLIENT_SECRET || '',
+  },
+
+  mailboxPollSec: Number(process.env.MAILBOX_POLL_SEC || 60),
+
   // Matching thresholds
   autoMatchConfidence: Number(process.env.AUTO_MATCH_CONFIDENCE || 0.9),
   maxLinesPerPo: Number(process.env.MAX_LINES_PER_PO || 500),
