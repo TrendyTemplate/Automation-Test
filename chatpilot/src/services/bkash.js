@@ -43,17 +43,20 @@ export async function createPayment(ws, order, amount) {
   const j = await call(cfg, 'create', { mode: '0011', payerReference: String(order.customer_phone || order.id).slice(0, 20), callbackURL: `${appUrl()}/api/pay/bkash/callback`,
     amount: amt.toFixed(2), currency: 'BDT', intent: 'sale', merchantInvoiceNumber: `CP${ws.id}-${order.id}-${Date.now().toString(36)}` }, await auth(cfg));
   if (!j.bkashURL || !j.paymentID) throw new Error('bKash did not return a payment link');
-  run('UPDATE orders SET bkash_payment_id = ?, bkash_amount = ? WHERE id = ?', j.paymentID, amt, order.id);
+  const links = (() => { try { return JSON.parse(order.bkash_links || '[]'); } catch { return []; } })();
+  run('UPDATE orders SET bkash_payment_id = ?, bkash_amount = ?, bkash_links = ? WHERE id = ?', j.paymentID, amt, JSON.stringify([...links, j.paymentID].slice(-20)), order.id);
   logActivity(ws.id, 'payment_link', { order: order.id, detail: `bKash ${amt}` });
   return { url: j.bkashURL, paymentID: j.paymentID, amount: amt };
 }
 
 /** bKash sends the customer back here. Execute the payment and mark the order paid. Returns a short message. */
 export async function handleCallback({ paymentID, status }) {
-  const o = paymentID ? one('SELECT * FROM orders WHERE bkash_payment_id = ?', String(paymentID).slice(0, 100)) : null;
+  const pid = String(paymentID || '').slice(0, 100).replace(/["%_]/g, '');
+  const o = pid ? one(`SELECT * FROM orders WHERE bkash_payment_id = ? OR bkash_links LIKE ?`, pid, `%"${pid}"%`) : null;
   if (!o) return { ok: false, text: 'Payment not found.' };
   if (status !== 'success') return { ok: false, text: status === 'cancel' ? 'Payment cancelled.' : 'Payment failed. Please try again.' };
-  if (o.payment_check === 'verified' && o.payment_trx) return { ok: true, text: `Already paid — TrxID ${o.payment_trx}.`, order: o.id };
+  const done = (() => { try { return JSON.parse(o.bkash_paid || '[]'); } catch { return []; } })();
+  if (done.includes(pid)) return { ok: true, text: 'Already paid — thank you!', order: o.id };
   const ws = one('SELECT * FROM workspaces WHERE id = ?', o.workspace_id);
   const cfg = cfgOf(ws);
   let j;
@@ -63,8 +66,8 @@ export async function handleCallback({ paymentID, status }) {
   }
   if (j.transactionStatus !== 'Completed') return { ok: false, text: 'Payment not completed.' };
   const paid = Math.round(((o.paid_amount || 0) + Number(j.amount || o.bkash_amount || 0)) * 100) / 100;
-  run(`UPDATE orders SET payment_trx = ?, payment_method = 'bKash', payment_claim = ?, payment_check = 'verified', paid_amount = ?,
-    payment_status = CASE WHEN ? >= total THEN 'paid' ELSE 'advance' END WHERE id = ?`, String(j.trxID || ''), Number(j.amount || 0), paid, paid, o.id);
+  run(`UPDATE orders SET payment_trx = ?, payment_method = 'bKash', payment_claim = ?, payment_check = 'verified', paid_amount = ?, bkash_paid = ?,
+    payment_status = CASE WHEN ? >= total THEN 'paid' ELSE 'advance' END WHERE id = ?`, String(j.trxID || ''), Number(j.amount || 0), paid, JSON.stringify([...done, pid]), paid, o.id);
   logActivity(o.workspace_id, 'payment_received', { order: o.id, detail: `bKash ${j.amount} TrxID ${j.trxID}` });
   return { ok: true, text: `Payment received ✅ TrxID ${j.trxID}`, order: o.id };
 }

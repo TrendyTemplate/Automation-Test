@@ -237,6 +237,10 @@ export async function deliver(chatMessageId, userId = null) {
   if (isComment && m.delivery === 'private' && !insideWindow(conv.last_inbound_at, Date.now() - 6 * 86400_000)) {
     throw Object.assign(new Error('A private reply to a comment is only possible within 7 days.'), { status: 409 });
   }
+  // Claim it: two clicks, two teammates or the retry worker must not send the same reply twice.
+  if (!run(`UPDATE chat_messages SET status = 'sending' WHERE id = ? AND status IN ('draft', 'failed')`, m.id).changes) {
+    throw Object.assign(new Error('This reply is already being sent'), { status: 409 });
+  }
   let ids;
   const mark = m.body;
   if (!sendingNow.has(conv.id)) sendingNow.set(conv.id, new Set());
@@ -294,7 +298,7 @@ function recordSent(m, conv, channel, ids, userId, note) {
       run(`UPDATE conversations SET ai_paused_until = NULL WHERE id = ? AND ai_paused_until > datetime('now', '+11 hours')`, conv.id);
     }
   }
-  run(`UPDATE chat_messages SET status='sent', external_id=COALESCE(?, external_id), part_ids=?, sent_by=COALESCE(?, sent_by), error=?, error_kind=NULL, retry_at=NULL, created_at=datetime('now') WHERE id=?`,
+  run(`UPDATE chat_messages SET status='sent', external_id=COALESCE(?, external_id), part_ids=?, sent_by=COALESCE(?, sent_by), error=?, error_kind=NULL, retry_at=NULL, delivery_status=NULL, created_at=datetime('now') WHERE id=?`,
     all_[0] || null, all_.length > 1 ? JSON.stringify(all_) : null, userId, note, m.id);
   if (channel.health && channel.health !== 'ok') run(`UPDATE channels SET health = 'ok' WHERE id = ?`, channel.id);
   run(`UPDATE conversations SET last_outbound_at=datetime('now') WHERE id=?`, conv.id);
@@ -474,13 +478,20 @@ function schedule(convId) {
 /** Wait until all queued conversations have been processed (tests, graceful shutdown). */
 /** Worker: send again the replies that failed because of a rate limit or a Meta outage. */
 export async function retryFailedSends() {
+  // A send cut off by a restart is left "sending": make it visible (and retryable) again.
+  for (const s of all(`SELECT id, conversation_id FROM chat_messages WHERE status = 'sending'`)) {
+    if (!sendingNow.get(s.conversation_id)?.size) run(`UPDATE chat_messages SET status = 'failed', error = 'Interrupted — check whether it reached the customer before sending again' WHERE id = ? AND status = 'sending'`, s.id);
+  }
   const due = all(`SELECT m.id, m.sent_by, m.conversation_id FROM chat_messages m WHERE m.status = 'failed' AND m.retry_at IS NOT NULL AND m.retry_at <= datetime('now') AND m.attempts < 6
     ORDER BY m.id LIMIT 50`);
   let sent = 0;
   for (const m of due) {
     // The customer wrote again since: the assistant answers that instead; don't send an outdated reply.
     if (one(`SELECT 1 FROM chat_messages WHERE conversation_id = ? AND direction = 'in' AND id > ? LIMIT 1`, m.conversation_id, m.id)) { run('UPDATE chat_messages SET retry_at = NULL WHERE id = ?', m.id); continue; }
-    try { await deliver(m.id, m.sent_by); sent++; } catch { /* deliver recorded the next retry (or gave up) */ }
+    try { await deliver(m.id, m.sent_by); sent++; } catch {
+      // deliver() sets the next retry for rate limits / outages; anything else (window closed, already sent …) stops here.
+      run(`UPDATE chat_messages SET retry_at = NULL, attempts = attempts + 1 WHERE id = ? AND retry_at <= datetime('now')`, m.id);
+    }
   }
   return sent;
 }

@@ -499,3 +499,6 @@ addColumn('conversations', 'csat', 'INTEGER');        // 3 good · 2 ok · 1 bad
 addColumn('conversations', 'csat_sent_at', 'TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_confirm ON orders(confirm_token) WHERE confirm_token IS NOT NULL');
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_bkash ON orders(bkash_payment_id) WHERE bkash_payment_id IS NOT NULL');
+addColumn('orders', 'coupon_discount', 'REAL NOT NULL DEFAULT 0'); // part of the discount that came from the coupon
+addColumn('orders', 'bkash_links', 'TEXT');      // every bKash paymentID created for the order (JSON)
+addColumn('orders', 'bkash_paid', 'TEXT');       // paymentIDs already executed (JSON) — idempotent callbacks

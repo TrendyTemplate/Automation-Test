@@ -86,11 +86,15 @@ async function run_(id, a, text, template) {
         ch.workspace_id, v.id, ids[0] || null, seal(ch.workspace_id, 'chat_messages.body', body), id, ids.length > 1 ? JSON.stringify(ids.filter(Boolean)) : null);
       run(`UPDATE conversations SET last_outbound_at = datetime('now') WHERE id = ?`, v.id);
       sent++;
-    } catch (e) { failed++; if (failed >= 10 && !sent) { run('UPDATE broadcasts SET error = ? WHERE id = ?', e.message.slice(0, 300), id); break; } }
-    run('UPDATE broadcasts SET sent = ?, failed = ? WHERE id = ?', sent, failed, id);
+      run('UPDATE broadcasts SET sent = sent + 1 WHERE id = ?', id);
+    } catch (e) {
+      failed++;
+      run('UPDATE broadcasts SET failed = failed + 1 WHERE id = ?', id);
+      if (failed >= 10 && !sent) { run('UPDATE broadcasts SET error = ? WHERE id = ?', e.message.slice(0, 300), id); break; }
+    }
     if (delay) await new Promise((r) => setTimeout(r, delay));
   }
-  run(`UPDATE broadcasts SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'done' END, sent = ?, failed = ?, finished_at = datetime('now') WHERE id = ?`, sent, failed, id);
+  run(`UPDATE broadcasts SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'done' END, finished_at = datetime('now') WHERE id = ?`, id);
   emit(ch.workspace_id, 'broadcast', { broadcast: id });
 }
 

@@ -9,6 +9,11 @@ import { open } from '../vault.js';
 import { config } from '../config.js';
 import { graph, subscribePage, subscribeWaba } from './meta.js';
 import { kindOf } from './graph-errors.js';
+import { getSetting } from '../settings.js';
+
+// Meta lists every app subscribed to a page; another chat tool being there doesn't mean we are.
+const ourApp = (ch) => (ch.managed ? getSetting('meta_app_id') : ch.own_app_id) || null;
+const subscribed = (ch, data) => { const id = ourApp(ch); return id ? (data || []).some((a) => String(a.id || a.whatsapp_business_api_data?.id) === String(id)) : Boolean(data?.length); };
 
 export async function checkChannel(ch) {
   const token = open(ch.workspace_id, 'channels.access_token', ch.access_token_enc);
@@ -18,14 +23,14 @@ export async function checkChannel(ch) {
       await graph(encodeURIComponent(ch.external_id), { token, params: { fields: 'id,quality_rating' } });
       if (ch.waba_id) {
         const subs = await graph(`${encodeURIComponent(ch.waba_id)}/subscribed_apps`, { token });
-        if (!subs.data?.length) { await subscribeWaba(ch.waba_id, token); logActivity(ch.workspace_id, 'channel_resubscribed', { channel: ch.id }); }
+        if (!subscribed(ch, subs.data)) { await subscribeWaba(ch.waba_id, token); logActivity(ch.workspace_id, 'channel_resubscribed', { channel: ch.id }); }
       }
     } else {
       const page = ch.send_id || ch.external_id;
       await graph('me', { token, params: { fields: 'id' } });
       if (ch.platform === 'messenger') {
         const subs = await graph(`${encodeURIComponent(page)}/subscribed_apps`, { token });
-        if (!subs.data?.length) { await subscribePage(page, token); logActivity(ch.workspace_id, 'channel_resubscribed', { channel: ch.id }); }
+        if (!subscribed(ch, subs.data)) { await subscribePage(page, token); logActivity(ch.workspace_id, 'channel_resubscribed', { channel: ch.id }); }
       }
     }
     set('ok');

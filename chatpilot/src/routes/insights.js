@@ -129,6 +129,10 @@ r.post('/customers/erase', requireRole('owner', 'admin'), (req, res) => {
       run(`UPDATE orders SET customer_name = 'Erased customer', customer_phone = NULL, customer_address = NULL, note = NULL WHERE id = ?`, o.id); orders++;
     }
   }
+  // Activity lines that named them, and the raw webhook copies (a replay buffer only), go too.
+  for (const cid of ids) run(`UPDATE activity SET detail = NULL WHERE workspace_id = ? AND (detail LIKE ? OR detail LIKE ?)`, id, `%"conversation":${cid},%`, `%"conversation":${cid}}%`);
+  if (ph.length >= 10) run('UPDATE activity SET detail = NULL WHERE workspace_id = ? AND detail LIKE ?', id, `%${ph.slice(-10)}%`);
+  run('DELETE FROM webhook_events WHERE workspace_id = ? AND processed_at IS NOT NULL', id);
   audit(req, 'customer.erase', null, { chats: ids.length, orders });
   res.json({ chats: ids.length, orders });
 });

@@ -62,11 +62,25 @@ webhookRouter.post('/', express.raw({ type: '*/*', limit: '2mb' }), (req, res) =
   if (rejected && !verified.size) return res.status(403).send('Invalid signature');
   res.sendStatus(200); // answer fast; Meta expects a 200 within a few seconds
   if (!verified.size) return;
-  // Keep the delivery (encrypted) before processing, so a crash or bug can be replayed instead of losing orders.
-  const first = [...verified.values()][0];
-  const evId = Number(run('INSERT INTO webhook_events (workspace_id, payload, channels) VALUES (?,?,?)', first.workspace_id,
-    seal(first.workspace_id, 'webhook_events.payload', raw.toString('utf8')), JSON.stringify([...verified.entries()].map(([k, c]) => [k, c.id]))).lastInsertRowid);
-  processWebhookEvent(evId, events, verified);
+  // One delivery can hold entries for pages of different shops (shared platform app). Each shop's entries are kept
+  // (encrypted with that shop's key) before processing, so a crash or bug can be replayed instead of losing orders.
+  const chans = [...verified.entries()];
+  const groups = new Map();
+  for (const entry of Array.isArray(payload.entry) ? payload.entry : []) {
+    const ids = [entry.id, ...(entry.changes || []).map((ch) => ch.value?.metadata?.phone_number_id)].filter(Boolean).map(String);
+    const hit = chans.find(([, c]) => ids.some((x) => [c.external_id, c.waba_id, c.send_id].includes(x)));
+    if (!hit) continue;
+    const w = hit[1].workspace_id;
+    if (!groups.has(w)) groups.set(w, []);
+    groups.get(w).push(entry);
+  }
+  for (const [w, entries] of groups) {
+    const sub = { object: payload.object, entry: entries };
+    const mine = new Map(chans.filter(([, c]) => c.workspace_id === w));
+    const evId = Number(run('INSERT INTO webhook_events (workspace_id, payload, channels) VALUES (?,?,?)', w,
+      seal(w, 'webhook_events.payload', JSON.stringify(sub)), JSON.stringify([...mine.entries()].map(([k, c]) => [k, c.id]))).lastInsertRowid);
+    processWebhookEvent(evId, parseWebhook(sub), mine);
+  }
 });
 
 export function processWebhookEvent(evId, events, verified) {
@@ -329,7 +343,10 @@ r.put('/products/:id', manage, (req, res) => {
   res.json(one('SELECT * FROM products WHERE id = ?', ex.id));
 });
 r.delete('/products/:id', manage, (req, res) => {
-  run('DELETE FROM products WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  const id = int(req.params.id);
+  const used = all('SELECT items_json FROM orders WHERE workspace_id = ?', wsId(req)).some((o) => JSON.parse(o.items_json).some((l) => Number(l.product_id) === id));
+  if (used) { run('UPDATE products SET active = 0 WHERE id = ? AND workspace_id = ?', id, wsId(req)); return res.json({ ok: true, hidden: true }); }
+  run('DELETE FROM products WHERE id = ? AND workspace_id = ?', id, wsId(req));
   res.json({ ok: true });
 });
 
@@ -483,6 +500,7 @@ r.put('/orders/:id', async (req, res) => {
   const o = one('SELECT * FROM orders WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   if (!o) return res.status(404).json({ error: 'Not found' });
   const b = req.body || {};
+  let notified = null;
   try {
     // Only re-calculate when the products, zone, discount or address really changed (a status change must not re-price).
     const sameItems = b.items === undefined || JSON.stringify((b.items || []).map((l) => [Number(l.product_id), Number(l.qty), String(l.variant || '').toLowerCase()]))
@@ -499,10 +517,10 @@ r.put('/orders/:id', async (req, res) => {
     if (b.paid_amount !== undefined) run('UPDATE orders SET paid_amount = ? WHERE id = ?', Math.max(0, Number(b.paid_amount) || 0), o.id);
     if (b.status !== undefined) {
       if (!STATUSES.includes(b.status)) return bad(res, 'Invalid status');
-      if (setStatus(one('SELECT * FROM orders WHERE id = ?', o.id), b.status)) await notifyOrderStatus(o.id).catch(() => {});
+      if (setStatus(one('SELECT * FROM orders WHERE id = ?', o.id), b.status)) notified = await notifyOrderStatus(o.id).catch((e) => ({ error: e.message }));
     }
   } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
-  res.json(orderOut(one('SELECT * FROM orders WHERE id = ?', o.id)));
+  res.json({ ...orderOut(one('SELECT * FROM orders WHERE id = ?', o.id)), notified });
 });
 r.get('/orders.csv', (req, res) => {
   const rows = all('SELECT * FROM orders WHERE workspace_id = ? ORDER BY id DESC', wsId(req));

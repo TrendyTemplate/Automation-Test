@@ -113,14 +113,15 @@ export function confirmPage(token) {
   const o = /^[a-f0-9]{32}$/.test(String(token)) ? one('SELECT * FROM orders WHERE confirm_token = ?', token) : null;
   if (!o) return page('Not found', '<h2>এই লিংকটি আর কাজ করছে না</h2><p>This link is no longer valid.</p>');
   const items = JSON.parse(o.items_json).map((l) => `<li>${l.qty} × ${esc(l.name)}${l.variant ? ` (${esc(l.variant)})` : ''}</li>`).join('');
-  if (o.customer_confirmed) return page('Confirmed', `<h2>✅ অর্ডার #${o.id} কনফার্ম হয়েছে</h2><p>Thank you — your order is confirmed.</p>`);
+  if (o.customer_confirmed === -1) return page('Noted', `<h2>অর্ডার #${o.id}</h2><p>আপনি জানিয়েছেন এই অর্ডারটি আপনি করেননি। ধন্যবাদ।</p>`);
+  if (o.customer_confirmed === 1) return page('Confirmed', `<h2>✅ অর্ডার #${o.id} কনফার্ম হয়েছে</h2><p>Thank you — your order is confirmed.</p>`);
   if (o.status === 'cancelled') return page('Cancelled', `<h2>অর্ডার #${o.id} বাতিল</h2>`);
   return page(`Order #${o.id}`, `<h2>অর্ডার #${o.id} কনফার্ম করুন</h2><ul>${items}</ul><p><b>মোট ${esc(o.currency)} ${o.total}</b><br>${esc(o.customer_address || '')}</p>
     <form method="post"><button name="answer" value="yes">✅ হ্যাঁ, অর্ডার কনফার্ম করছি</button><button name="answer" value="no" class="n">❌ আমি এই অর্ডার করিনি</button></form>`);
 }
 export async function confirmAnswer(token, answer) {
   const o = /^[a-f0-9]{32}$/.test(String(token)) ? one('SELECT * FROM orders WHERE confirm_token = ?', token) : null;
-  if (!o || o.customer_confirmed || o.status === 'cancelled') return confirmPage(token);
+  if (!o || o.customer_confirmed || o.status === 'cancelled' || !['yes', 'no'].includes(answer)) return confirmPage(token);
   if (answer === 'yes') {
     run(`UPDATE orders SET customer_confirmed = 1, note = TRIM(COALESCE(note, '') || ' ✅ Customer confirmed by SMS link') WHERE id = ?`, o.id);
     logActivity(o.workspace_id, 'order_customer_confirmed', { order: o.id });

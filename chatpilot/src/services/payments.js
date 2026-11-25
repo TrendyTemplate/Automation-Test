@@ -57,8 +57,10 @@ export function recordClaim(wsId, convId, orderId, pay = {}) {
 /** A person checked their bKash / Nagad app: accept (marks the amount paid) or reject the claim. */
 export function verifyClaim(order, ok, amount) {
   if (!order.payment_trx) throw Object.assign(new Error('No payment to verify'), { status: 400 });
+  if (order.payment_check === 'verified') throw Object.assign(new Error('This payment was already verified'), { status: 409 });
   if (!ok) { run(`UPDATE orders SET payment_check = 'rejected' WHERE id = ?`, order.id); return; }
   const paid = Math.max(0, Number(amount ?? order.payment_claim) || 0);
   if (!paid) throw Object.assign(new Error('Enter the amount you received'), { status: 400 });
-  run(`UPDATE orders SET payment_check = 'verified', paid_amount = ?, payment_status = CASE WHEN ? >= total THEN 'paid' ELSE 'advance' END WHERE id = ?`, paid, paid, order.id);
+  const total = Math.round(((Number(order.paid_amount) || 0) + paid) * 100) / 100; // adds to earlier advances
+  run(`UPDATE orders SET payment_check = 'verified', paid_amount = ?, payment_status = CASE WHEN ? >= total THEN 'paid' ELSE 'advance' END WHERE id = ?`, total, total, order.id);
 }

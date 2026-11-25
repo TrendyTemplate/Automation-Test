@@ -45,7 +45,7 @@ export async function orders(ctx, params) {
 
 async function itemRows(products, items = [{}]) {
   // Products already on the order stay selectable even if they were hidden since (so saving doesn't swap them).
-  return items.map((it) => `<div class="row nowrap item-row"><select name="product_id">${products.filter((p) => p.active || Number(it.product_id) === p.id).map((p) => `<option value="${p.id}" ${Number(it.product_id) === p.id ? 'selected' : ''}>${esc(p.name)} — ${money(p.price, p.currency)}${p.stock != null ? ` (${p.stock} left)` : ''}</option>`).join('')}</select>
+  return items.map((it) => `<div class="row nowrap item-row"><select name="product_id">${it.product_id && !products.some((p) => p.id === Number(it.product_id)) ? `<option value="${Number(it.product_id)}" selected>${esc(it.name || 'Deleted product')} — ${money(it.price, it.currency)} (deleted)</option>` : ''}${products.filter((p) => p.active || Number(it.product_id) === p.id).map((p) => `<option value="${p.id}" ${Number(it.product_id) === p.id ? 'selected' : ''}>${esc(p.name)} — ${money(p.price, p.currency)}${p.stock != null ? ` (${p.stock} left)` : ''}</option>`).join('')}</select>
     <input name="qty" type="number" min="1" value="${it.qty || 1}" style="max-width:80px" aria-label="Quantity"><input name="variant" placeholder="Size / colour" value="${esc(it.variant || '')}" aria-label="Variant">
     <button type="button" class="btn sm ghost icon-only" data-x aria-label="Remove">${icon('x', 'sm')}</button></div>`).join('');
 }
@@ -111,7 +111,8 @@ async function orderDetail(ctx, id, couriers = { connected: [] }) {
         const d = formData(f);
         const body = { ...d, items: readItems(el) };
         if (['cancelled', 'returned'].includes(d.status) && d.status !== o.status && !(await confirmBox(`Mark as ${label(d.status)}?`, 'Items go back into stock.', { danger: true, ok: 'Yes' }))) return;
-        await api(`/sales/orders/${o.id}`, { method: 'PUT', body }); close(); toast('Order saved'); ctx.route();
+        const r = await api(`/sales/orders/${o.id}`, { method: 'PUT', body }); close();
+        toast(r.notified?.error ? `Order saved — but the customer could not be told: ${r.notified.error}` : r.notified?.skipped === 'window' ? 'Order saved — customer not messaged (outside the reply window)' : 'Order saved', Boolean(r.notified?.error)); ctx.route();
       },
       paylink: async () => {
         try {

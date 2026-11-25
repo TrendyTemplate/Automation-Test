@@ -50,13 +50,14 @@ export function pickZone(ws, address, suggested = '') {
 const r2 = (n) => Math.round(n * 100) / 100;
 /** Price an order from catalog prices + delivery zone. */
 /** Check a coupon code against a subtotal. → { coupon, discount, freeDelivery } or { error } */
-export function checkCoupon(wsId, code, subtotal) {
+export function checkCoupon(wsId, code, subtotal, { kept = false } = {}) {
   const c = String(code || '').trim().toUpperCase();
   if (!c) return {};
-  const row = one('SELECT * FROM coupons WHERE workspace_id = ? AND code = ? AND active = 1', wsId, c.slice(0, 40));
-  if (!row) return { error: `Coupon ${c} is not valid` };
-  if (row.expires_at && row.expires_at < new Date().toISOString().slice(0, 10)) return { error: `Coupon ${c} has expired` };
-  if (row.max_uses != null && row.used >= row.max_uses) return { error: `Coupon ${c} has been fully used` };
+  // kept = the coupon is already on this order: expiry and usage limits were checked when it was used.
+  const row = one(`SELECT * FROM coupons WHERE workspace_id = ? AND code = ?${kept ? '' : ' AND active = 1'}`, wsId, c.slice(0, 40));
+  if (!row) return kept ? { missing: true } : { error: `Coupon ${c} is not valid` };
+  if (!kept && row.expires_at && row.expires_at < new Date().toISOString().slice(0, 10)) return { error: `Coupon ${c} has expired` };
+  if (!kept && row.max_uses != null && row.used >= row.max_uses) return { error: `Coupon ${c} has been fully used` };
   if (subtotal < row.min_order) return { error: `Coupon ${c} needs an order of at least ${row.min_order}` };
   const discount = row.kind === 'percent' ? r2(subtotal * Math.min(100, row.value) / 100) : row.kind === 'fixed' ? Math.min(subtotal, row.value) : 0;
   return { coupon: row.code, discount, freeDelivery: row.kind === 'free_delivery' };
@@ -80,7 +81,7 @@ export function adjustStock(productId, variant, delta) {
   } else run('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL', delta, p.id);
 }
 
-export function priceOrder(wsId, items, { address = '', zone = '', discount = 0, coupon = '', keep = [] } = {}) {
+export function priceOrder(wsId, items, { address = '', zone = '', discount = 0, coupon = '', keep = [], couponKept = false } = {}) {
   const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId);
   const problems = [];
   const lines = [];
@@ -88,7 +89,9 @@ export function priceOrder(wsId, items, { address = '', zone = '', discount = 0,
     // Lines already on an order keep the price they were sold at, even if the product changed or was hidden since.
     const kept = keep.find((k) => Number(k.product_id) === Number(it.product_id) && String(k.variant || '').toLowerCase() === String(it.variant || '').toLowerCase());
     const p0 = one(`SELECT * FROM products WHERE id = ? AND workspace_id = ?${kept ? '' : ' AND active = 1'}`, Number(it.product_id), wsId);
-    const p = p0 && kept ? { ...p0, price: kept.price, name: kept.name, currency: kept.currency || p0.currency, stock: p0.stock == null ? null : p0.stock, variant_stock: kept.variant && p0.variant_stock ? p0.variant_stock : null } : p0;
+    // A line whose product was deleted since keeps its stored name and price (no stock to check).
+    const p = kept && !p0 ? { id: Number(kept.product_id), name: kept.name, sku: kept.sku || '', price: kept.price, currency: kept.currency || 'BDT', stock: null, variant_stock: null }
+      : p0 && kept ? { ...p0, price: kept.price, name: kept.name, currency: kept.currency || p0.currency, stock: p0.stock == null ? null : p0.stock, variant_stock: kept.variant && p0.variant_stock ? p0.variant_stock : null } : p0;
     const qty = Math.round(Number(it.qty));
     if (!p) { problems.push(`unknown product id ${it.product_id}`); continue; }
     if (!(qty >= 1 && qty <= 1000)) { problems.push(`invalid quantity for ${p.name}`); continue; }
@@ -106,11 +109,11 @@ export function priceOrder(wsId, items, { address = '', zone = '', discount = 0,
   const subtotal = r2(lines.reduce((s, l) => s + l.price * l.qty, 0));
   const z = lines.length ? pickZone(ws, address, zone) : null;
   const d = deliverySettings(ws);
-  const cp = lines.length ? checkCoupon(wsId, coupon, subtotal) : {};
+  const cp = lines.length ? checkCoupon(wsId, coupon, subtotal, { kept: couponKept }) : {};
   const delivery = z ? ((d.free_over && subtotal >= d.free_over) || cp.freeDelivery ? 0 : Number(z.charge) || 0) : 0;
   const disc = Math.max(0, Math.min(subtotal, (Number(discount) || 0) + (cp.discount || 0)));
   return { lines, subtotal, delivery: { zone: z?.name || null, charge: delivery }, discount: disc, total: r2(subtotal + delivery - disc), currency: lines[0]?.currency || 'BDT', problems,
-    coupon: cp.coupon || null, couponError: cp.error || null };
+    coupon: cp.coupon || null, couponError: cp.error || null, couponDiscount: Math.min(disc, cp.discount || 0) };
 }
 
 const money = (n, cur) => `${cur} ${Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
@@ -129,9 +132,9 @@ export function orderSummary(priced, o = {}) {
 export function createOrder(wsId, { conversationId = null, priced, name, phone, address, note = '', source = 'chat', paymentStatus = 'unpaid', paidAmount = 0, paymentMethod = null }) {
   return tx(() => {
     const id = Number(run(`INSERT INTO orders (workspace_id, conversation_id, items_json, subtotal, delivery_zone, delivery_charge, discount, total, currency,
-      customer_name, customer_phone, customer_address, note, source, payment_status, paid_amount, payment_method, coupon) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      customer_name, customer_phone, customer_address, note, source, payment_status, paid_amount, payment_method, coupon, coupon_discount) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     wsId, conversationId, JSON.stringify(priced.lines), priced.subtotal, priced.delivery?.zone || null, priced.delivery?.charge || 0, priced.discount || 0, priced.total, priced.currency,
-    name, phone, address, String(note || '').slice(0, 500), source, PAYMENT.includes(paymentStatus) ? paymentStatus : 'unpaid', Number(paidAmount) || 0, paymentMethod, priced.coupon || null).lastInsertRowid);
+    name, phone, address, String(note || '').slice(0, 500), source, PAYMENT.includes(paymentStatus) ? paymentStatus : 'unpaid', Number(paidAmount) || 0, paymentMethod, priced.coupon || null, priced.couponDiscount || 0).lastInsertRowid);
     if (priced.coupon) run('UPDATE coupons SET used = used + 1 WHERE workspace_id = ? AND code = ?', wsId, priced.coupon);
     for (const l of priced.lines) adjustStock(l.product_id, l.variant, -l.qty);
     return id;
@@ -156,12 +159,19 @@ export function setStatus(order, status) {
 export function editOrder(order, { items, address, zone, discount }) {
   const oldItems = JSON.parse(order.items_json);
   return tx(() => {
-    for (const l of oldItems) adjustStock(l.product_id, l.variant, l.qty); // release first
-    const priced = priceOrder(order.workspace_id, items ?? oldItems, { keep: oldItems, address: address ?? order.customer_address, zone: zone !== undefined ? zone : (address !== undefined ? '' : order.delivery_zone), /* a new address picks its zone again */ discount: discount ?? order.discount });
+    // Cancelled / returned orders already gave their items back: editing them must not move stock again.
+    const holdsStock = !RESTOCK.has(order.status);
+    if (holdsStock) for (const l of oldItems) adjustStock(l.product_id, l.variant, l.qty); // release first
+    // The coupon stays on the order and is re-applied to the new subtotal; "discount" is the extra, manual part.
+    const couponPart = Number(order.coupon_discount) || 0;
+    const cpRow = order.coupon ? checkCoupon(order.workspace_id, order.coupon, 0, { kept: true }) : {};
+    const manual = Math.max(0, (discount !== undefined ? Number(discount) || 0 : Number(order.discount) || 0) - couponPart) + (cpRow.missing ? couponPart : 0);
+    const priced = priceOrder(order.workspace_id, items ?? oldItems, { keep: oldItems, address: address ?? order.customer_address, zone: zone !== undefined ? zone : (address !== undefined ? '' : order.delivery_zone), /* a new address picks its zone again */
+      discount: manual, coupon: cpRow.missing ? '' : order.coupon, couponKept: true });
     if (priced.problems.length || !priced.lines.length) throw Object.assign(new Error(priced.problems.join('; ') || 'An order needs at least one product'), { status: 400 });
-    for (const l of priced.lines) adjustStock(l.product_id, l.variant, -l.qty);
-    run(`UPDATE orders SET items_json = ?, subtotal = ?, delivery_zone = ?, delivery_charge = ?, discount = ?, total = ?, currency = ?, updated_at = datetime('now') WHERE id = ?`,
-      JSON.stringify(priced.lines), priced.subtotal, priced.delivery.zone, priced.delivery.charge, priced.discount, priced.total, priced.currency, order.id);
+    if (holdsStock) for (const l of priced.lines) adjustStock(l.product_id, l.variant, -l.qty);
+    run(`UPDATE orders SET items_json = ?, subtotal = ?, delivery_zone = ?, delivery_charge = ?, discount = ?, coupon_discount = ?, total = ?, currency = ?, updated_at = datetime('now') WHERE id = ?`,
+      JSON.stringify(priced.lines), priced.subtotal, priced.delivery.zone, priced.delivery.charge, priced.discount, cpRow.missing ? 0 : priced.couponDiscount || 0, priced.total, priced.currency, order.id);
     return priced;
   });
 }

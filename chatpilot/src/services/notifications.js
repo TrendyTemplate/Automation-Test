@@ -51,13 +51,17 @@ export async function notifyOrderStatus(orderId) {
   if (replyWindow(channel.platform, conv).open) {
     const { storeOutbound, deliver } = await import('./sales.js');
     const id = storeOutbound(conv, make(o), { source: 'auto', status: 'draft' });
-    await deliver(id);
+    try { await deliver(id); } catch (e) { return { error: e.message }; } // deliver() logged it
     return { sent: true, id };
   }
   const tpl = orderTemplates(ws)[o.status];
   if (channel.platform === 'whatsapp' && tpl) {
     const token = open(channel.workspace_id, 'channels.access_token', channel.access_token_enc);
-    const wamid = await sendTemplate(channel, token, conv.customer_id, tpl.name, tpl.language, tpl.params.map((p) => fill(p, o, conv)));
+    let wamid;
+    try { wamid = await sendTemplate(channel, token, conv.customer_id, tpl.name, tpl.language, tpl.params.map((p) => fill(p, o, conv))); } catch (e) {
+      logActivity(o.workspace_id, 'send_failed', { order: o.id, conversation: conv.id, error: `Order update template "${tpl.name}": ${e.message}` });
+      return { error: `WhatsApp refused the template "${tpl.name}": ${e.message}` };
+    }
     run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status) VALUES (?,?, 'out', 'auto', ?, ?, 'sent')`,
       conv.workspace_id, conv.id, wamid, seal(conv.workspace_id, 'chat_messages.body', `[template ${tpl.name}] ${make(o)}`));
     return { sent: true, template: tpl.name };
