@@ -89,6 +89,15 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   const verify = await page.textContent('dd code >> nth=1');
   const ok = await fetch(`${base}/api/social/webhook?hub.mode=subscribe&hub.verify_token=${verify.trim()}&hub.challenge=777`);
   assert.equal(await ok.text(), '777');
+  // Comment rules: add a keyword reply through the form
+  await page.click('[data-act=rules]');
+  await page.check('.modal [name=hide_phones]');
+  await page.fill('.modal [name=w0]', 'price, dam');
+  await page.fill('.modal [name=p0]', 'Inbox check korun');
+  await page.click('.modal button[type=submit]');
+  await page.waitForSelector('.modal', { state: 'detached' });
+  const rules = JSON.parse(one('SELECT comment_rules FROM channels WHERE external_id = ?', '1098765432').comment_rules);
+  assert.deepEqual([rules.hide_phones, rules.triggers[0].words, rules.triggers[0].public], [true, ['price', 'dam'], 'Inbox check korun']);
 
   // A customer writes (with an XSS payload) through the signed webhook
   const payload = JSON.stringify({ object: 'page', entry: [{ id: '1098765432', messaging: [{ sender: { id: 'psid-ui' }, recipient: { id: '1098765432' }, timestamp: Date.now(), message: { mid: 'mid.ui1', text: `dam koto? ${XSS}<script>window.__xss=2</script>` } }] }] });
@@ -120,7 +129,7 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   assert.equal(sent.length, 1);
 
   // Every page renders; no console errors
-  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'customers', 'analytics', 'couriers', 'delivery', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
+  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'customers', 'analytics', 'couriers', 'delivery', 'hours', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('h1', { timeout: 5000 });
   }

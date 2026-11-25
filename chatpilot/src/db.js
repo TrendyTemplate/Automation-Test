@@ -423,3 +423,7 @@ addColumn('workspaces', 'assign_cursor', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('chat_messages', 'attachments_json', 'TEXT');
 addColumn('chat_messages', 'buttons_json', 'TEXT');
 addColumn('workspaces', 'courier_hook', 'TEXT'); // random secret in the courier webhook URL
+addColumn('channels', 'comment_rules', 'TEXT');   // JSON: hide phones/links/words, keyword replies, which posts, once per person
+addColumn('channels', 'profile_json', 'TEXT');    // JSON: greeting, ice breakers, menu pushed to Meta
+addColumn('conversations', 'author_id', 'TEXT');  // comment threads: who wrote the first comment
+addColumn('workspaces', 'hours_json', 'TEXT');    // JSON: business hours + away message

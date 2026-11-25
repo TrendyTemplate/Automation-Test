@@ -1,5 +1,6 @@
 // ChatPilot: conversations (chat-first, three panes), orders, products, channels (Connect with Facebook) and test chat.
 import { $, $$, esc, icon, api, toast, bind, formData, modal, confirmBox, ago, fmtDate, num, empty, label, lead, csvDownload, switchEl } from '../ui.js';
+import { chatMenu, commentRules } from './automation.js';
 import { orderForm, fraudBadge } from './orders.js';
 
 const PL = { messenger: { name: 'Messenger' }, instagram: { name: 'Instagram' }, whatsapp: { name: 'WhatsApp' } };
@@ -267,6 +268,7 @@ export async function channels(ctx, params = {}) {
         <div class="grid g2"><div><label>Follow up quiet buyers after (hours, 0 = off)</label><input name="followup_hours" type="number" min="0" max="20" value="${c.followup_hours}"></div>
           <div><label>Greeting for new chats <span class="hint">(optional)</span></label><input name="greeting" value="${esc(c.greeting || '')}" placeholder="আসসালামু আলাইকুম! কীভাবে সাহায্য করতে পারি?"></div></div>
         ${c.managed ? '' : '<details><summary class="hint">Replace token / app secret</summary><div class="grid g2"><div><label>New access token</label><input name="access_token" type="password" autocomplete="off"></div><div><label>New app secret</label><input name="app_secret" type="password" autocomplete="off"></div></div></details>'}
+        <div class="row mt-s"><button type="button" class="btn sm" data-act="menu" data-id="${c.id}">${icon('list', 'sm')}Chat menu</button>${c.platform === 'whatsapp' ? '' : `<button type="button" class="btn sm" data-act="rules" data-id="${c.id}">${icon('shield', 'sm')}Comment rules</button>`}</div>
         <div class="row mt"><label class="check" style="margin:0">${switchEl('enabled', c.enabled)} Enabled</label><span class="spacer"></span>
           <button class="btn ghost danger" type="button" data-act="del" data-id="${c.id}">${icon('trash')}Disconnect</button><button class="btn primary" type="submit">Save</button></div></form></div>`).join('')
       || `<div class="card">${empty('plug', 'No channels yet', meta.available ? 'Click Connect above — Facebook will ask which Page, Instagram account or WhatsApp number to share.' : 'Use "Connect manually" with your own Meta app token.')}</div>`}</div>`;
@@ -285,6 +287,8 @@ export async function channels(ctx, params = {}) {
   }, { wide: true });
   bind({
     add: () => openAdd(),
+    menu: (b) => chatMenu(ctx, list.find((c) => String(c.id) === b.dataset.id)),
+    rules: (b) => commentRules(ctx, list.find((c) => String(c.id) === b.dataset.id)),
     copy: async (b) => { await navigator.clipboard.writeText(b.dataset.v); toast('Copied'); },
     save: async (form) => {
       const d = formData(form);

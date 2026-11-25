@@ -49,6 +49,13 @@ export function parseWebhook(payload) {
         }
       }
       for (const m of Array.isArray(entry.messaging) ? entry.messaging : []) {
+        if (m.postback && !m.message) {
+          // Tapped "Get Started", an ice breaker or a menu item: treat the button title as what the customer said.
+          events.push({ platform, externalId: String(entry.id), customerId: String(m.sender?.id), text: String(m.postback.title || ''),
+            messageId: m.postback.mid ? String(m.postback.mid) : `pb:${m.sender?.id}:${m.timestamp}`, attachments: [], referral: m.postback.referral || null,
+            postback: String(m.postback.payload || '').slice(0, 200), timestamp: m.timestamp ? new Date(Number(m.timestamp)).toISOString() : new Date().toISOString(), echo: false });
+          continue;
+        }
         if (!m.message || m.message.is_deleted) continue; // reads, deliveries, reactions … are ignored
         const echo = Boolean(m.message.is_echo);
         events.push({
@@ -56,7 +63,8 @@ export function parseWebhook(payload) {
           customerId: String(echo ? m.recipient?.id : m.sender?.id),
           messageId: m.message.mid ? String(m.message.mid) : null,
           text: String(m.message.text || m.message.quick_reply?.payload || ''),
-          attachments: (m.message.attachments || []).filter((a) => a?.type).map((a) => ({ type: a.type, url: a.payload?.url || null })),
+          attachments: [...(m.message.reply_to?.story ? [{ type: 'story_reply', url: m.message.reply_to.story.url || null }] : []),
+            ...(m.message.attachments || []).filter((a) => a?.type).map((a) => ({ type: a.type, url: a.payload?.url || null }))],
           referral: m.message.referral || m.referral || null,
           timestamp: m.timestamp ? new Date(Number(m.timestamp)).toISOString() : new Date().toISOString(),
           echo, appId: m.message.app_id ? String(m.message.app_id) : null,

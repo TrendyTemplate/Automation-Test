@@ -12,6 +12,7 @@ import { aiEnabled } from '../services/ai.js';
 import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings, validateDelivery } from '../services/orders.js';
 import { notifyOrderStatus } from '../services/notifications.js';
 import { subscribe, emit } from '../services/events.js';
+import { commentRules, validateRules, validateProfile, applyProfile, saveProfile, businessHours, validateHours, isOpen } from '../services/automation.js';
 import { courierStatus, connectCourier, disconnectCourier, bookParcel, refreshStatus, fraudCheck, COURIERS } from '../services/couriers.js';
 import { learnFromReply, learnFromDraft, latestProfile, forgetFact, maybeDistill, queueImport } from '../services/learning.js';
 import { effectivePlan } from '../plans.js';
@@ -69,6 +70,7 @@ const channelOut = (c) => ({
   history_status: c.history_status, history_stats: c.history_stats ? JSON.parse(c.history_stats) : null, followup_hours: c.followup_hours, greeting: c.greeting,
   last_event_at: c.last_event_at, last_error: c.last_error, created_at: c.created_at,
   verify_token: c.verify_token, webhook_url: `${appUrl()}/api/social/webhook`,
+  comment_rules: commentRules(c), profile: c.profile_json ? JSON.parse(c.profile_json) : null,
 });
 
 r.get('/overview', (req, res) => {
@@ -463,6 +465,32 @@ r.post('/orders/:id/courier/status', async (req, res) => {
 });
 r.get('/fraud-check', async (req, res) => {
   try { res.json(await fraudCheck(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), s(req.query.phone, 30))); } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+
+// ----- rules that run without the AI
+r.put('/channels/:id/rules', manage, (req, res) => {
+  const ch = one('SELECT id FROM channels WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!ch) return res.status(404).json({ error: 'Not found' });
+  try { run('UPDATE channels SET comment_rules = ? WHERE id = ?', JSON.stringify(validateRules(req.body || {})), ch.id); } catch (e) { return bad(res, e.message); }
+  res.json(channelOut(one('SELECT * FROM channels WHERE id = ?', ch.id)));
+});
+r.put('/channels/:id/profile', manage, async (req, res) => {
+  const ch = one('SELECT * FROM channels WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!ch) return res.status(404).json({ error: 'Not found' });
+  let p;
+  try { p = validateProfile(req.body || {}); } catch (e) { return bad(res, e.message); }
+  try { await applyProfile(ch, open(ch.workspace_id, 'channels.access_token', ch.access_token_enc), p); } catch (e) { return res.status(502).json({ error: `Meta did not accept it: ${e.message}` }); }
+  saveProfile(ch.id, p);
+  audit(req, 'channel.profile', ch.id);
+  res.json(channelOut(one('SELECT * FROM channels WHERE id = ?', ch.id)));
+});
+r.get('/hours', (req, res) => { const w = one('SELECT * FROM workspaces WHERE id = ?', wsId(req)); res.json({ ...businessHours(w), open_now: isOpen(w) }); });
+r.put('/hours', manage, (req, res) => {
+  let h;
+  try { h = validateHours(req.body || {}); } catch (e) { return bad(res, e.message); }
+  run('UPDATE workspaces SET hours_json = ? WHERE id = ?', JSON.stringify(h), wsId(req));
+  const w = one('SELECT * FROM workspaces WHERE id = ?', wsId(req));
+  res.json({ ...businessHours(w), open_now: isOpen(w) });
 });
 
 r.get('/delivery', (req, res) => res.json(deliverySettings(req.workspace)));

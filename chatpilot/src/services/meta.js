@@ -43,7 +43,7 @@ export function verifyConnectState(state) {
   return s;
 }
 
-async function graph(path, { method = 'GET', token, params = {}, body } = {}) {
+export async function graph(path, { method = 'GET', token, params = {}, body } = {}) {
   const url = new URL(`${graphBase()}/${version()}/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const res = await fetch(url, {

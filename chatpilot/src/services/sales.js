@@ -11,6 +11,7 @@ import { learnedBlock, learnedFactsText, examplesBlock, learnFromReply, markOrde
 import { replyToComment, privateReply, fetchCustomerName } from './meta.js';
 import { priceOrder, orderSummary, createOrder, deliveryText } from './orders.js';
 import { emit } from './events.js';
+import { moderateComment, hideComment, afterHours, hoursText } from './automation.js';
 import { sendTelegram, sendSlack } from './notify.js';
 import { appUrl } from '../settings.js';
 
@@ -81,6 +82,7 @@ ${catalogText(ws.id)}
 Knowledge base (delivery charges, payment methods, return policy, shop hours …):
 ${knowledgeText(ws.id) || '(No knowledge base entries yet.)'}
 ${deliveryText(ws)}
+${hoursText(ws)}
 ${learnedBlock(ws.id, channel.id)}${channel.greeting ? `\nGreeting to use for a brand-new conversation: ${channel.greeting}\n` : ''}
 How to chat:
 - Tone: ${ws.reply_tone}. Write like a helpful shop assistant on chat: short messages (1-4 sentences), no markdown, no headings, at most one or two emojis.
@@ -227,11 +229,20 @@ export async function respond(conversationId) {
   const plan = effectivePlan(ws);
   const isComment = conv.kind === 'comment';
   const mode = isComment ? channel.comment_mode : channel.mode;
-  if (!channel.enabled || mode === 'off') return { skipped: 'channel off' };
+  if (!channel.enabled) return { skipped: 'channel off' };
   if (conv.ai_paused_until && toMs(conv.ai_paused_until) > Date.now()) return { skipped: 'human took over' };
   const msgs = history(conv);
   const last = msgs[msgs.length - 1];
   if (!last || last.direction !== 'in') return { skipped: 'nothing new' };
+  if (!isComment) {
+    // Outside business hours: an away message (at most every 12 hours) when the AI won't answer by itself.
+    const ah = afterHours(ws, conv);
+    if (ah.away && (ah.quiet || mode !== 'auto') && insideWindow(conv.last_inbound_at)) {
+      await deliver(storeOutbound(conv, ah.away, { source: 'auto', status: 'draft' })).catch((e) => console.error('[away]', e.message));
+    }
+    if (ah.quiet) return { skipped: 'after hours' };
+  }
+  if (mode === 'off') return { skipped: 'channel off' };
   const usage = getUsage(ws.id);
   if (!aiEnabled() || plan.key === 'expired' || usage.ai_replies >= plan.aiRepliesPerMonth || usage.ai_calls >= (plan.aiCalls || plan.aiRepliesPerMonth * 3)) {
     run(`UPDATE conversations SET status='needs_human', handoff_reason=? WHERE id=?`, plan.key === 'expired' ? 'Subscription inactive' : aiEnabled() ? 'AI limit reached for this month' : 'AI not configured', conv.id);
@@ -376,7 +387,7 @@ export function ingest(channel, ev) {
       .then((name) => { if (name) run('UPDATE conversations SET customer_name = COALESCE(customer_name, ?) WHERE id = ?', String(name).slice(0, 120), conv.id); }).catch(() => {});
   }
   if (ev.messageId && one('SELECT id FROM chat_messages WHERE conversation_id = ? AND external_id = ?', conv.id, ev.messageId)) return null; // Meta retries
-  const LABEL = { image: '[photo]', audio: '[voice message]', video: '[video]', file: '[file]', document: '[file]', sticker: '[sticker]', location: '[location]' };
+  const LABEL = { story_reply: '[replied to your story]', story_mention: '[mentioned you in their story]', image: '[photo]', audio: '[voice message]', video: '[video]', file: '[file]', document: '[file]', sticker: '[sticker]', location: '[location]' };
   const atts = (ev.attachments || []).map((a) => (typeof a === 'string' ? { type: a } : a));
   const body = [ev.text, ...atts.map((a) => LABEL[a.type] || `[${a.type}]`)].filter(Boolean).join(' ');
   if (ev.referral && !conv.referral_json) {
@@ -430,8 +441,8 @@ export function ingestComment(channel, ev) {
   let conv;
   if (thread) conv = one('SELECT * FROM conversations WHERE id = ?', thread);
   else {
-    run(`INSERT OR IGNORE INTO conversations (workspace_id, channel_id, customer_id, customer_name, kind, post_id, comment_id, stage) VALUES (?,?,?,?, 'comment', ?, ?, 'browsing')`,
-      channel.workspace_id, channel.id, `c:${ev.commentId}`, ev.fromName, ev.postId, ev.commentId);
+    run(`INSERT OR IGNORE INTO conversations (workspace_id, channel_id, customer_id, customer_name, kind, post_id, comment_id, stage, author_id) VALUES (?,?,?,?, 'comment', ?, ?, 'browsing', ?)`,
+      channel.workspace_id, channel.id, `c:${ev.commentId}`, ev.fromName, ev.postId, ev.commentId, ev.fromId || null);
     conv = one('SELECT * FROM conversations WHERE channel_id = ? AND customer_id = ?', channel.id, `c:${ev.commentId}`);
   }
   run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status) VALUES (?,?,?,?,?,?,?)`,
@@ -439,6 +450,24 @@ export function ingestComment(channel, ev) {
   run(`UPDATE chat_messages SET status = 'rejected' WHERE conversation_id = ? AND status = 'draft' AND source = 'ai'`, conv.id);
   run(`UPDATE conversations SET last_inbound_at = datetime('now'), unread = unread + 1, status = CASE WHEN status = 'closed' THEN 'open' ELSE status END WHERE id = ?`, conv.id);
   emit(conv.workspace_id, 'message', { conversation: conv.id, direction: 'in', channel: conv.channel_id });
+  // Comment rules run first: hide spam / phone numbers, keyword replies, posts with auto replies off.
+  const rule = moderateComment(channel, conv, ev.text);
+  if (rule.hide) {
+    run(`UPDATE conversations SET status = 'closed', handoff_reason = ?, unread = 0 WHERE id = ?`, `Hidden: ${rule.hide}`, conv.id);
+    logActivity(conv.workspace_id, 'comment_hidden', { conversation: conv.id, reason: rule.hide });
+    const done = hideComment(channel, open(channel.workspace_id, 'channels.access_token', channel.access_token_enc), ev.commentId)
+      .catch((e) => logActivity(conv.workspace_id, 'send_failed', { conversation: conv.id, error: `hide comment: ${e.message}` }));
+    return { conversationId: conv.id, hidden: rule.hide, done };
+  }
+  if (rule.skip) return { conversationId: conv.id, skipped: rule.skip, done: Promise.resolve() };
+  if (rule.trigger && channel.enabled && channel.comment_mode !== 'off') {
+    const sendNow = channel.comment_mode === 'auto';
+    const ids = [rule.trigger.public && storeOutbound(conv, rule.trigger.public, { source: 'auto', status: 'draft', delivery: 'public' }),
+      rule.trigger.private && storeOutbound(conv, rule.trigger.private, { source: 'auto', status: 'draft', delivery: 'private' })].filter(Boolean);
+    logActivity(conv.workspace_id, 'comment_keyword', { conversation: conv.id });
+    const done = sendNow ? ids.reduce((p, id) => p.then(() => deliver(id).catch((e) => console.error('[keyword]', e.message))), Promise.resolve()) : Promise.resolve();
+    return { conversationId: conv.id, keyword: true, done };
+  }
   return { conversationId: conv.id, done: schedule(conv.id) };
 }
 
