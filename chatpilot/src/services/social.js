@@ -111,7 +111,10 @@ export function parseWebhook(payload) {
         }
         const names = Object.fromEntries((v.contacts || []).map((c) => [c.wa_id, c.profile?.name]));
         for (const msg of v.messages || []) {
-          const text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title
+          const cart = msg.type === 'order' && Array.isArray(msg.order?.product_items)
+            ? `[cart from your WhatsApp catalog] ${msg.order.product_items.map((i) => `${i.quantity} × SKU ${i.product_retailer_id}${i.item_price ? ` (${i.currency || ''} ${i.item_price})` : ''}`).join(', ')}${msg.order.text ? ` — ${msg.order.text}` : ''}`
+            : '';
+          const text = cart || msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title
             || msg.image?.caption || '';
           events.push({
             platform: 'whatsapp', externalId: String(v.metadata.phone_number_id),
@@ -208,7 +211,15 @@ const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp
  * Download a customer's photo so the AI can look at it. Messenger/Instagram give a CDN URL; WhatsApp gives a
  * media id that is resolved with the token. Returns {media_type, data(base64)} or null. Max 5 MB.
  */
+const AUDIO_TYPES = /^audio\/(ogg|opus|mpeg|mp4|aac|amr|wav|x-m4a|webm)$|^video\/mp4$/;
 export async function fetchCustomerImage(channel, token, att) {
+  const m = await fetchCustomerMedia(channel, token, att, { accept: (t) => IMAGE_TYPES.has(t), max: 5 * 1024 * 1024 });
+  return m ? { media_type: m.media_type, data: m.buffer.toString('base64') } : null;
+}
+/** Voice notes (for transcription). */
+export const fetchCustomerAudio = (channel, token, att) => fetchCustomerMedia(channel, token, att, { accept: (t) => AUDIO_TYPES.test(t), max: 20 * 1024 * 1024 });
+
+async function fetchCustomerMedia(channel, token, att, { accept, max }) {
   try {
     let url = att.url;
     let auth = {};
@@ -222,10 +233,10 @@ export async function fetchCustomerImage(channel, token, att) {
     if (!url.startsWith(graphBase()) && !(/^https:\/\//.test(url) && /(^|\.)(fbcdn\.net|fbsbx\.com|cdninstagram\.com|whatsapp\.net|facebook\.com)$/.test(host))) return null;
     const res = await fetch(url, { headers: auth, signal: AbortSignal.timeout(20_000) });
     const type = String(res.headers.get('content-type') || '').split(';')[0].trim();
-    if (!res.ok || !IMAGE_TYPES.has(type)) return null;
+    if (!res.ok || !accept(type)) return null;
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > 5 * 1024 * 1024) return null;
-    return { media_type: type, data: buf.toString('base64') };
+    if (buf.length > max) return null;
+    return { media_type: type, buffer: buf };
   } catch { return null; }
 }
 

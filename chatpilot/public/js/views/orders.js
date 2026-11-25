@@ -97,6 +97,9 @@ async function orderDetail(ctx, id, couriers = { connected: [] }) {
         · ${{ pending: 'check it in your app, then verify', verified: 'verified ✓', rejected: 'rejected', reused: '⚠ this TrxID was already used on another order' }[o.payment_check] || ''}
         ${['pending', 'reused'].includes(o.payment_check) ? `<div class="row mt-s"><input type="number" min="1" id="pay-amt" value="${o.payment_claim || ''}" placeholder="Amount received" style="max-width:160px" aria-label="Amount received">
           <button type="button" class="btn sm primary" data-act="payok">Verify</button><button type="button" class="btn sm ghost danger" data-act="payno">Not received</button></div>` : ''}</div></div>` : ''}
+      ${due(o) > 0 && o.status !== 'cancelled' ? `<div class="row mt"><span class="hint">Ask for payment:</span><input type="number" id="pl-amt" min="1" max="${o.total}" value="${o.delivery_charge || due(o)}" style="max-width:120px" aria-label="Amount">
+        <button type="button" class="btn sm" data-act="paylink">${icon('card', 'sm')}Send bKash link${o.conversation_id ? ' to chat' : ''}</button></div>` : ''}
+      ${o.customer_confirmed === 1 ? `<p class="hint mt">${icon('checkCircle', 'sm')} The customer confirmed this order by SMS.</p>` : o.customer_confirmed === -1 ? `<div class="callout bad mt">${icon('alert')}<div>The customer says they did <b>not</b> place this order.</div></div>` : ''}
       ${o.customer_phone ? `<div id="fraud" class="mt"></div>` : ''}
       <div class="row mt"><button class="btn primary" type="submit">Save changes</button><a class="btn" href="#invoice?id=${o.id}">${icon('file')}Invoice</a></div></form>`, (el, close) => {
     const wire = () => $$('[data-x]', el).forEach((b) => { b.onclick = () => { if ($$('.item-row', el).length > 1) b.closest('.item-row').remove(); }; });
@@ -109,6 +112,12 @@ async function orderDetail(ctx, id, couriers = { connected: [] }) {
         const body = { ...d, items: readItems(el) };
         if (['cancelled', 'returned'].includes(d.status) && d.status !== o.status && !(await confirmBox(`Mark as ${label(d.status)}?`, 'Items go back into stock.', { danger: true, ok: 'Yes' }))) return;
         await api(`/sales/orders/${o.id}`, { method: 'PUT', body }); close(); toast('Order saved'); ctx.route();
+      },
+      paylink: async () => {
+        try {
+          const r = await api(`/sales/orders/${o.id}/paylink`, { method: 'POST', body: { amount: Number($('#pl-amt', el).value), send: Boolean(o.conversation_id) } });
+          if (r.sentToChat) toast('bKash link sent to the chat'); else { await navigator.clipboard?.writeText(r.url).catch(() => {}); toast('bKash link copied — send it to the customer'); }
+        } catch (e) { if (/Connect bKash/.test(e.message)) location.hash = 'payments'; throw e; }
       },
       book: async (b) => { const r = await api(`/sales/orders/${o.id}/courier`, { method: 'POST', body: { courier: b.dataset.c } }); close(); toast(`Booked with ${label(r.courier)} — tracking ${r.tracking_code || r.consignment_id}`); ctx.route(); },
       payok: async () => { await api(`/sales/orders/${o.id}/payment`, { method: 'POST', body: { ok: true, amount: Number($('#pay-amt', el).value) } }); toast('Payment verified'); close(); ctx.route(); },
@@ -165,7 +174,7 @@ export async function delivery(ctx) {
 
 /** bKash / Nagad numbers and when to ask for advance payment. */
 export async function payments(ctx) {
-  const [p, coupons] = await Promise.all([api('/sales/payments'), api('/sales/coupons')]);
+  const [p, coupons, sms, bk] = await Promise.all([api('/sales/payments'), api('/sales/coupons'), api('/sales/sms').catch(() => null), api('/sales/bkash').catch(() => null)]);
   ctx.view.innerHTML = `<div class="page-h"><div><h1>Payments</h1><p>Cash on delivery is always on. Add your bKash / Nagad numbers and the assistant tells customers where to pay, collects the Transaction ID (TrxID), and the order waits for you to verify it — nothing is marked paid automatically.</p></div></div>
     <form class="card" data-act="save" style="max-width:720px">
       <div class="grid g2">${Object.entries(p.available).map(([k, l]) => `<div><label>${esc(l)} number</label><input name="m_${k}" inputmode="tel" placeholder="01XXXXXXXXX" value="${esc(p.methods[k] || '')}"></div>`).join('')}</div>
@@ -184,6 +193,32 @@ export async function payments(ctx) {
         <div><label>Minimum order</label><input name="min_order" type="number" min="0" placeholder="0"></div><div><label>Max uses</label><input name="max_uses" type="number" min="1" placeholder="unlimited"></div>
         <div><label>Expires</label><input name="expires_at" type="date"></div>
         <div><button class="btn primary" type="submit">${icon('plus')}Add coupon</button></div></form></div>`;
+  ctx.view.insertAdjacentHTML('beforeend', `
+    ${bk ? `<form class="card mt" data-act="bkash" style="max-width:720px"><h3>${icon('card')} bKash payment links ${bk.connected ? `<span class="badge ok">Connected${bk.sandbox ? ' (sandbox)' : ''}</span>` : ''}</h3>
+      <p class="hint">With a bKash merchant account (Tokenized Checkout), send a payment link from any order — the order is marked paid automatically, verified by bKash. Keys come from your bKash merchant onboarding.</p>
+      <div class="grid g2"><div><label>App key</label><input name="app_key" autocomplete="off"></div><div><label>App secret</label><input name="app_secret" type="password" autocomplete="off"></div>
+        <div><label>Username</label><input name="username" autocomplete="off" value="${esc(bk.username || '')}"></div><div><label>Password</label><input name="password" type="password" autocomplete="off"></div></div>
+      <label class="check"><input type="checkbox" name="sandbox" ${bk.sandbox ? 'checked' : ''}> Sandbox (test) account</label>
+      <div class="row mt"><button class="btn primary" type="submit">${bk.connected ? 'Update' : 'Connect'}</button>${bk.connected ? '<button type="button" class="btn ghost danger" data-act="bkoff">Disconnect</button>' : ''}</div></form>` : ''}
+    ${sms ? `<form class="card mt" data-act="sms" style="max-width:720px"><h3>${icon('bell')} SMS to customers ${sms.connected ? '<span class="badge ok">Connected</span>' : ''}</h3>
+      <p class="hint">SMS reaches customers when Messenger/WhatsApp can't (after 24 hours) — and a one-tap "Yes, I ordered this" link cuts fake COD orders.</p>
+      <div class="grid g2"><div><label>Provider</label><select name="provider"><option value="">— off —</option>${Object.entries(sms.providers).map(([k, v]) => `<option value="${k}" ${sms.provider === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
+        <div><label>API key / token</label><input name="api_key" type="password" autocomplete="off" placeholder="${sms.connected ? '•••• saved — leave blank to keep' : ''}"></div>
+        <div><label>Sender ID <span class="hint">(masking, if approved)</span></label><input name="sender_id" value="${esc(sms.sender_id || '')}"></div><div><label>SID <span class="hint">(SSL Wireless)</span></label><input name="sid" value="${esc(sms.sid || '')}"></div></div>
+      <label>Send an SMS when</label>
+      ${[['confirmed', 'Order confirmed'], ['shipped', 'Shipped (with tracking)'], ['delivered', 'Delivered'], ['cancelled', 'Cancelled'], ['risky_confirm', 'Risky COD order: ask the customer to confirm with one tap']].map(([k, l]) => `<label class="check"><input type="checkbox" name="ev_${k}" ${sms.events?.[k] ? 'checked' : ''}> ${l}</label>`).join('')}
+      <label>Send a test to <span class="hint">(optional)</span></label><input name="test_phone" placeholder="01XXXXXXXXX" style="max-width:200px">
+      <button class="btn primary mt" type="submit">Save</button></form>` : ''}`);
+  bind({
+    bkash: async (f) => { await api('/sales/bkash', { method: 'PUT', body: formData(f) }); toast('bKash connected'); ctx.route(); },
+    bkoff: async () => { await api('/sales/bkash', { method: 'PUT', body: { disconnect: true } }); ctx.route(); },
+    sms: async (f) => {
+      const d = formData(f);
+      const events = Object.fromEntries(['confirmed', 'shipped', 'delivered', 'cancelled', 'risky_confirm'].map((k) => [k, Boolean(d[`ev_${k}`])]));
+      await api('/sales/sms', { method: 'PUT', body: { provider: d.provider, api_key: d.api_key || '', sender_id: d.sender_id, sid: d.sid, events, test_phone: d.test_phone || '' } });
+      toast(d.test_phone ? 'Saved — test SMS sent' : 'Saved'); ctx.route();
+    },
+  }, ctx.view);
   ctx.view.querySelectorAll('[data-cp]').forEach((x) => x.addEventListener('change', () => api(`/sales/coupons/${x.dataset.cp}`, { method: 'PUT', body: { active: x.checked } }).then(() => toast('Saved'))));
   bind({ cpadd: async (f) => { await api('/sales/coupons', { method: 'POST', body: formData(f) }); toast('Coupon added'); ctx.route(); },
     cpdel: async (b) => { await api(`/sales/coupons/${b.dataset.id}`, { method: 'DELETE' }); ctx.route(); },

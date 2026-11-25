@@ -14,6 +14,9 @@ import { notifyOrderStatus, orderTemplates, validateOrderTemplates } from '../se
 import { graph } from '../services/meta.js';
 import { subscribe, emit } from '../services/events.js';
 import * as webpush from '../services/webpush.js';
+import { smsSettings, connectSms, PROVIDERS as SMS_PROVIDERS } from '../services/sms.js';
+import { bkashSettings, connectBkash, createPayment } from '../services/bkash.js';
+import { syncSettings, syncProducts } from '../services/catalogsync.js';
 import { capiSettings, saveCapi } from '../services/capi.js';
 import { preview as broadcastPreview, createBroadcast, listBroadcasts, listTemplates } from '../services/broadcasts.js';
 import { paymentSettings, validatePayment, verifyClaim, METHODS } from '../services/payments.js';
@@ -427,7 +430,10 @@ r.put('/conversations/:id', (req, res) => {
     if (hours < 0 || hours > 24 * 30) return bad(res, 'Snooze for up to 30 days');
     run(`UPDATE conversations SET snoozed_until = ${hours ? "datetime('now', '+' || ? || ' minutes')" : 'NULL'}, unread = 0 WHERE id = ?`, ...(hours ? [Math.round(hours * 60), v.id] : [v.id]));
   }
-  if (b.status === 'closed') run('UPDATE conversations SET unread = 0 WHERE id = ?', v.id);
+  if (b.status === 'closed') {
+    run('UPDATE conversations SET unread = 0 WHERE id = ?', v.id);
+    if (v.status !== 'closed') import('../services/sales.js').then((m) => m.askCsat(v.id)).catch(() => {});
+  }
   if (b.ai_paused === true) run(`UPDATE conversations SET ai_paused_until = datetime('now', '+30 days') WHERE id = ?`, v.id);
   if (b.ai_paused === false) run('UPDATE conversations SET ai_paused_until = NULL WHERE id = ?', v.id);
   for (const k of ['customer_name', 'customer_phone', 'customer_address']) if (b[k] !== undefined) run(`UPDATE conversations SET ${k} = ? WHERE id = ?`, s(b[k], 500) || null, v.id);
@@ -595,6 +601,38 @@ r.post('/channels/:id/templates', manage, async (req, res) => {
     res.json({ id: out.id, status: out.status || 'PENDING', name });
   } catch (e) { res.status(502).json({ error: `Meta did not accept the template: ${e.message}` }); }
 });
+
+// ----- SMS, bKash payment links, website product import
+r.get('/sms', manage, (req, res) => res.json({ ...smsSettings(one('SELECT * FROM workspaces WHERE id = ?', wsId(req))), providers: SMS_PROVIDERS }));
+r.put('/sms', manage, async (req, res) => {
+  try { res.json({ ...(await connectSms(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), req.body || {})), providers: SMS_PROVIDERS }); audit(req, 'sms.update', wsId(req)); }
+  catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+r.get('/bkash', manage, (req, res) => res.json(bkashSettings(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)))));
+r.put('/bkash', manage, async (req, res) => {
+  try { res.json(await connectBkash(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), req.body || {})); audit(req, 'bkash.update', wsId(req)); }
+  catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+r.post('/orders/:id/paylink', async (req, res) => {
+  const o = one('SELECT * FROM orders WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!o) return res.status(404).json({ error: 'Not found' });
+  try {
+    const p = await createPayment(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), o, req.body?.amount ?? Math.max(0, o.total - (o.paid_amount || 0)));
+    let sentToChat = false;
+    const v = o.conversation_id && one('SELECT v.*, c.platform FROM conversations v JOIN channels c ON c.id = v.channel_id WHERE v.id = ?', o.conversation_id);
+    if (req.body?.send && v && v.kind === 'message') {
+      const id = storeOutbound(v, `${v.language === 'bn' ? `অর্ডার #${o.id}-এর জন্য bKash-এ ${p.amount} টাকা পেমেন্ট করুন` : `Pay BDT ${p.amount} for order #${o.id} with bKash`}: ${p.url}`, { source: 'human', status: 'draft', userId: req.user.id });
+      try { await deliver(id, req.user.id); sentToChat = true; } catch (e) { return res.status(e.status || 502).json({ error: e.message, url: p.url }); }
+    }
+    res.json({ ...p, sentToChat });
+  } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+r.get('/store-sync', manage, (req, res) => res.json(syncSettings(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)))));
+r.post('/store-sync', manage, async (req, res) => {
+  try { const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId(req)); res.json(await syncProducts(ws, req.body?.source ? req.body : null) || { error: 'Not connected' }); audit(req, 'store.sync', wsId(req)); }
+  catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+r.delete('/store-sync', manage, (req, res) => { run('UPDATE workspaces SET store_sync = NULL WHERE id = ?', wsId(req)); res.json({ ok: true }); });
 
 // ----- coupon codes
 const couponIn = (b) => {

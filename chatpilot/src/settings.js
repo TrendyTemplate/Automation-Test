@@ -24,6 +24,9 @@ export const SETTINGS = [
   ['security', 'allowed_admin_ips', 'Restrict the admin panel to these IPs (comma separated, blank = any)', 'text', null, false, ''],
 
   ['ai', 'anthropic_api_key', 'Anthropic API key', 'text', 'ANTHROPIC_API_KEY', true, ''],
+  ['ai', 'stt_url', 'Voice-message transcription endpoint (OpenAI-compatible /audio/transcriptions)', 'text', 'STT_URL', false, 'https://api.openai.com/v1/audio/transcriptions'],
+  ['ai', 'stt_api_key', 'Voice-message transcription API key (blank = voice notes go to a person)', 'text', 'STT_API_KEY', true, ''],
+  ['ai', 'stt_model', 'Transcription model', 'text', 'STT_MODEL', false, 'whisper-1'],
   ['ai', 'ai_model', 'AI model', 'text', 'AI_MODEL', false, 'claude-opus-5-5'],
   ['ai', 'ai_effort', 'AI effort (low / medium / high)', 'text', 'AI_EFFORT', false, 'low'],
   ['ai', 'ai_input_price', 'Cost per 1M input tokens (USD, for reports)', 'number', null, false, '4'],

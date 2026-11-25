@@ -486,3 +486,16 @@ addColumn('conversations', 'snoozed_until', 'TEXT');   // hidden from the inbox 
 addColumn('workspaces', 'sla_minutes', 'INTEGER NOT NULL DEFAULT 15'); // "Overdue": customer waiting longer than this
 addColumn('chat_messages', 'part_ids', 'TEXT');  // every platform id when a long reply went out in several parts
 addColumn('channels', 'own_app_id', 'TEXT');       // the Meta app that sends for this channel (its echoes are ours, not staff)
+addColumn('workspaces', 'sms_json', 'TEXT');          // SMS gateway (key encrypted) + which order events send an SMS
+addColumn('workspaces', 'bkash_json', 'TEXT');        // bKash Tokenized Checkout (secrets encrypted)
+addColumn('workspaces', 'store_sync', 'TEXT');        // WooCommerce / Shopify product import (keys encrypted)
+addColumn('workspaces', 'csat_enabled', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('orders', 'confirm_token', 'TEXT');         // one-tap confirmation link sent by SMS
+addColumn('orders', 'customer_confirmed', 'INTEGER'); // 1 confirmed by the customer, -1 denied
+addColumn('orders', 'bkash_payment_id', 'TEXT');
+addColumn('orders', 'bkash_amount', 'REAL');
+addColumn('products', 'external_ref', 'TEXT');        // woo:123 / shopify:456
+addColumn('conversations', 'csat', 'INTEGER');        // 3 good · 2 ok · 1 bad
+addColumn('conversations', 'csat_sent_at', 'TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_confirm ON orders(confirm_token) WHERE confirm_token IS NOT NULL');
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_bkash ON orders(bkash_payment_id) WHERE bkash_payment_id IS NOT NULL');

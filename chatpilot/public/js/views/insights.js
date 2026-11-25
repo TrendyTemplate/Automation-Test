@@ -61,7 +61,7 @@ export async function analytics(ctx, params) {
       <div class="card stat"><div class="l">Customer messages</div><div class="n">${num(a.messages.inbound || 0)}</div></div>
       <div class="card stat"><div class="l">Orders</div><div class="n">${num(a.orders.n || 0)}</div></div>
       <div class="card stat ok"><div class="l">Order value</div><div class="n">${money(a.orders.value, cur)}</div></div>
-      <div class="card stat warn"><div class="l">Handed to a person</div><div class="n">${num(a.handoffs)}</div></div></div>
+      <div class="card stat warn"><div class="l">Handed to a person</div><div class="n">${num(a.handoffs)}</div>${a.csat?.n ? `<div class="hint">Customers happy: ${a.csat.good}% of ${num(a.csat.n)} ratings</div>` : ''}</div></div>
     <div class="grid g2">
       <div class="card"><h3>Messages per day</h3>${bars(a.daily.map((d) => ({ label: d.day, short: d.day.slice(8), value: d.messages })))}</div>
       <div class="card"><h3>Orders per day</h3>${bars(a.daily.map((d) => ({ label: d.day, short: d.day.slice(8), value: d.orders })))}</div>

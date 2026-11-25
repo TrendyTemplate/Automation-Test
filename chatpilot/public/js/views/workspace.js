@@ -92,6 +92,7 @@ export async function brain(ctx) {
         <div class="setting-row"><div><div class="t">Tell customers about their order</div><div class="d">A message when an order is confirmed, shipped (with tracking), delivered or cancelled. On WhatsApp after 24 hours it uses your order-update templates (Broadcasts → WhatsApp templates).</div></div>${switchEl('notify_customers', s.notify_customers)}</div>
         <div class="setting-row"><div><div class="t">Share chats that need a person among the team</div><div class="d">Each hand-off goes to the next teammate in turn.</div></div>${switchEl('auto_assign', s.auto_assign)}</div>
         <div class="setting-row"><div><div class="t">Say it's an AI assistant</div><div class="d">The first reply in a new chat mentions that it's the shop's AI assistant and a person can join.</div></div>${switchEl('ai_disclosure', s.ai_disclosure)}</div>
+        <div class="setting-row"><div><div class="t">Ask "How did we do?" when a chat is closed</div><div class="d">Three tap buttons (good / OK / bad); results in Analytics. At most once a week per customer.</div></div>${switchEl('csat_enabled', s.csat_enabled)}</div>
         <label>A customer waiting longer than this is "Overdue" (minutes)</label><input name="sla_minutes" type="number" min="1" max="1440" value="${s.sla_minutes || 15}" style="max-width:160px"></div>
       <div><button class="btn primary lg" type="submit">Save changes</button></div>
     </form>`;

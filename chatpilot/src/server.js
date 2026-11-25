@@ -63,6 +63,13 @@ export function createApp() {
   // Messenger / Instagram / WhatsApp webhooks: raw body is needed to verify Meta's X-Hub-Signature-256.
   app.use('/api/social/webhook', rateLimit({ windowMs: 60_000, limit: 3000 }), socialWebhook);
   app.use('/api/meta', rateLimit({ windowMs: 60_000, limit: 120 }), metaCallbacks); // Meta data-deletion / deauthorize callbacks
+  // bKash sends the customer back here after paying (public; the payment is verified with bKash).
+  app.get('/api/pay/bkash/callback', rateLimit({ windowMs: 60_000, limit: 60 }), async (req, res) => {
+    const { handleCallback } = await import('./services/bkash.js');
+    const r = await handleCallback({ paymentID: String(req.query.paymentID || ''), status: String(req.query.status || '') }).catch((e) => ({ ok: false, text: e.message }));
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+    res.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>bKash payment</title><body style="font:18px system-ui;display:grid;place-items:center;min-height:90vh;text-align:center;padding:16px"><div><h2>${r.ok ? '✅' : '⚠'} ${esc(r.text)}</h2><p>You can close this page and go back to the chat.</p></div></body>`);
+  });
   // Courier status webhooks (Steadfast / Pathao / RedX). The URL carries a per-shop secret.
   app.post('/api/couriers/hook/:token', rateLimit({ windowMs: 60_000, limit: 600 }), express.json({ limit: '200kb' }), async (req, res) => {
     try { const r = await handleCourierWebhook(req.params.token, req.body); res.status(r.status).json({ status: r.status === 200 ? 'success' : 'not found' }); }
@@ -142,6 +149,11 @@ export function createApp() {
   app.get(['/admin', '/admin/*splat'], (req, res) => sendPage(res, 'admin'));
   app.get('/', (req, res) => sendPage(res, 'index'));
   app.get('/deletion', deletionStatusPage);
+  // Customer-facing pages: one-tap order confirmation (SMS link) and the bKash payment return page.
+  app.get('/c/:token', rateLimit({ windowMs: 60_000, limit: 60 }), async (req, res) => { const { confirmPage } = await import('./services/sms.js'); res.type('html').send(confirmPage(req.params.token)); });
+  app.post('/c/:token', rateLimit({ windowMs: 60_000, limit: 20 }), express.urlencoded({ extended: false, limit: '2kb' }), async (req, res) => {
+    const { confirmAnswer } = await import('./services/sms.js'); res.type('html').send(await confirmAnswer(req.params.token, req.body?.answer));
+  });
   app.get('/:page', (req, res, next) => {
     const name = req.params.page.replace(/\.html$/, '');
     if (PAGES.has(name) && !['app', 'admin', 'index', '404'].includes(name)) return sendPage(res, name);

@@ -38,6 +38,7 @@ const fill = (p, o, conv) => String(p).replace(/\{\{order\}\}/g, String(o.id)).r
 
 export async function notifyOrderStatus(orderId) {
   const o = one('SELECT * FROM orders WHERE id = ?', orderId);
+  if (o) { const { smsOrder } = await import('./sms.js'); await smsOrder(o.id, o.status); } // SMS too, if the shop turned it on for this update
   if (!o?.conversation_id) return { skipped: 'no chat' };
   const ws = one('SELECT * FROM workspaces WHERE id = ?', o.workspace_id);
   if (!ws.notify_customers) return { skipped: 'off' };

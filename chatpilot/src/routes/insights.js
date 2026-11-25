@@ -102,7 +102,7 @@ r.get('/analytics', (req, res) => {
     automation: sentTotal ? Math.round(((msgs.ai_auto || 0) / sentTotal) * 100) : 0, firstResponseSec: median,
     handoffs: n(`SELECT COUNT(*) AS n FROM activity WHERE workspace_id = ? AND type = 'chat_handoff' AND created_at > datetime('now', ?)`, id, since),
     orders, deliveryRate: (orders.delivered || 0) + (orders.lost || 0) ? Math.round(((orders.delivered || 0) / ((orders.delivered || 0) + (orders.lost || 0))) * 100) : null,
-    byPage, byAd, team, waBilling, topProducts: Object.values(products).sort((a, b) => b.value - a.value).slice(0, 10), daily,
+    byPage, byAd, team, waBilling, csat: one(`SELECT COUNT(csat) AS n, ROUND(AVG(csat = 3) * 100) AS good FROM conversations WHERE workspace_id = ? AND csat IS NOT NULL AND csat_sent_at > datetime('now', ?)`, id, since), topProducts: Object.values(products).sort((a, b) => b.value - a.value).slice(0, 10), daily,
     learned: n('SELECT COUNT(*) AS n FROM learn_examples WHERE workspace_id = ? AND weight > 0', id),
   });
 });

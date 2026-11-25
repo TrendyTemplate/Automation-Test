@@ -200,7 +200,7 @@ export async function catalog(ctx) {
   const manage = canManage(ctx);
   ctx.view.innerHTML = `
     <div class="page-h"><div><h1>Products</h1><p>The assistant recommends and sells only what is listed here, at exactly these prices. Put delivery charges, payment methods and return policy in the <a href="#knowledge">Knowledge base</a>.</p></div>
-      ${manage ? `<div class="actions"><button class="btn" data-act="import">${icon('download')}Import CSV</button><button class="btn primary" data-act="add">${icon('plus')}Add product</button></div>` : ''}</div>
+      ${manage ? `<div class="actions"><button class="btn" data-act="site">${icon('refresh')}From website</button><button class="btn" data-act="import">${icon('download')}Import CSV</button><button class="btn primary" data-act="add">${icon('plus')}Add product</button></div>` : ''}</div>
     <div class="card pad-0"><div class="table-wrap"><table><thead><tr><th>Product</th><th>Price</th><th>Stock</th><th>Options</th><th></th></tr></thead><tbody>
       ${list.map((p) => `<tr><td><b>${esc(p.name)}</b>${p.active ? '' : ' <span class="badge">Hidden</span>'}${p.sku ? `<div class="hint">SKU ${esc(p.sku)}</div>` : ''}<div class="hint" style="max-width:360px;white-space:normal">${esc(p.description || '')}</div></td>
         <td class="nowrap">${fmtMoney(p.price, p.currency)}</td><td>${p.stock == null ? '<span class="hint">not tracked</span>' : p.stock > 0 ? num(p.stock) : '<span class="badge bad">Out of stock</span>'}</td>
@@ -223,6 +223,21 @@ export async function catalog(ctx) {
     add: () => edit(),
     edit: (b) => edit(list.find((p) => p.id === Number(b.dataset.id))),
     del: async (b) => { if (await confirmBox('Delete this product?', 'Existing orders keep their copy of the item.', { danger: true, ok: 'Delete' })) { await api(`/sales/products/${b.dataset.id}`, { method: 'DELETE' }); ctx.route(); } },
+    site: async () => {
+      const st = await api('/sales/store-sync');
+      modal(`<h2>Import from your website</h2><p class="hint">Products, prices, stock (per size/colour on Shopify) and photos are copied in and updated every day. Matching is by the store's product id or SKU.</p>
+        ${st.source ? `<div class="callout ok">${icon('checkCircle')}<div>Connected to <b>${esc(st.url)}</b> (${esc(st.source)}) · last sync ${st.last_sync ? esc(new Date(st.last_sync).toLocaleString()) : 'never'}${st.last_result ? ` · ${st.last_result.added} added, ${st.last_result.updated} updated` : ''}
+          <div class="row mt-s"><button class="btn sm primary" data-act="now">Sync now</button><button class="btn sm ghost danger" data-act="off">Disconnect</button></div></div></div>` : ''}
+        <form data-act="go"><label>Shop type</label><select name="source"><option value="woocommerce">WooCommerce (WordPress)</option><option value="shopify">Shopify</option></select>
+          <label>Shop address</label><input name="url" placeholder="https://myshop.com or myshop.myshopify.com" required>
+          <div class="grid g2"><div><label>Consumer key <span class="hint">(WooCommerce)</span></label><input name="key" autocomplete="off"></div><div><label>Consumer secret / Shopify access token</label><input name="secret" type="password" autocomplete="off" required></div></div>
+          <p class="field-hint">WooCommerce → Settings → Advanced → REST API → Add key (Read). Shopify → Settings → Apps → Develop apps → Admin API token with read_products.</p>
+          <button class="btn primary mt" type="submit">Connect & import</button></form>`, (el, close) => bind({
+        go: async (f) => { const r = await api('/sales/store-sync', { method: 'POST', body: formData(f) }); close(); toast(`${r.found} found · ${r.added} added · ${r.updated} updated${r.skipped ? ` · ${r.skipped} over your plan's limit` : ''}`); ctx.route(); },
+        now: async () => { const r = await api('/sales/store-sync', { method: 'POST', body: {} }); close(); toast(`${r.added} added · ${r.updated} updated`); ctx.route(); },
+        off: async () => { await api('/sales/store-sync', { method: 'DELETE' }); close(); toast('Disconnected'); },
+      }, el), { wide: true });
+    },
     import: () => modal(`<h2>Import products</h2><p class="hint">One product per line: <code>name,price,stock,sku,variants,description</code>. Leave stock empty if you don't track it.</p>
       <form data-act="go"><textarea name="csv" rows="8" placeholder="Black Hoodie,1200,25,HD-01,&quot;Sizes: M, L, XL&quot;,Cotton fleece"></textarea><label>Currency</label><input name="currency" value="BDT" maxlength="3">
       <button class="btn primary mt" type="submit">Import</button></form>`, (el, close) => bind({ go: async (f) => {
