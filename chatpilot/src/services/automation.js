@@ -1,6 +1,6 @@
 // Rules that run without the AI: comment moderation & keyword replies, business hours / away message,
 // and the Messenger / Instagram / WhatsApp chat profile (Get Started, greeting, ice breakers, menu).
-import { one, run } from '../db.js';
+import { one, all, run } from '../db.js';
 import { graph } from './meta.js';
 
 const list = (v, max, len) => (Array.isArray(v) ? v : String(v || '').split(','))
@@ -9,7 +9,7 @@ const BN_DIGITS = { '০': '0', '১': '1', '২': '2', '৩': '3', '৪': '4', 
 const latinDigits = (t) => String(t || '').replace(/[০-৯]/g, (d) => BN_DIGITS[d]);
 
 // ---------- Comment rules ----------
-export const DEFAULT_RULES = { hide_phones: false, hide_links: false, hide_words: [], once_per_person: true, only_posts: [], skip_posts: [], triggers: [] };
+export const DEFAULT_RULES = { hide_phones: false, hide_links: false, hide_words: [], once_per_person: true, only_posts: [], skip_posts: [], triggers: [], sku_replies: false };
 
 export function commentRules(channel) {
   try { return { ...DEFAULT_RULES, ...JSON.parse(channel.comment_rules || '{}') }; } catch { return { ...DEFAULT_RULES }; }
@@ -23,7 +23,7 @@ export function validateRules(b = {}) {
     private: String(t?.private || '').trim().slice(0, 1000),
   })).filter((t) => t.words.length);
   for (const t of triggers) if (!t.public && !t.private) throw Object.assign(new Error(`Keyword "${t.words[0]}": write a public reply, an inbox message, or both`), { status: 400 });
-  return { hide_phones: Boolean(b.hide_phones), hide_links: Boolean(b.hide_links), hide_words: list(b.hide_words, 100, 40),
+  return { sku_replies: Boolean(b.sku_replies), hide_phones: Boolean(b.hide_phones), hide_links: Boolean(b.hide_links), hide_words: list(b.hide_words, 100, 40),
     once_per_person: b.once_per_person !== false, only_posts: posts(b.only_posts), skip_posts: posts(b.skip_posts), triggers };
 }
 
@@ -52,7 +52,30 @@ export function moderateComment(channel, conv, text) {
         AND m.created_at > datetime('now', '-7 days') LIMIT 1`, channel.id, conv.post_id, conv.author_id, conv.id);
     if (answered) return { skip: 'already answered this person on this post' };
   }
-  return trig ? { trigger: trig } : {};
+  if (trig) return { trigger: trig };
+  if (r.sku_replies) {
+    const hit = skuInComment(channel.workspace_id, text);
+    if (hit) return { trigger: hit };
+  }
+  return {};
+}
+
+/** Live / post selling: "P12 L", "#P12", "p-12 xl 2ta" → that product's price and how to order, sent to the inbox. */
+export function skuInComment(wsId, text) {
+  const products = all(`SELECT * FROM products WHERE workspace_id = ? AND active = 1 AND sku IS NOT NULL AND sku <> ''`, wsId);
+  if (!products.length) return null;
+  const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const tokens = String(text).split(/[\s,#]+/).map(norm).filter(Boolean);
+  const p = products.find((x) => tokens.includes(norm(x.sku)));
+  if (!p) return null;
+  const stock = p.variant_stock ? Object.entries(JSON.parse(p.variant_stock)).filter(([, v]) => v > 0).map(([k]) => k).join(', ') : null;
+  const out = p.stock != null && p.stock <= 0;
+  return {
+    public: out ? `${p.sku} stock out 😔 Inbox e onno option dilam` : 'Inbox check korun ✅',
+    private: out ? `${p.name} (${p.sku}) ekhon stock e nei. Onno design dekhte chaile janaben.`
+      : `${p.name} (${p.sku}) — ${p.currency} ${p.price}${stock ? `\nAvailable: ${stock}` : p.variants ? `\nOptions: ${p.variants}` : ''}\nOrder korte apnar naam, phone number, full address ar size/quantity likhe din.`,
+    sku: p.sku,
+  };
 }
 
 /** Hide a comment on the Page / Instagram post (the commenter and their friends still see it; others don't). */

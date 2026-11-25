@@ -5,10 +5,11 @@ import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 import { getSetting, appUrl } from '../settings.js';
+import { GraphError } from './graph-errors.js';
 
 const graphBase = () => (process.env.META_GRAPH_URL || 'https://graph.facebook.com').replace(/\/$/, '');
 const dialogBase = () => (process.env.META_DIALOG_URL || 'https://www.facebook.com').replace(/\/$/, '');
-const version = () => process.env.META_GRAPH_VERSION || 'v21.0';
+const version = () => process.env.META_GRAPH_VERSION || 'v24.0';
 
 export const metaApp = () => ({ id: getSetting('meta_app_id'), secret: getSetting('meta_app_secret') });
 export const metaConnectAvailable = () => Boolean(metaApp().id && metaApp().secret);
@@ -53,7 +54,7 @@ export async function graph(path, { method = 'GET', token, params = {}, body } =
     signal: AbortSignal.timeout(15_000),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.error) throw new Error(json.error?.message || `Graph API HTTP ${res.status}`);
+  if (!res.ok || json.error) throw new GraphError(json.error || {}, res.status);
   return json;
 }
 
@@ -97,7 +98,7 @@ export async function listWhatsAppNumbers(userToken) {
 
 /** Subscribe our app to a Page's messaging webhooks (Messenger + Instagram events arrive for the Page). */
 export const subscribePage = (pageId, pageToken) => graph(`${encodeURIComponent(pageId)}/subscribed_apps`, {
-  method: 'POST', token: pageToken, params: { subscribed_fields: 'messages,message_echoes,messaging_postbacks,feed' },
+  method: 'POST', token: pageToken, params: { subscribed_fields: 'messages,message_echoes,messaging_postbacks,message_deliveries,message_reads,feed' },
 });
 /** Subscribe our app to a WhatsApp Business Account's webhooks. */
 export const subscribeWaba = (wabaId, token) => graph(`${encodeURIComponent(wabaId)}/subscribed_apps`, { method: 'POST', token });

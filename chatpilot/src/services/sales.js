@@ -6,7 +6,8 @@ import { seal, open } from '../vault.js';
 import { effectivePlan } from '../plans.js';
 import { aiEnabled, call, redact, countRedactions } from './ai.js';
 import { checkOutbound, detectInjection, sensitiveTopicHit } from './guard.js';
-import { PLATFORMS, insideWindow, sendText, sendImage, fetchCustomerImage, toMs } from './social.js';
+import { PLATFORMS, insideWindow, replyWindow, windowError, sendText, sendImage, fetchCustomerImage, toMs } from './social.js';
+import { kindOf } from './graph-errors.js';
 import { learnedBlock, learnedFactsText, examplesBlock, learnFromReply, markOrdered, recordExample } from './learning.js';
 import { replyToComment, privateReply, fetchCustomerName } from './meta.js';
 import { priceOrder, orderSummary, createOrder, deliveryText } from './orders.js';
@@ -16,7 +17,21 @@ import { paymentText, recordClaim } from './payments.js';
 import { sendPurchase } from './capi.js';
 import { sendTelegram, sendSlack } from './notify.js';
 import { pushToWorkspace } from './webpush.js';
-import { appUrl } from '../settings.js';
+import { appUrl, getSetting } from '../settings.js';
+
+/** Can this shop use the AI right now (plan active, monthly limits not reached)? → null, or the reason it can't. */
+export function aiBlocked(ws) {
+  const plan = effectivePlan(ws);
+  if (!aiEnabled()) return 'AI is not configured yet';
+  if (plan.key === 'expired') return 'Subscription inactive';
+  const usage = getUsage(ws.id);
+  if (usage.ai_replies >= plan.aiRepliesPerMonth || usage.ai_calls >= (plan.aiCalls || plan.aiRepliesPerMonth * 3)) return 'AI limit reached for this month';
+  return null;
+}
+
+// Replies being sent right now, per conversation: Meta's echo of them can arrive before the send call returns.
+const sendingNow = new Map();
+const isOurs = (convId, text) => [...(sendingNow.get(convId) || [])].some((t) => t && String(text).trim() && t.includes(String(text).trim()));
 
 export const STAGES = ['new', 'browsing', 'interested', 'negotiating', 'ordering', 'ordered', 'support', 'lost'];
 const MAX_AI_PER_HOUR = 20; // loop protection per conversation
@@ -96,7 +111,7 @@ ${paymentText(ws)}
 ${hoursText(ws)}
 ${learnedBlock(ws.id, channel.id)}${channel.greeting ? `\nGreeting to use for a brand-new conversation: ${channel.greeting}\n` : ''}
 How to chat:
-- Tone: ${ws.reply_tone}. Write like a helpful shop assistant on chat: short messages (1-4 sentences), no markdown, no headings, at most one or two emojis.
+${ws.ai_disclosure ? '- In your first reply of a new conversation, say briefly that you are the shop\'s AI assistant and a person can join if needed.\n' : ''}- Tone: ${ws.reply_tone}. Write like a helpful shop assistant on chat: short messages (1-4 sentences), no markdown, no headings, at most one or two emojis.
 - Always reply in the customer's language and script (Bangla → Bangla, Banglish → Banglish, English → English)${ws.default_language && ws.default_language !== 'auto' ? `; if unclear use ${ws.default_language}` : ''}.
 - Only state products, prices, options, stock and policies that appear in the catalog, the knowledge base, or the facts this shop's staff use (learned). Answer the way the staff answer. Never invent discounts, delivery times, policies or links. If something is unknown, say a team member will confirm and set handoff to true.
 - Out-of-stock products cannot be ordered; suggest an in-stock alternative.
@@ -181,6 +196,7 @@ export function autoAssign(ws, convId) {
   return next;
 }
 
+export const alertWorkspace = (ws, text, push) => alert(ws, text, push);
 async function alert(ws, text, push = null) {
   await Promise.allSettled([sendTelegram(ws.telegram_chat_id, text), sendSlack(ws.slack_webhook, text), push && pushToWorkspace(ws.id, push)]);
 }
@@ -193,34 +209,79 @@ export async function deliver(chatMessageId, userId = null) {
   const channel = one('SELECT * FROM channels WHERE id = ?', conv.channel_id);
   const isComment = conv.kind === 'comment';
   // Chats: Meta's 24-hour window. Public comment replies have no window; private replies to a comment: 7 days.
-  if (!isComment && !insideWindow(conv.last_inbound_at)) {
-    throw Object.assign(new Error(`${PLATFORMS[channel.platform].label} only allows replies within 24 hours of the customer's last message.`), { status: 409 });
+  const win = isComment ? { open: true, tag: null } : replyWindow(channel.platform, conv, { human: m.source === 'human' });
+  if (!win.open) throw Object.assign(new Error(windowError(channel.platform)), { status: 409 });
+  if (channel.paused_until && toMs(channel.paused_until) > Date.now()) {
+    // Meta asked us to slow down: keep it and send when the pause is over.
+    run(`UPDATE chat_messages SET status='failed', error='Waiting: Meta rate limit', error_kind='rate_limit', retry_at=? WHERE id=?`, channel.paused_until, m.id);
+    throw Object.assign(new Error('Meta asked to slow down — this reply will be sent automatically in a few minutes.'), { status: 429 });
   }
   if (isComment && m.delivery === 'private' && !insideWindow(conv.last_inbound_at, Date.now() - 6 * 86400_000)) {
     throw Object.assign(new Error('A private reply to a comment is only possible within 7 days.'), { status: 409 });
   }
+  let ids;
+  const mark = m.body;
+  if (!sendingNow.has(conv.id)) sendingNow.set(conv.id, new Set());
+  sendingNow.get(conv.id).add(mark);
   try {
     const token = open(channel.workspace_id, 'channels.access_token', channel.access_token_enc);
-    let ids;
     if (isComment) {
       const target = one(`SELECT external_id FROM chat_messages WHERE conversation_id = ? AND direction = 'in' AND external_id IS NOT NULL ORDER BY id DESC LIMIT 1`, conv.id)?.external_id || conv.comment_id;
       ids = [m.delivery === 'private' ? await privateReply(channel, token, target, m.body) : await replyToComment(channel, token, target, m.body)];
     } else {
       const att = JSON.parse(m.attachments_json || '[]').find((a) => a.type === 'image' && a.url);
-      ids = att ? [await sendImage(channel, token, conv.customer_id, att.url)] : await sendText(channel, token, conv.customer_id, m.body, { buttons: JSON.parse(m.buttons_json || '[]') });
+      ids = att ? [await sendImage(channel, token, conv.customer_id, att.url, { tag: win.tag })] : await sendText(channel, token, conv.customer_id, m.body, { buttons: JSON.parse(m.buttons_json || '[]'), tag: win.tag });
     }
-    run(`UPDATE chat_messages SET status='sent', external_id=COALESCE(?, external_id), sent_by=COALESCE(?, sent_by), error=NULL, created_at=datetime('now') WHERE id=?`, ids[0] || null, userId, m.id);
-    run(`UPDATE conversations SET last_outbound_at=datetime('now') WHERE id=?`, conv.id);
-    bumpUsage(conv.workspace_id, { messages_sent: ids.length });
-    run('UPDATE channels SET last_error=NULL WHERE id = ?', channel.id);
-    emit(conv.workspace_id, 'message', { conversation: conv.id, direction: 'out' });
-    return { sent: true, ids };
   } catch (e) {
-    run(`UPDATE chat_messages SET status='failed', error=? WHERE id=?`, e.message.slice(0, 500), m.id);
+    if (e.sentIds?.length) {
+      // Part of a long reply went out before the error: never resend it (the customer would get it twice).
+      recordSent(m, conv, channel, e.sentIds, userId, `Only part of this reply was delivered: ${e.message}`.slice(0, 500));
+      sendingNow.get(conv.id)?.delete(mark);
+      throw Object.assign(new Error(`Only part of the reply was sent: ${e.message}`), { status: 502 });
+    }
+    sendingNow.get(conv.id)?.delete(mark);
+    const kind = kindOf(e);
+    const attempts = (m.attempts || 0) + 1;
+    // Rate limits and outages are retried by the worker (1, 2, 4, 8, 16 min); everything else needs a person.
+    const wait = kind === 'rate_limit' ? 5 : kind === 'transient' ? 2 ** (attempts - 1) : 0;
+    const retryAt = wait && attempts < 6 ? new Date(Date.now() + wait * 60_000).toISOString().replace('T', ' ').slice(0, 19) : null;
+    run(`UPDATE chat_messages SET status='failed', error=?, error_kind=?, attempts=?, retry_at=? WHERE id=?`, e.message.slice(0, 500), kind, attempts, retryAt, m.id);
+    if (kind === 'rate_limit') run(`UPDATE channels SET paused_until = datetime('now', '+5 minutes'), health = 'rate_limited' WHERE id = ?`, channel.id);
+    if (kind === 'token' && channel.health !== 'token') {
+      run(`UPDATE channels SET health = 'token' WHERE id = ?`, channel.id);
+      const ws = one('SELECT * FROM workspaces WHERE id = ?', conv.workspace_id);
+      alert(ws, `🔌 ${channel.name || PLATFORMS[channel.platform].label} disconnected: Facebook no longer accepts its access. Reconnect it in Channels.\n${appUrl()}/app#channels`,
+        { title: '🔌 Reconnect your page', body: `${channel.name || PLATFORMS[channel.platform].label}: replies can't be sent`, url: '#channels', tag: `token-${channel.id}` }).catch(() => {});
+    }
     run('UPDATE channels SET last_error=? WHERE id = ?', e.message.slice(0, 500), channel.id);
     logActivity(conv.workspace_id, 'send_failed', { conversation: conv.id, error: e.message });
-    throw Object.assign(new Error(`Could not send: ${e.message}`), { status: 502 });
+    const hint = kind === 'token' ? ' — reconnect this page in Channels' : kind === 'window' ? ` — ${windowError(channel.platform)}` : retryAt ? ' — it will be retried automatically' : '';
+    throw Object.assign(new Error(`Could not send: ${e.message}${hint}`), { status: kind === 'window' ? 409 : 502 });
   }
+  // Sent. Recording it can't turn it into a "failed" message any more.
+  try { recordSent(m, conv, channel, ids, userId, null); } catch (e) { console.error('[deliver] record', e.message); }
+  setTimeout(() => sendingNow.get(conv.id)?.delete(mark), 30_000).unref?.(); // late echoes still recognised
+  emit(conv.workspace_id, 'message', { conversation: conv.id, direction: 'out' });
+  return { sent: true, ids };
+}
+
+function recordSent(m, conv, channel, ids, userId, note) {
+  const all_ = ids.filter(Boolean).map(String);
+  // An echo that raced us was stored as a staff message: it was ours — remove it (and undo the pause it caused).
+  for (const x of all_) {
+    const dup = one(`SELECT id FROM chat_messages WHERE conversation_id = ? AND external_id = ? AND source = 'human_app' AND id <> ?`, conv.id, x, m.id);
+    if (dup) {
+      run('DELETE FROM learn_examples WHERE workspace_id = ? AND conversation_id = ? AND created_at > datetime(\'now\', \'-10 minutes\') AND source = \'human_app\'', conv.workspace_id, conv.id);
+      run('DELETE FROM chat_messages WHERE id = ?', dup.id);
+      run(`UPDATE conversations SET ai_paused_until = NULL WHERE id = ? AND ai_paused_until > datetime('now', '+11 hours')`, conv.id);
+    }
+  }
+  run(`UPDATE chat_messages SET status='sent', external_id=COALESCE(?, external_id), part_ids=?, sent_by=COALESCE(?, sent_by), error=?, error_kind=NULL, retry_at=NULL, created_at=datetime('now') WHERE id=?`,
+    all_[0] || null, all_.length > 1 ? JSON.stringify(all_) : null, userId, note, m.id);
+  if (channel.health && channel.health !== 'ok') run(`UPDATE channels SET health = 'ok' WHERE id = ?`, channel.id);
+  run(`UPDATE conversations SET last_outbound_at=datetime('now') WHERE id=?`, conv.id);
+  bumpUsage(conv.workspace_id, { messages_sent: all_.length || 1 });
+  if (!note) run('UPDATE channels SET last_error=NULL WHERE id = ?', channel.id);
 }
 
 export function storeOutbound(conv, body, { source, status, guard = null, confidence = null, userId = null, delivery = null, buttons = null, attachments = null }) {
@@ -248,7 +309,7 @@ export async function respond(conversationId) {
   if (!isComment) {
     // Outside business hours: an away message (at most every 12 hours) when the AI won't answer by itself.
     const ah = afterHours(ws, conv);
-    if (ah.away && (ah.quiet || mode !== 'auto') && insideWindow(conv.last_inbound_at)) {
+    if (ah.away && (ah.quiet || mode !== 'auto') && replyWindow(channel.platform, conv).open) {
       await deliver(storeOutbound(conv, ah.away, { source: 'auto', status: 'draft' })).catch((e) => console.error('[away]', e.message));
     }
     if (ah.quiet) return { skipped: 'after hours' };
@@ -306,7 +367,7 @@ export async function respond(conversationId) {
   if (d.unsupported_claims) reasons.push('AI says the reply contains facts not in your catalog/knowledge');
   if (d.handoff) reasons.push(`AI asked for a human: ${d.handoff_reason || 'no reason given'}`);
   if (d.confidence < ws.auto_send_min_confidence) reasons.push(`confidence ${Math.round(d.confidence * 100)}% is below your ${Math.round(ws.auto_send_min_confidence * 100)}% threshold`);
-  if (!isComment && !insideWindow(conv.last_inbound_at)) reasons.push('outside the 24-hour reply window');
+  if (!isComment && !replyWindow(channel.platform, conv).open) reasons.push('outside the reply window');
   const autoSend = mode === 'auto' && plan.autoSend && reasons.length === 0;
 
   tx(() => {
@@ -391,6 +452,19 @@ function schedule(convId) {
   });
 }
 /** Wait until all queued conversations have been processed (tests, graceful shutdown). */
+/** Worker: send again the replies that failed because of a rate limit or a Meta outage. */
+export async function retryFailedSends() {
+  const due = all(`SELECT m.id, m.sent_by, m.conversation_id FROM chat_messages m WHERE m.status = 'failed' AND m.retry_at IS NOT NULL AND m.retry_at <= datetime('now') AND m.attempts < 6
+    ORDER BY m.id LIMIT 50`);
+  let sent = 0;
+  for (const m of due) {
+    // The customer wrote again since: the assistant answers that instead; don't send an outdated reply.
+    if (one(`SELECT 1 FROM chat_messages WHERE conversation_id = ? AND direction = 'in' AND id > ? LIMIT 1`, m.conversation_id, m.id)) { run('UPDATE chat_messages SET retry_at = NULL WHERE id = ?', m.id); continue; }
+    try { await deliver(m.id, m.sent_by); sent++; } catch { /* deliver recorded the next retry (or gave up) */ }
+  }
+  return sent;
+}
+
 export async function flushSales() {
   while (timers.size || chains.size) await new Promise((r) => setTimeout(r, 10)).then(() => Promise.all([...chains.values()]));
 }
@@ -398,9 +472,9 @@ export async function flushSales() {
 /** Store one normalised webhook event for a verified channel. */
 export function ingest(channel, ev) {
   if (!ev.customerId || ev.customerId === 'undefined') return null;
-  run(`INSERT INTO conversations (workspace_id, channel_id, customer_id, customer_name) VALUES (?,?,?,?)
-    ON CONFLICT(channel_id, customer_id) DO UPDATE SET customer_name = COALESCE(conversations.customer_name, excluded.customer_name)`,
-  channel.workspace_id, channel.id, ev.customerId, ev.customerName || null);
+  run(`INSERT INTO conversations (workspace_id, channel_id, customer_id, customer_name, wa_user_id) VALUES (?,?,?,?,?)
+    ON CONFLICT(channel_id, customer_id) DO UPDATE SET customer_name = COALESCE(conversations.customer_name, excluded.customer_name), wa_user_id = COALESCE(excluded.wa_user_id, conversations.wa_user_id)`,
+  channel.workspace_id, channel.id, ev.customerId, ev.customerName || null, ev.waUserId ? String(ev.waUserId).slice(0, 100) : null);
   const conv = one('SELECT * FROM conversations WHERE channel_id = ? AND customer_id = ?', channel.id, ev.customerId);
   run(`UPDATE channels SET last_event_at = datetime('now') WHERE id = ?`, channel.id);
   if (!conv.customer_name && !ev.echo && channel.platform !== 'whatsapp' && channel.access_token_enc) {
@@ -417,6 +491,7 @@ export function ingest(channel, ev) {
     const r = ev.referral;
     run('UPDATE conversations SET referral_json = ? WHERE id = ?', JSON.stringify({ source: r.source || r.source_type || null, ad_id: r.ad_id || r.source_id || null, ad_title: r.ads_context_data?.ad_title || r.headline || null, ref: r.ref || null, ctwa_clid: r.ctwa_clid || null, at: new Date().toISOString() }).slice(0, 2000), conv.id);
   }
+  if (ev.echo && (isOurs(conv.id, ev.text) || (ev.appId && (ev.appId === getSetting('meta_app_id') || ev.appId === channel.own_app_id)))) return null; // sent by ChatPilot
   if (ev.echo) {
     // Our own sends echo back with the id we already stored. Anything else was typed by staff in Meta's inbox:
     // record it and keep the AI quiet for 12 hours so it doesn't talk over a human.
@@ -433,7 +508,7 @@ export function ingest(channel, ev) {
   else if (/^\s*(start|subscribe)\s*$/i.test(ev.text || '')) run('UPDATE conversations SET opted_out = 0 WHERE id = ?', conv.id);
   // A newer customer message makes older unsent AI drafts obsolete.
   run(`UPDATE chat_messages SET status = 'rejected' WHERE conversation_id = ? AND status = 'draft' AND source = 'ai'`, conv.id);
-  run(`UPDATE conversations SET last_inbound_at = datetime('now'), unread = unread + 1, status = CASE WHEN status = 'closed' THEN 'open' ELSE status END,
+  run(`UPDATE conversations SET last_inbound_at = datetime('now'), unread = unread + 1, status = CASE WHEN status = 'closed' THEN 'open' ELSE status END, snoozed_until = NULL,
     stage = CASE WHEN stage = 'new' THEN 'browsing' ELSE stage END WHERE id = ?`, conv.id);
   emit(conv.workspace_id, 'message', { conversation: conv.id, direction: 'in', channel: conv.channel_id });
   return { conversationId: conv.id, done: schedule(conv.id) };
@@ -495,6 +570,33 @@ export function ingestComment(channel, ev) {
   return { conversationId: conv.id, done: schedule(conv.id) };
 }
 
+/** WhatsApp sent / delivered / read / failed, Messenger delivered: ticks in the inbox, failures surfaced, billing recorded. */
+function applyStatus(channel, ev) {
+  const m = one(`SELECT c.* FROM chat_messages c JOIN conversations v ON v.id = c.conversation_id WHERE v.channel_id = ? AND c.external_id = ?`, channel.id, ev.messageId);
+  if (!m) return;
+  const rank = { sent: 1, delivered: 2, read: 3, failed: 4 };
+  if (ev.billing) run('UPDATE chat_messages SET billing = ? WHERE id = ?', ev.billing, m.id);
+  if ((rank[ev.status] || 0) <= (rank[m.delivery_status] || 0)) return;
+  if (ev.status === 'failed') {
+    run(`UPDATE chat_messages SET delivery_status = 'failed', status = 'failed', error = ? WHERE id = ?`, String(ev.error || 'Not delivered').slice(0, 300), m.id);
+    if (m.broadcast_id) run('UPDATE broadcasts SET failed = failed + 1, sent = MAX(0, sent - 1) WHERE id = ?', m.broadcast_id);
+    logActivity(m.workspace_id, 'send_failed', { conversation: m.conversation_id, error: `WhatsApp did not deliver: ${ev.error || ''}` });
+  } else run('UPDATE chat_messages SET delivery_status = ? WHERE id = ?', ev.status, m.id);
+  emit(m.workspace_id, 'message', { conversation: m.conversation_id, direction: 'out' });
+}
+
+/** WhatsApp account notices: template approved / rejected / paused, number quality changes. */
+function accountEvent(channel, ev) {
+  const v = ev.value || {};
+  const what = ev.field === 'phone_number_quality_update' ? `WhatsApp number quality: ${v.event || ''} (limit ${v.current_limit || '?'})`
+    : `WhatsApp template "${v.message_template_name || ''}": ${v.event || v.new_quality_score || ''}${v.reason && v.reason !== 'NONE' ? ` — ${v.reason}` : ''}`;
+  logActivity(channel.workspace_id, 'whatsapp_account', { error: what });
+  if (/REJECTED|PAUSED|DISABLED|FLAGGED|DOWNGRADE|RED/i.test(JSON.stringify(v))) {
+    const ws = one('SELECT * FROM workspaces WHERE id = ?', channel.workspace_id);
+    alert(ws, `⚠ ${what}`, { title: '⚠ WhatsApp needs attention', body: what.slice(0, 120), url: '#channels', tag: `wa-${channel.id}` }).catch(() => {});
+  }
+}
+
 /** Handle a verified webhook delivery. */
 export function handleEvents(events, channelsById) {
   const results = [];
@@ -502,7 +604,18 @@ export function handleEvents(events, channelsById) {
     const channel = channelsById.get(`${ev.platform}:${ev.externalId}`);
     if (!channel) continue;
     if (ev.type === 'comment') { const r = ingestComment(channel, ev); if (r) results.push(r); continue; }
-    if (ev.echo && one('SELECT 1 FROM chat_messages c JOIN conversations v ON v.id = c.conversation_id WHERE v.channel_id = ? AND c.external_id = ?', channel.id, ev.messageId)) continue;
+    if (ev.type === 'status') { applyStatus(channel, ev); continue; }
+    if (ev.type === 'read') {
+      run(`UPDATE chat_messages SET delivery_status = 'read' WHERE direction = 'out' AND status = 'sent' AND created_at <= ? AND conversation_id = (SELECT id FROM conversations WHERE channel_id = ? AND customer_id = ?)`,
+        new Date(ev.watermark).toISOString().replace('T', ' ').slice(0, 19), channel.id, ev.customerId);
+      continue;
+    }
+    if (ev.type === 'account') { accountEvent(channel, ev); continue; }
+    if (ev.echo && one(`SELECT 1 FROM chat_messages c JOIN conversations v ON v.id = c.conversation_id WHERE v.channel_id = ? AND (c.external_id = ? OR c.part_ids LIKE ?)`, channel.id, ev.messageId, `%"${String(ev.messageId).replace(/[%_"]/g, '')}"%`)) {
+      // It's ours: remember which Meta app sends for this channel, so its echoes are recognised even mid-send.
+      if (ev.appId && channel.own_app_id !== ev.appId) { run('UPDATE channels SET own_app_id = ? WHERE id = ?', ev.appId, channel.id); channel.own_app_id = ev.appId; }
+      continue;
+    }
     const r = ingest(channel, ev);
     if (r) results.push(r);
   }
@@ -513,7 +626,7 @@ export function handleEvents(events, channelsById) {
 const NUDGE_SCHEMA = { type: 'object', additionalProperties: false, required: ['reply'], properties: { reply: { type: 'string' } } };
 export async function salesFollowUps(now = Date.now()) {
   const rows = all(`SELECT v.* FROM conversations v JOIN channels c ON c.id = v.channel_id
-    WHERE c.enabled = 1 AND c.mode != 'off' AND c.followup_hours > 0 AND v.status = 'open'
+    WHERE c.enabled = 1 AND c.mode != 'off' AND c.followup_hours > 0 AND v.status = 'open' AND v.kind = 'message' AND v.opted_out = 0
       AND v.stage IN ('interested', 'negotiating', 'ordering')
       AND v.last_outbound_at IS NOT NULL AND v.last_inbound_at IS NOT NULL AND v.last_outbound_at > v.last_inbound_at
       AND (v.followup_sent_at IS NULL OR v.followup_sent_at < v.last_inbound_at)
@@ -524,7 +637,7 @@ export async function salesFollowUps(now = Date.now()) {
     if (!insideWindow(conv.last_inbound_at, now + 30 * 60_000)) continue; // need ≥30 min left in the window
     const ws = one('SELECT * FROM workspaces WHERE id = ?', conv.workspace_id);
     const channel = one('SELECT * FROM channels WHERE id = ?', conv.channel_id);
-    if (!aiEnabled() || effectivePlan(ws).key === 'expired') continue;
+    if (aiBlocked(ws)) continue;
     run(`UPDATE conversations SET followup_sent_at = datetime('now') WHERE id = ?`, conv.id);
     try {
       const transcript = history(conv, 12).map((m) => `[${m.direction === 'in' ? 'customer' : 'you'}] ${redact(m.body).slice(0, 1000)}`).join('\n');
@@ -535,7 +648,7 @@ export async function salesFollowUps(now = Date.now()) {
       const problems = checkOutbound(reply, { knowledge: `${catalogText(ws.id)}\n${knowledgeText(ws.id)}`, neverSay: ws.never_say || '' });
       const id = storeOutbound(conv, reply, { source: 'ai', status: 'draft', guard: problems });
       bumpUsage(ws.id, { ai_replies: 1 });
-      if (channel.mode === 'auto' && !problems.length) await deliver(id).catch(() => {});
+      if (channel.mode === 'auto' && effectivePlan(ws).autoSend && !problems.length) await deliver(id).catch(() => {});
       n++;
     } catch (e) { console.error('[sales-followup]', e.message); }
   }

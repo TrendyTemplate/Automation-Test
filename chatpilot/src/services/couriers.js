@@ -158,6 +158,10 @@ export async function applyCourierStatus(order, raw) {
   const mapped = ADAPTERS[order.courier]?.map(String(raw || ''));
   run(`UPDATE orders SET courier_status = ?, courier_updated_at = datetime('now') WHERE id = ?`, String(raw || '').slice(0, 60), order.id);
   if (!mapped || mapped === order.status) return false;
+  // Only forward: a late "in transit" must not undo delivered / returned / cancelled (or take stock again).
+  const RANK = { new: 0, confirmed: 1, packed: 2, shipped: 3, delivered: 4, returned: 4, cancelled: 4 };
+  const cur = one('SELECT status FROM orders WHERE id = ?', order.id)?.status;
+  if ((RANK[mapped] ?? 0) <= (RANK[cur] ?? 0) && !(cur === 'delivered' && mapped === 'returned')) return false;
   const changed = setStatus(one('SELECT * FROM orders WHERE id = ?', order.id), mapped);
   if (changed) { const { notifyOrderStatus } = await import('./notifications.js'); await notifyOrderStatus(order.id).catch(() => {}); }
   return changed;

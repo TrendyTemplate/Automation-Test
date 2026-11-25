@@ -104,7 +104,7 @@ test('forged webhooks are rejected; Messenger question gets an automatic AI answ
   graph.sent.length = 0;
   assert.equal(await hook(messenger('100000002', 'psid-1', 'hoodie er dam koto?', 'mid.1')), 200);
   assert.equal(graph.sent.length, 1);
-  assert.match(graph.sent[0].url, /\/v21\.0\/100000002\/messages$/);
+  assert.match(graph.sent[0].url, /\/v24\.0\/100000002\/messages$/);
   assert.equal(graph.sent[0].auth, 'Bearer EAAPAGE');
   assert.deepEqual(graph.sent[0].body.recipient, { id: 'psid-1' });
   assert.equal(graph.sent[0].body.messaging_type, 'RESPONSE');
@@ -199,7 +199,13 @@ test('a human reply pauses the AI; the 24h window blocks late replies; prompt in
   const detail = (await c.call('GET', `/api/sales/conversations/${conv.id}`)).body;
   assert.equal(detail.ai_paused, true);
 
+  // After 24 h a person may still answer on Messenger for 7 days, with the HUMAN_AGENT tag; the AI may not.
   run(`UPDATE conversations SET last_inbound_at = datetime('now', '-25 hours') WHERE id = ?`, conv.id);
+  const before = graph.sent.length;
+  const tagged = await c.call('POST', `/api/sales/conversations/${conv.id}/reply`, { body: 'Sorry for the wait!' });
+  assert.equal(tagged.status, 200, tagged.text);
+  assert.deepEqual([graph.sent[before].body.messaging_type, graph.sent[before].body.tag], ['MESSAGE_TAG', 'HUMAN_AGENT']);
+  run(`UPDATE conversations SET last_inbound_at = datetime('now', '-8 days') WHERE id = ?`, conv.id);
   const late = await c.call('POST', `/api/sales/conversations/${conv.id}/reply`, { body: 'Still there?' });
   assert.equal(late.status, 409);
 

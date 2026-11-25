@@ -75,6 +75,6 @@ Assistant → **Business hours**: দিনভিত্তিক সময় (�
 - Webhook: `GET/POST /api/social/webhook` — প্রতিটি POST-এর `X-Hub-Signature-256` অ্যাপ সিক্রেট দিয়ে যাচাই হয়; ভুল সিগনেচার = 403। একই মেসেজ Meta আবার পাঠালে ডুপ্লিকেট হয় না।
 - টোকেন, অ্যাপ সিক্রেট ও সব চ্যাট মেসেজ workspace-ভিত্তিক AES-256-GCM এনক্রিপশনে সংরক্ষিত।
 - পরপর কয়েকটা ছোট মেসেজ এলে (৪ সেকেন্ড, `SALES_DEBOUNCE_MS`) একসাথে পড়ে একটাই উত্তর দেয়।
-- Graph API ভার্সন: `META_GRAPH_VERSION` (ডিফল্ট `v21.0`)।
+- Graph API ভার্সন: `META_GRAPH_VERSION` (ডিফল্ট `v24.0`)।
 - Web Push: VAPID key প্রথমবার নিজে তৈরি হয় (Admin → Settings-এ দেখা যায়), কোনো বাইরের লাইব্রেরি লাগে না।
 - API: `/api/sales/{overview,channels,products,conversations,orders,customers,analytics,broadcasts,simulate}` — API key (`cp_live_…`) দিয়ে `/api/v1/sales/...`-ও কাজ করে।

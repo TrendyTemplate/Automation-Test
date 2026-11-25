@@ -38,6 +38,7 @@ export const SETTINGS = [
 
   ['meta', 'meta_app_id', 'Meta app ID (enables one-click "Connect with Facebook" for customers)', 'text', 'META_APP_ID', false, ''],
   ['meta', 'meta_app_secret', 'Meta app secret', 'text', 'META_APP_SECRET', true, ''],
+  ['meta', 'meta_human_agent', 'Allow staff replies up to 7 days on Messenger/Instagram (HUMAN_AGENT tag; needs the Human Agent permission from App Review)', 'bool', 'META_HUMAN_AGENT', false, '1'],
   ['meta', 'meta_config_id_pages', 'Facebook Login for Business configuration ID — Pages & Instagram (optional; blank = classic scopes)', 'text', 'META_CONFIG_ID_PAGES', false, ''],
   ['meta', 'meta_config_id_whatsapp', 'Facebook Login for Business configuration ID — WhatsApp (Embedded Signup)', 'text', 'META_CONFIG_ID_WHATSAPP', false, ''],
   ['meta', 'meta_verify_token', 'Webhook verify token for your Meta app (paste the same value in Meta → Webhooks)', 'text', 'META_VERIFY_TOKEN', false, ''],

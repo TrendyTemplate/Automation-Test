@@ -75,6 +75,7 @@ export async function analytics(ctx, params) {
         <div class="grid g2"><div><label>Dataset / Pixel ID</label><input name="dataset_id" inputmode="numeric" value="${esc(capi?.dataset_id || '')}"></div><div><label>Access token</label><input name="token" type="password" autocomplete="off" placeholder="${capi?.enabled ? '•••• saved — leave blank to keep' : ''}"></div></div>
         <label>Test event code <span class="hint">(optional, from Events Manager → Test events)</span></label><input name="test_code" value="${esc(capi?.test_code || '')}">
         <div class="row mt"><button class="btn primary" type="submit">Save</button>${capi?.enabled ? '<span class="badge ok">On</span>' : ''}</div></form>` : ''}
+      ${a.waBilling?.length ? `<div class="card"><h3>WhatsApp messages Meta counted</h3><p class="hint">From Meta's delivery reports. "free" = inside a free window; the others appear on your Meta invoice.</p>${hbars(a.waBilling.map((x) => ({ label: x.category, value: x.n })))}</div>` : ''}
       <div class="card"><h3>Team</h3><div class="table-wrap"><table><thead><tr><th>Person</th><th>Typed</th><th>AI drafts approved</th><th>Chats assigned</th><th>Orders</th></tr></thead><tbody>
         ${a.team.map((u) => `<tr><td>${esc(u.name)}</td><td>${num(u.typed)}</td><td>${num(u.approved)}</td><td>${num(u.assigned)}</td><td>${num(u.orders)}</td></tr>`).join('')}</tbody></table></div></div>
     </div>

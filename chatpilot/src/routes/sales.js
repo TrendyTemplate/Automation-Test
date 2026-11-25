@@ -6,11 +6,12 @@ import { randomToken } from '../crypto.js';
 import { seal, open } from '../vault.js';
 import { appUrl, getSetting } from '../settings.js';
 import { metaConnectAvailable } from '../services/meta.js';
-import { PLATFORMS, parseWebhook, verifySignature, insideWindow, testChannel } from '../services/social.js';
-import { handleEvents, deliver, storeOutbound, decide, priceOrder, orderSummary, decryptChat, STAGES } from '../services/sales.js';
+import { PLATFORMS, parseWebhook, verifySignature, insideWindow, replyWindow, windowError, testChannel } from '../services/social.js';
+import { handleEvents, deliver, storeOutbound, decide, priceOrder, orderSummary, decryptChat, STAGES, aiBlocked } from '../services/sales.js';
 import { aiEnabled } from '../services/ai.js';
 import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings, validateDelivery } from '../services/orders.js';
-import { notifyOrderStatus } from '../services/notifications.js';
+import { notifyOrderStatus, orderTemplates, validateOrderTemplates } from '../services/notifications.js';
+import { graph } from '../services/meta.js';
 import { subscribe, emit } from '../services/events.js';
 import * as webpush from '../services/webpush.js';
 import { capiSettings, saveCapi } from '../services/capi.js';
@@ -45,7 +46,9 @@ webhookRouter.post('/', express.raw({ type: '*/*', limit: '2mb' }), (req, res) =
   let rejected = 0;
   for (const key of ids) {
     const [platform, externalId] = key.split(/:(.*)/s);
-    const ch = one('SELECT * FROM channels WHERE platform = ? AND external_id = ? AND enabled = 1', platform, externalId);
+    // WhatsApp account notices (templates, quality) come with the WhatsApp Business Account id instead of the number id.
+    const ch = one('SELECT * FROM channels WHERE platform = ? AND external_id = ? AND enabled = 1', platform, externalId)
+      || (platform === 'whatsapp' ? one(`SELECT * FROM channels WHERE platform = 'whatsapp' AND waba_id = ? AND enabled = 1 ORDER BY id LIMIT 1`, externalId) : null);
     if (!ch) continue;
     // Channels connected with "Connect with Facebook" are signed with the platform's app secret.
     const secret = ch.managed ? getSetting('meta_app_secret') : open(ch.workspace_id, 'channels.app_secret', ch.app_secret_enc);
@@ -55,8 +58,35 @@ webhookRouter.post('/', express.raw({ type: '*/*', limit: '2mb' }), (req, res) =
   // Wrong signature = forged request. Unknown accounts are acknowledged so Meta doesn't retry forever.
   if (rejected && !verified.size) return res.status(403).send('Invalid signature');
   res.sendStatus(200); // answer fast; Meta expects a 200 within a few seconds
-  try { handleEvents(events, verified); } catch (e) { console.error('[sales-webhook]', e.message); }
+  if (!verified.size) return;
+  // Keep the delivery (encrypted) before processing, so a crash or bug can be replayed instead of losing orders.
+  const first = [...verified.values()][0];
+  const evId = Number(run('INSERT INTO webhook_events (workspace_id, payload, channels) VALUES (?,?,?)', first.workspace_id,
+    seal(first.workspace_id, 'webhook_events.payload', raw.toString('utf8')), JSON.stringify([...verified.entries()].map(([k, c]) => [k, c.id]))).lastInsertRowid);
+  processWebhookEvent(evId, events, verified);
 });
+
+export function processWebhookEvent(evId, events, verified) {
+  try {
+    handleEvents(events, verified);
+    run(`UPDATE webhook_events SET processed_at = datetime('now'), error = NULL, attempts = attempts + 1 WHERE id = ?`, evId);
+  } catch (e) {
+    console.error('[sales-webhook]', e.message);
+    run('UPDATE webhook_events SET error = ?, attempts = attempts + 1 WHERE id = ?', String(e.message).slice(0, 500), evId);
+  }
+}
+/** Worker: re-run deliveries whose processing failed (duplicate messages are ignored, so this is safe). */
+export function replayWebhooks() {
+  let n = 0;
+  for (const ev of all(`SELECT * FROM webhook_events WHERE processed_at IS NULL AND attempts < 4 AND created_at < datetime('now', '-1 minute') ORDER BY id LIMIT 50`)) {
+    const map = new Map();
+    for (const [k, id] of JSON.parse(ev.channels)) { const c = one('SELECT * FROM channels WHERE id = ? AND enabled = 1', id); if (c) map.set(k, c); }
+    let payload; try { payload = JSON.parse(open(ev.workspace_id, 'webhook_events.payload', ev.payload)); } catch { run('UPDATE webhook_events SET attempts = 99 WHERE id = ?', ev.id); continue; }
+    processWebhookEvent(ev.id, parseWebhook(payload), map); n++;
+  }
+  run(`DELETE FROM webhook_events WHERE created_at < datetime('now', '-3 days')`);
+  return n;
+}
 
 // ---------------------------------------------------------------- dashboard API
 import insights from './insights.js';
@@ -74,7 +104,7 @@ const channelOut = (c) => ({
   history_status: c.history_status, history_stats: c.history_stats ? JSON.parse(c.history_stats) : null, followup_hours: c.followup_hours, greeting: c.greeting,
   last_event_at: c.last_event_at, last_error: c.last_error, created_at: c.created_at,
   verify_token: c.verify_token, webhook_url: `${appUrl()}/api/social/webhook`,
-  comment_rules: commentRules(c), profile: c.profile_json ? JSON.parse(c.profile_json) : null,
+  comment_rules: commentRules(c), profile: c.profile_json ? JSON.parse(c.profile_json) : null, health: c.health || null, health_checked_at: c.health_checked_at, paused_until: c.paused_until, waba_id: c.waba_id,
 });
 
 r.get('/overview', (req, res) => {
@@ -191,6 +221,8 @@ r.post('/learning/forget', manage, (req, res) => {
   res.json({ ok: true });
 });
 r.post('/learning/refresh', manage, async (req, res) => {
+  const blocked = aiBlocked(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)));
+  if (blocked) return res.status(402).json({ error: blocked });
   for (const c of all('SELECT id, history_status FROM channels WHERE workspace_id = ?', wsId(req))) if (['failed', null].includes(c.history_status)) queueImport(c.id);
   await maybeDistill(wsId(req), { force: true });
   res.json({ ok: true });
@@ -309,6 +341,14 @@ r.get('/conversations', (req, res) => {
   if (req.query.view === 'unassigned') where.push("v.assigned_to IS NULL AND v.status = 'needs_human'");
   if (['open', 'needs_human', 'closed'].includes(req.query.status)) { where.push('v.status = ?'); p.push(req.query.status); }
   if (req.query.view === 'drafts') where.push(`EXISTS (SELECT 1 FROM chat_messages m WHERE m.conversation_id = v.id AND m.status = 'draft')`);
+  // Waiting for an answer longer than the shop's target (no reply since their last message).
+  if (req.query.view === 'overdue') {
+    where.push(`v.status <> 'closed' AND v.last_inbound_at IS NOT NULL AND (v.last_outbound_at IS NULL OR v.last_outbound_at < v.last_inbound_at)
+      AND v.last_inbound_at < datetime('now', '-' || (SELECT sla_minutes FROM workspaces WHERE id = v.workspace_id) || ' minutes')`);
+  }
+  if (req.query.view === 'snoozed') where.push(`v.snoozed_until > datetime('now')`);
+  else if (!req.query.q) where.push(`(v.snoozed_until IS NULL OR v.snoozed_until <= datetime('now'))`);
+  if (req.query.view === 'closed') where.push(`v.status = 'closed'`);
   if (STAGES.includes(req.query.stage)) { where.push('v.stage = ?'); p.push(req.query.stage); }
   if (req.query.q) { where.push('(v.customer_name LIKE ? OR v.customer_phone LIKE ? OR v.intent LIKE ?)'); const q = `%${s(req.query.q, 100)}%`; p.push(q, q, q); }
   const rows = all(`SELECT v.*, c.platform, c.name AS channel_name,
@@ -318,7 +358,7 @@ r.get('/conversations', (req, res) => {
     FROM conversations v JOIN channels c ON c.id = v.channel_id WHERE ${where.join(' AND ')}
     ORDER BY COALESCE(v.last_inbound_at, v.created_at) DESC LIMIT ?`, ...p, Math.min(200, int(req.query.limit) || 100));
   res.json(rows.map((v) => ({ ...v, last_body: String(open(v.workspace_id, 'chat_messages.body', v.last_body) || '').slice(0, 140),
-    can_reply: insideWindow(v.last_inbound_at), labels: v.labels ? v.labels.split(',') : [] })));
+    can_reply: v.kind === 'comment' || replyWindow(v.platform, v, { human: true }).open, labels: v.labels ? v.labels.split(',') : [] })));
 });
 
 const getConv = (req) => one(`SELECT v.*, c.platform, c.name AS channel_name, c.mode AS channel_mode FROM conversations v JOIN channels c ON c.id = v.channel_id
@@ -333,7 +373,8 @@ r.get('/conversations/:id', (req, res) => {
   const orders = all('SELECT * FROM orders WHERE conversation_id = ? ORDER BY id DESC', v.id).map((o) => ({ ...o, items: JSON.parse(o.items_json) }));
   const notes = all(`SELECT n.id, n.body, n.created_at, u.name AS author, u.email AS author_email FROM conversation_notes n LEFT JOIN users u ON u.id = n.user_id WHERE n.conversation_id = ? ORDER BY n.id`, v.id)
     .map((n) => ({ ...n, body: open(v.workspace_id, 'notes.body', n.body) }));
-  res.json({ ...v, can_reply: insideWindow(v.last_inbound_at), messages, orders, notes, labels: v.labels ? v.labels.split(',') : [], referral: v.referral_json ? JSON.parse(v.referral_json) : null,
+  const rw = replyWindow(v.platform, v, { human: true });
+  res.json({ ...v, can_reply: v.kind === 'comment' || rw.open, reply_tag: rw.tag || null, ai_window: v.kind === 'comment' || replyWindow(v.platform, v).open, messages, orders, notes, labels: v.labels ? v.labels.split(',') : [], referral: v.referral_json ? JSON.parse(v.referral_json) : null,
     ai_paused: Boolean(v.ai_paused_until && new Date(`${v.ai_paused_until.replace(' ', 'T')}Z`) > new Date()) });
 });
 
@@ -342,7 +383,7 @@ r.post('/conversations/:id/reply', async (req, res) => {
   if (!v) return res.status(404).json({ error: 'Not found' });
   const body = s(req.body?.body, 4000);
   if (!body) return bad(res, 'Write a message first');
-  if (v.kind !== 'comment' && !insideWindow(v.last_inbound_at)) return res.status(409).json({ error: `${PLATFORMS[v.platform].label} only allows replies within 24 hours of the customer's last message.` });
+  if (v.kind !== 'comment' && !replyWindow(v.platform, v, { human: true }).open) return res.status(409).json({ error: windowError(v.platform) });
   // A person answering pauses the AI for this chat (default 12h) so it doesn't talk over them.
   run(`UPDATE chat_messages SET status = 'rejected' WHERE conversation_id = ? AND status = 'draft'`, v.id);
   const id = storeOutbound(v, body, { source: 'human', status: 'draft', userId: req.user.id });
@@ -381,6 +422,12 @@ r.put('/conversations/:id', (req, res) => {
   const b = req.body || {};
   if (b.status && ['open', 'needs_human', 'closed'].includes(b.status)) run('UPDATE conversations SET status = ?, handoff_reason = CASE WHEN ? = \'needs_human\' THEN handoff_reason ELSE NULL END WHERE id = ?', b.status, b.status, v.id);
   if (b.stage && STAGES.includes(b.stage)) run('UPDATE conversations SET stage = ? WHERE id = ?', b.stage, v.id);
+  if (b.snooze !== undefined) {
+    const hours = Number(b.snooze) || 0;
+    if (hours < 0 || hours > 24 * 30) return bad(res, 'Snooze for up to 30 days');
+    run(`UPDATE conversations SET snoozed_until = ${hours ? "datetime('now', '+' || ? || ' minutes')" : 'NULL'}, unread = 0 WHERE id = ?`, ...(hours ? [Math.round(hours * 60), v.id] : [v.id]));
+  }
+  if (b.status === 'closed') run('UPDATE conversations SET unread = 0 WHERE id = ?', v.id);
   if (b.ai_paused === true) run(`UPDATE conversations SET ai_paused_until = datetime('now', '+30 days') WHERE id = ?`, v.id);
   if (b.ai_paused === false) run('UPDATE conversations SET ai_paused_until = NULL WHERE id = ?', v.id);
   for (const k of ['customer_name', 'customer_phone', 'customer_address']) if (b[k] !== undefined) run(`UPDATE conversations SET ${k} = ? WHERE id = ?`, s(b[k], 500) || null, v.id);
@@ -431,9 +478,16 @@ r.put('/orders/:id', async (req, res) => {
   if (!o) return res.status(404).json({ error: 'Not found' });
   const b = req.body || {};
   try {
-    if (b.items !== undefined || b.delivery_zone !== undefined || b.discount !== undefined || b.customer_address !== undefined) {
-      editOrder(o, { items: b.items, address: b.customer_address !== undefined ? s(b.customer_address, 500) : undefined, zone: b.delivery_zone, discount: b.discount });
-    }
+    // Only re-calculate when the products, zone, discount or address really changed (a status change must not re-price).
+    const sameItems = b.items === undefined || JSON.stringify((b.items || []).map((l) => [Number(l.product_id), Number(l.qty), String(l.variant || '').toLowerCase()]))
+      === JSON.stringify(JSON.parse(o.items_json).map((l) => [Number(l.product_id), Number(l.qty), String(l.variant || '').toLowerCase()]));
+    const ch = {
+      items: sameItems ? undefined : b.items,
+      address: b.customer_address !== undefined && s(b.customer_address, 500) !== (o.customer_address || '') ? s(b.customer_address, 500) : undefined,
+      zone: b.delivery_zone !== undefined && (b.delivery_zone || null) !== (o.delivery_zone || null) ? b.delivery_zone : undefined,
+      discount: b.discount !== undefined && Number(b.discount) !== Number(o.discount || 0) ? b.discount : undefined,
+    };
+    if (Object.values(ch).some((v) => v !== undefined)) editOrder(o, ch);
     for (const k of ['customer_name', 'customer_phone', 'customer_address', 'note', 'payment_method']) if (b[k] !== undefined) run(`UPDATE orders SET ${k} = ? WHERE id = ?`, s(b[k], 500) || null, o.id);
     if (b.payment_status !== undefined) { if (!PAYMENT.includes(b.payment_status)) return bad(res, 'Invalid payment status'); run('UPDATE orders SET payment_status = ? WHERE id = ?', b.payment_status, o.id); }
     if (b.paid_amount !== undefined) run('UPDATE orders SET paid_amount = ? WHERE id = ?', Math.max(0, Number(b.paid_amount) || 0), o.id);
@@ -453,7 +507,11 @@ r.get('/orders.csv', (req, res) => {
       o.payment_status, o.paid_amount, o.courier, o.tracking_code].map(q).join(','))].join('\n'));
 });
 // ----- couriers (Steadfast, Pathao, RedX) + fraud check
-r.get('/couriers', (req, res) => res.json({ ...courierStatus(one('SELECT * FROM workspaces WHERE id = ?', wsId(req))), webhook_base: `${appUrl()}/api/couriers/hook/` }));
+r.get('/couriers', (req, res) => {
+  const st = courierStatus(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)));
+  if (!['owner', 'admin'].includes(req.role)) delete st.webhookToken; // the URL secret lets anyone move orders
+  res.json({ ...st, webhook_base: `${appUrl()}/api/couriers/hook/` });
+});
 r.put('/couriers/:name', manage, async (req, res) => {
   try { res.json(await connectCourier(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), req.params.name, req.body)); audit(req, 'courier.connect', req.params.name); }
   catch (e) { res.status(400).json({ error: `${COURIERS[req.params.name]?.label || 'Courier'} rejected the keys: ${e.message}` }); }
@@ -491,6 +549,7 @@ r.post('/push/test', async (req, res) => res.json({ delivered: await webpush.pus
 r.get('/broadcasts', manage, (req, res) => res.json(listBroadcasts(wsId(req))));
 r.post('/broadcasts/preview', manage, (req, res) => { try { res.json(broadcastPreview(wsId(req), req.body || {})); } catch (e) { res.status(e.status || 400).json({ error: e.message }); } });
 r.post('/broadcasts', manage, (req, res) => {
+  if (effectivePlan(one('SELECT * FROM workspaces WHERE id = ?', wsId(req))).key === 'expired') return res.status(402).json({ error: 'Subscription inactive — renew to send broadcasts.' });
   try {
     const b = createBroadcast(wsId(req), req.user.id, req.body || {});
     audit(req, 'broadcast.create', b.id, { total: b.total });
@@ -508,6 +567,33 @@ r.get('/channels/:id/templates', manage, async (req, res) => {
 r.get('/capi', manage, (req, res) => res.json(capiSettings(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)))));
 r.put('/capi', manage, (req, res) => {
   try { res.json(saveCapi(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), req.body || {})); audit(req, 'capi.update', wsId(req)); } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+
+// ----- WhatsApp: order-update templates (after 24 h) and creating templates without leaving ChatPilot
+r.get('/order-templates', manage, (req, res) => res.json(orderTemplates(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)))));
+r.put('/order-templates', manage, (req, res) => {
+  let t; try { t = validateOrderTemplates(req.body || {}); } catch (e) { return bad(res, e.message); }
+  run('UPDATE workspaces SET order_templates = ? WHERE id = ?', JSON.stringify(t), wsId(req));
+  res.json(t);
+});
+r.post('/channels/:id/templates', manage, async (req, res) => {
+  const ch = one('SELECT * FROM channels WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!ch) return res.status(404).json({ error: 'Not found' });
+  if (ch.platform !== 'whatsapp' || !ch.waba_id) return bad(res, 'Templates need a WhatsApp number connected with Facebook');
+  const b = req.body || {};
+  const name = s(b.name, 512).toLowerCase().replace(/[^a-z0-9_]/g, '_');
+  const body = s(b.body, 1024);
+  if (!name || !body) return bad(res, 'Name and text are required');
+  if (!['UTILITY', 'MARKETING'].includes(b.category)) return bad(res, 'Choose Utility (order updates) or Marketing (offers)');
+  const params = body.match(/\{\{\d+\}\}/g) || [];
+  const examples = (Array.isArray(b.examples) ? b.examples : String(b.examples || '').split(',')).map((x) => s(x, 100)).filter(Boolean);
+  if (params.length && examples.length < params.length) return bad(res, `Give an example for each of the ${params.length} {{n}} values`);
+  try {
+    const out = await graph(`${encodeURIComponent(ch.waba_id)}/message_templates`, { method: 'POST', token: open(ch.workspace_id, 'channels.access_token', ch.access_token_enc),
+      body: { name, category: b.category, language: s(b.language, 15) || 'en', components: [{ type: 'BODY', text: body, ...(params.length ? { example: { body_text: [examples.slice(0, params.length)] } } : {}) }] } });
+    audit(req, 'whatsapp.template.create', name);
+    res.json({ id: out.id, status: out.status || 'PENDING', name });
+  } catch (e) { res.status(502).json({ error: `Meta did not accept the template: ${e.message}` }); }
 });
 
 // ----- coupon codes
@@ -589,6 +675,8 @@ r.put('/delivery', manage, (req, res) => {
 // ----- test lab: chat with the assistant without sending anything
 r.post('/simulate', async (req, res) => {
   if (!aiEnabled()) return bad(res, 'AI is not configured yet (Admin → Settings → Anthropic API key).');
+  const blocked = aiBlocked(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)));
+  if (blocked) return res.status(402).json({ error: `${blocked} — upgrade or wait for next month to use the test chat.` });
   const platform = PLATFORMS[req.body?.platform] ? req.body.platform : 'messenger';
   const turns = (Array.isArray(req.body?.messages) ? req.body.messages : []).slice(-20)
     .map((m) => ({ direction: m.from === 'customer' ? 'in' : 'out', source: 'ai', body: s(m.text, 2000) })).filter((m) => m.body);

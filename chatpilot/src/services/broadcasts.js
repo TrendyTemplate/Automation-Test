@@ -4,7 +4,7 @@
 //  • Anyone who wrote "stop" is never messaged again; each send is stored in the chat so the assistant sees it.
 import { one, all, run, logActivity } from '../db.js';
 import { seal, open } from '../vault.js';
-import { insideWindow, sendText, sendTemplate } from './social.js';
+import { replyWindow, sendText, sendTemplate } from './social.js';
 import { graph } from './meta.js';
 import { emit } from './events.js';
 
@@ -23,7 +23,7 @@ export function audience(wsId, b) {
   const out = { channel: ch, send: [], template: [], outside: 0, opted_out: 0 };
   for (const v of rows) {
     if (v.opted_out) { out.opted_out++; continue; }
-    if (insideWindow(v.last_inbound_at)) out.send.push(v);
+    if (replyWindow(ch.platform, v).open) out.send.push(v); // 24 h, or 7 days for chats from ads
     else if (ch.platform === 'whatsapp' && b.template?.name) out.template.push(v);
     else out.outside++;
   }
@@ -59,7 +59,10 @@ export function createBroadcast(wsId, userId, b) {
     wsId, a.channel.id, String(b.segment || 'all').slice(0, 20), b.label ? String(b.label).slice(0, 40) : null, text ? seal(wsId, 'broadcasts.body', text) : null,
     template ? JSON.stringify(template) : null, total, a.outside + a.opted_out, userId).lastInsertRowid);
   logActivity(wsId, 'broadcast', { detail: `${total} recipients` });
-  const done = run_(id, a, text, template);
+  const done = run_(id, a, text, template).catch((e) => {
+    console.error('[broadcast]', e.message);
+    run(`UPDATE broadcasts SET status = 'failed', error = ?, finished_at = datetime('now') WHERE id = ?`, String(e.message).slice(0, 300), id);
+  });
   return { id, total, done };
 }
 
@@ -71,14 +74,16 @@ async function run_(id, a, text, template) {
   let sent = 0; let failed = 0;
   const jobs = [...a.send.map((v) => ['text', v]), ...a.template.map((v) => ['template', v])];
   for (const [kind, v] of jobs) {
-    if (one('SELECT status FROM broadcasts WHERE id = ?', id).status === 'cancelled') break;
+    const st = one('SELECT status FROM broadcasts WHERE id = ?', id)?.status;
+    if (!st || st === 'cancelled') break; // stopped, or the channel / shop was deleted meanwhile
+    if (!one('SELECT 1 FROM conversations WHERE id = ?', v.id)) continue;
     const body = kind === 'text' ? fill(text, v) : `[template ${template.name}]`;
     try {
       const ids = kind === 'text'
         ? await sendText(ch, token, v.customer_id, body)
         : [await sendTemplate(ch, token, v.customer_id, template.name, template.language, template.params.map((p) => fill(p, v) || '-'))];
-      run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status) VALUES (?,?, 'out', 'broadcast', ?, ?, 'sent')`,
-        ch.workspace_id, v.id, ids[0] || null, seal(ch.workspace_id, 'chat_messages.body', body));
+      run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status, broadcast_id, part_ids) VALUES (?,?, 'out', 'broadcast', ?, ?, 'sent', ?, ?)`,
+        ch.workspace_id, v.id, ids[0] || null, seal(ch.workspace_id, 'chat_messages.body', body), id, ids.length > 1 ? JSON.stringify(ids.filter(Boolean)) : null);
       run(`UPDATE conversations SET last_outbound_at = datetime('now') WHERE id = ?`, v.id);
       sent++;
     } catch (e) { failed++; if (failed >= 10 && !sent) { run('UPDATE broadcasts SET error = ? WHERE id = ?', e.message.slice(0, 300), id); break; } }
@@ -87,6 +92,11 @@ async function run_(id, a, text, template) {
   }
   run(`UPDATE broadcasts SET status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'done' END, sent = ?, failed = ?, finished_at = datetime('now') WHERE id = ?`, sent, failed, id);
   emit(ch.workspace_id, 'broadcast', { broadcast: id });
+}
+
+/** After a restart, broadcasts that were mid-way are marked interrupted (the sent ones are in the chats). */
+export function markInterrupted() {
+  return run(`UPDATE broadcasts SET status = 'interrupted', finished_at = datetime('now') WHERE status = 'sending'`).changes;
 }
 
 export function listBroadcasts(wsId) {

@@ -461,3 +461,28 @@ addColumn('orders', 'coupon', 'TEXT');
 addColumn('workspaces', 'capi_json', 'TEXT');   // Meta Conversions API: dataset id + encrypted token
 addColumn('orders', 'capi_sent_at', 'TEXT');
 addColumn('products', 'variant_stock', 'TEXT'); // JSON {"M": 5, "L / Black": 0}: stock per size/colour; total stock = sum
+addColumn('channels', 'paused_until', 'TEXT');        // Meta rate limit: wait before sending again
+addColumn('channels', 'health', 'TEXT');              // ok | token | rate_limited | unsubscribed
+addColumn('channels', 'health_checked_at', 'TEXT');
+addColumn('chat_messages', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('chat_messages', 'retry_at', 'TEXT');       // failed sends that may succeed later (rate limit / outage)
+addColumn('chat_messages', 'error_kind', 'TEXT');     // rate_limit | token | window | unavailable | permanent | transient
+addColumn('chat_messages', 'delivery_status', 'TEXT'); // WhatsApp / Messenger: delivered | read | failed
+addColumn('chat_messages', 'billing', 'TEXT');         // WhatsApp pricing category Meta billed (service, utility, marketing …) or 'free'
+addColumn('chat_messages', 'broadcast_id', 'INTEGER');
+addColumn('conversations', 'wa_user_id', 'TEXT');      // WhatsApp business-scoped user id (usernames)
+addColumn('workspaces', 'order_templates', 'TEXT');    // JSON: WhatsApp templates for order updates after 24 h
+db.exec(`CREATE TABLE IF NOT EXISTS webhook_events (  -- raw Meta deliveries (encrypted), kept a few days so failures can be replayed
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+  payload TEXT NOT NULL, channels TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  processed_at TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);
+addColumn('workspaces', 'ai_disclosure', 'INTEGER NOT NULL DEFAULT 0'); // say "I'm the shop's AI assistant" in the first reply
+// New shops keep chats for a year by default (Meta: keep data only as long as needed). 0 = keep forever, by choice.
+db.exec(`CREATE TRIGGER IF NOT EXISTS ws_default_retention AFTER INSERT ON workspaces WHEN NEW.retention_days = 0
+  BEGIN UPDATE workspaces SET retention_days = 365 WHERE id = NEW.id; END;`);
+addColumn('conversations', 'snoozed_until', 'TEXT');   // hidden from the inbox until then (or until the customer writes)
+addColumn('workspaces', 'sla_minutes', 'INTEGER NOT NULL DEFAULT 15'); // "Overdue": customer waiting longer than this
+addColumn('chat_messages', 'part_ids', 'TEXT');  // every platform id when a long reply went out in several parts
+addColumn('channels', 'own_app_id', 'TEXT');       // the Meta app that sends for this channel (its echoes are ours, not staff)

@@ -80,12 +80,15 @@ export function adjustStock(productId, variant, delta) {
   } else run('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL', delta, p.id);
 }
 
-export function priceOrder(wsId, items, { address = '', zone = '', discount = 0, coupon = '' } = {}) {
+export function priceOrder(wsId, items, { address = '', zone = '', discount = 0, coupon = '', keep = [] } = {}) {
   const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId);
   const problems = [];
   const lines = [];
   for (const it of (items || []).slice(0, 30)) {
-    const p = one('SELECT * FROM products WHERE id = ? AND workspace_id = ? AND active = 1', Number(it.product_id), wsId);
+    // Lines already on an order keep the price they were sold at, even if the product changed or was hidden since.
+    const kept = keep.find((k) => Number(k.product_id) === Number(it.product_id) && String(k.variant || '').toLowerCase() === String(it.variant || '').toLowerCase());
+    const p0 = one(`SELECT * FROM products WHERE id = ? AND workspace_id = ?${kept ? '' : ' AND active = 1'}`, Number(it.product_id), wsId);
+    const p = p0 && kept ? { ...p0, price: kept.price, name: kept.name, currency: kept.currency || p0.currency, stock: p0.stock == null ? null : p0.stock, variant_stock: kept.variant && p0.variant_stock ? p0.variant_stock : null } : p0;
     const qty = Math.round(Number(it.qty));
     if (!p) { problems.push(`unknown product id ${it.product_id}`); continue; }
     if (!(qty >= 1 && qty <= 1000)) { problems.push(`invalid quantity for ${p.name}`); continue; }
@@ -154,7 +157,7 @@ export function editOrder(order, { items, address, zone, discount }) {
   const oldItems = JSON.parse(order.items_json);
   return tx(() => {
     for (const l of oldItems) adjustStock(l.product_id, l.variant, l.qty); // release first
-    const priced = priceOrder(order.workspace_id, items ?? oldItems, { address: address ?? order.customer_address, zone: zone !== undefined ? zone : (address !== undefined ? '' : order.delivery_zone), /* a new address picks its zone again */ discount: discount ?? order.discount });
+    const priced = priceOrder(order.workspace_id, items ?? oldItems, { keep: oldItems, address: address ?? order.customer_address, zone: zone !== undefined ? zone : (address !== undefined ? '' : order.delivery_zone), /* a new address picks its zone again */ discount: discount ?? order.discount });
     if (priced.problems.length || !priced.lines.length) throw Object.assign(new Error(priced.problems.join('; ') || 'An order needs at least one product'), { status: 400 });
     for (const l of priced.lines) adjustStock(l.product_id, l.variant, -l.qty);
     run(`UPDATE orders SET items_json = ?, subtotal = ?, delivery_zone = ?, delivery_charge = ?, discount = ?, total = ?, currency = ?, updated_at = datetime('now') WHERE id = ?`,

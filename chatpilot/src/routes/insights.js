@@ -1,6 +1,7 @@
 // Customers (CRM built from chats + orders) and analytics (speed, automation, conversion, revenue by page / ad / product).
 import { Router } from 'express';
-import { one, all } from '../db.js';
+import { one, all, run, audit } from '../db.js';
+import { requireRole } from '../auth.js';
 import { normalizePhone } from '../services/couriers.js';
 
 const r = Router();
@@ -93,15 +94,43 @@ r.get('/analytics', (req, res) => {
       (SELECT COUNT(*) FROM conversations v WHERE v.workspace_id = w.workspace_id AND v.assigned_to = u.id) AS assigned,
       (SELECT COUNT(*) FROM orders o JOIN conversations v ON v.id = o.conversation_id WHERE o.workspace_id = w.workspace_id AND v.assigned_to = u.id AND o.created_at > datetime('now', ?)) AS orders
     FROM workspace_members w JOIN users u ON u.id = w.user_id WHERE w.workspace_id = ? ORDER BY typed + approved DESC`, since, since, since, id);
+  const waBilling = all(`SELECT m.billing AS category, COUNT(*) AS n FROM chat_messages m JOIN conversations v ON v.id = m.conversation_id JOIN channels c ON c.id = v.channel_id
+    WHERE m.workspace_id = ? AND c.platform = 'whatsapp' AND m.billing IS NOT NULL AND m.created_at > datetime('now', ?) GROUP BY m.billing ORDER BY n DESC`, id, since);
   const sentTotal = (msgs.sent || 0);
   res.json({
     days, messages: msgs, conversations: convs, converted, conversion: convs ? Math.round((converted / convs) * 1000) / 10 : 0,
     automation: sentTotal ? Math.round(((msgs.ai_auto || 0) / sentTotal) * 100) : 0, firstResponseSec: median,
     handoffs: n(`SELECT COUNT(*) AS n FROM activity WHERE workspace_id = ? AND type = 'chat_handoff' AND created_at > datetime('now', ?)`, id, since),
     orders, deliveryRate: (orders.delivered || 0) + (orders.lost || 0) ? Math.round(((orders.delivered || 0) / ((orders.delivered || 0) + (orders.lost || 0))) * 100) : null,
-    byPage, byAd, team, topProducts: Object.values(products).sort((a, b) => b.value - a.value).slice(0, 10), daily,
+    byPage, byAd, team, waBilling, topProducts: Object.values(products).sort((a, b) => b.value - a.value).slice(0, 10), daily,
     learned: n('SELECT COUNT(*) AS n FROM learn_examples WHERE workspace_id = ? AND weight > 0', id),
   });
+});
+
+/**
+ * Erase a customer (their request, or the shop's): chats, notes, what the assistant learned from them.
+ * Orders are kept for the shop's accounts but without name, phone or address.
+ */
+r.post('/customers/erase', requireRole('owner', 'admin'), (req, res) => {
+  const id = wsId(req);
+  const ph = normalizePhone(req.body?.phone);
+  const convIds = (Array.isArray(req.body?.conversations) ? req.body.conversations : []).map((x) => Number.parseInt(x, 10)).filter(Boolean);
+  const byPhone = ph.length >= 10 ? all('SELECT id, customer_phone FROM conversations WHERE workspace_id = ?', id).filter((v) => normalizePhone(v.customer_phone) === ph).map((v) => v.id) : [];
+  const ids = [...new Set([...convIds, ...byPhone])].filter((cid) => one('SELECT 1 FROM conversations WHERE id = ? AND workspace_id = ?', cid, id));
+  if (!ids.length && ph.length < 10) return res.status(400).json({ error: 'Give the customer\'s phone number or chats' });
+  for (const cid of ids) {
+    run('DELETE FROM learn_examples WHERE conversation_id = ? AND workspace_id = ?', cid, id);
+    run(`UPDATE orders SET customer_name = 'Erased customer', customer_phone = NULL, customer_address = NULL, note = NULL, conversation_id = NULL WHERE conversation_id = ? AND workspace_id = ?`, cid, id);
+    run('DELETE FROM conversations WHERE id = ? AND workspace_id = ?', cid, id);
+  }
+  let orders = 0;
+  if (ph.length >= 10) {
+    for (const o of all('SELECT id, customer_phone FROM orders WHERE workspace_id = ?', id).filter((o) => normalizePhone(o.customer_phone) === ph)) {
+      run(`UPDATE orders SET customer_name = 'Erased customer', customer_phone = NULL, customer_address = NULL, note = NULL WHERE id = ?`, o.id); orders++;
+    }
+  }
+  audit(req, 'customer.erase', null, { chats: ids.length, orders });
+  res.json({ chats: ids.length, orders });
 });
 
 export default r;

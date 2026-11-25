@@ -88,6 +88,11 @@ export async function brain(ctx) {
         <label>Never say <span class="hint">(words or phrases, comma separated)</span></label><input name="never_say" value="${esc(s.never_say)}" placeholder="guaranteed, 100% original, free delivery">
         <label>Links the AI may share <span class="hint">(domains)</span></label><input name="allowed_link_domains" value="${esc(s.allowed_link_domains)}" placeholder="yourshop.com"><div class="field-hint">Links written in your knowledge base or product photos are always allowed.</div>
       </div>
+      <div class="card"><h3>${icon('users')} Customers & team</h3>
+        <div class="setting-row"><div><div class="t">Tell customers about their order</div><div class="d">A message when an order is confirmed, shipped (with tracking), delivered or cancelled. On WhatsApp after 24 hours it uses your order-update templates (Broadcasts → WhatsApp templates).</div></div>${switchEl('notify_customers', s.notify_customers)}</div>
+        <div class="setting-row"><div><div class="t">Share chats that need a person among the team</div><div class="d">Each hand-off goes to the next teammate in turn.</div></div>${switchEl('auto_assign', s.auto_assign)}</div>
+        <div class="setting-row"><div><div class="t">Say it's an AI assistant</div><div class="d">The first reply in a new chat mentions that it's the shop's AI assistant and a person can join.</div></div>${switchEl('ai_disclosure', s.ai_disclosure)}</div>
+        <label>A customer waiting longer than this is "Overdue" (minutes)</label><input name="sla_minutes" type="number" min="1" max="1440" value="${s.sla_minutes || 15}" style="max-width:160px"></div>
       <div><button class="btn primary lg" type="submit">Save changes</button></div>
     </form>`;
   bind({ save: async (f) => { await api('/settings', { method: 'PUT', body: formData(f) }); toast('Saved'); } }, ctx.view);

@@ -44,7 +44,8 @@ export async function orders(ctx, params) {
 }
 
 async function itemRows(products, items = [{}]) {
-  return items.map((it) => `<div class="row nowrap item-row"><select name="product_id">${products.filter((p) => p.active).map((p) => `<option value="${p.id}" ${Number(it.product_id) === p.id ? 'selected' : ''}>${esc(p.name)} — ${money(p.price, p.currency)}${p.stock != null ? ` (${p.stock} left)` : ''}</option>`).join('')}</select>
+  // Products already on the order stay selectable even if they were hidden since (so saving doesn't swap them).
+  return items.map((it) => `<div class="row nowrap item-row"><select name="product_id">${products.filter((p) => p.active || Number(it.product_id) === p.id).map((p) => `<option value="${p.id}" ${Number(it.product_id) === p.id ? 'selected' : ''}>${esc(p.name)} — ${money(p.price, p.currency)}${p.stock != null ? ` (${p.stock} left)` : ''}</option>`).join('')}</select>
     <input name="qty" type="number" min="1" value="${it.qty || 1}" style="max-width:80px" aria-label="Quantity"><input name="variant" placeholder="Size / colour" value="${esc(it.variant || '')}" aria-label="Variant">
     <button type="button" class="btn sm ghost icon-only" data-x aria-label="Remove">${icon('x', 'sm')}</button></div>`).join('');
 }
@@ -83,7 +84,7 @@ async function orderDetail(ctx, id, couriers = { connected: [] }) {
         <div><label>Payment</label><select name="payment_status">${Object.entries(PAY).map(([k, [l]]) => `<option value="${k}" ${o.payment_status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         <div><label>Amount paid</label><input name="paid_amount" type="number" min="0" value="${o.paid_amount || 0}"></div></div>
       <div class="grid g3"><div><label>Name</label><input name="customer_name" value="${esc(o.customer_name || '')}"></div><div><label>Phone</label><input name="customer_phone" value="${esc(o.customer_phone || '')}"></div>
-        <div><label>Delivery zone</label><select name="delivery_zone">${delivery.zones.map((z) => `<option ${o.delivery_zone === z.name ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select></div></div>
+        <div><label>Delivery zone</label><select name="delivery_zone"><option value="" ${o.delivery_zone ? '' : 'selected'}>— none —</option>${delivery.zones.map((z) => `<option ${o.delivery_zone === z.name ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}${o.delivery_zone && !delivery.zones.some((z) => z.name === o.delivery_zone) ? `<option selected>${esc(o.delivery_zone)}</option>` : ''}</select></div></div>
       <label>Address</label><textarea name="customer_address" rows="2">${esc(o.customer_address || '')}</textarea>
       <label>Products</label><div id="items">${await itemRows(products, o.items)}</div><button type="button" class="btn sm" data-add>${icon('plus', 'sm')}Add product</button>
       <div class="grid g2 mt"><div><label>Discount</label><input name="discount" type="number" min="0" value="${o.discount || 0}"></div><div><label>Note</label><input name="note" value="${esc(o.note || '')}"></div></div>

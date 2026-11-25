@@ -209,6 +209,9 @@ ${prev ? `<previous_playbook>\n${JSON.stringify(prev.profile).slice(0, 6000)}\n<
 
 /** Distill every channel that has learned enough new examples. Called after new examples arrive and by the worker. */
 export async function maybeDistill(wsId, { force = false } = {}) {
+  const { aiBlocked } = await import('./sales.js');
+  const w = one('SELECT * FROM workspaces WHERE id = ?', wsId);
+  if (!w || aiBlocked(w)) return; // expired plan / monthly limit: no background AI work
   const chans = all('SELECT id FROM channels WHERE workspace_id = ?', wsId);
   for (const c of chans) {
     const p = one('SELECT last_example_id, created_at FROM learned_profiles WHERE workspace_id = ? AND channel_id = ? ORDER BY id DESC LIMIT 1', wsId, c.id);
@@ -291,7 +294,13 @@ export async function importHistory(channelId) {
   return stats;
 }
 const sqlTime = (t) => { const d = t ? new Date(t) : null; return d && !Number.isNaN(d.getTime()) ? d.toISOString().replace('T', ' ').slice(0, 19) : null; };
-export const queueImport = (channelId) => track(importHistory(channelId).catch((e) => { console.error('[learning] import failed:', e.message); run(`UPDATE channels SET history_status = 'failed' WHERE id = ?`, channelId); }));
+const importing = new Set();
+export const queueImport = (channelId) => {
+  if (importing.has(channelId)) return Promise.resolve(); // already running in this process
+  importing.add(channelId);
+  return track(importHistory(channelId).catch((e) => { console.error('[learning] import failed:', e.message); run(`UPDATE channels SET history_status = 'failed' WHERE id = ?`, channelId); })
+    .finally(() => importing.delete(channelId)));
+};
 
 /** What the customer said right before message `msgId` (the question an answer belongs to). */
 function questionBefore(convId, msgId) {

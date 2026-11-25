@@ -62,7 +62,7 @@ export async function chats(ctx, params) {
   const filters = Object.fromEntries(Object.entries({ channel: params.channel, kind: params.kind, label: params.label, platform: params.platform, status: params.status, view: params.view, q: params.q }).filter(([, v]) => v));
   const sel = params.id ? await api(`/sales/conversations/${Number(params.id)}`).catch(() => null) : null; // first, so it is marked read
   const [ov, list, pages, team] = await Promise.all([api('/sales/overview'), api(`/sales/conversations?${new URLSearchParams(filters)}`), api('/sales/pages'), api('/sales/team-members')]);
-  if (sel) sel.team = team;
+  if (sel) { sel.team = team; sel.myRole = ctx.me.role; }
   const many = pages.length > 1;
   const q = (over) => `#chats?${new URLSearchParams(Object.fromEntries(Object.entries({ ...filters, ...over }).filter(([, v]) => v)))}`;
   const f = (text, over, on) => `<a class="${on ? 'on' : ''}" href="${q({ ...over, id: '' })}">${text}</a>`;
@@ -79,6 +79,9 @@ export async function chats(ctx, params) {
             ${f(`Drafts <span class="n">${ov.drafts || ''}</span>`, { view: 'drafts', status: '', platform: '', kind: '' }, params.view === 'drafts')}
             ${team.length > 1 ? f('Mine', { view: 'mine', status: '', platform: '', kind: '' }, params.view === 'mine') : ''}
             ${f('Comments', { kind: 'comment', view: '', status: '', platform: '' }, params.kind === 'comment')}
+            ${f('Overdue', { view: 'overdue', status: '', platform: '', kind: '' }, params.view === 'overdue')}
+            ${f('Snoozed', { view: 'snoozed', status: '', platform: '', kind: '' }, params.view === 'snoozed')}
+            ${f('Closed', { view: 'closed', status: '', platform: '', kind: '' }, params.view === 'closed')}
             ${params.label ? f(`#${esc(params.label)} ✕`, { label: '' }, true) : ''}
             ${many ? '' : Object.entries(PL).map(([k, v]) => f(v.name, { platform: k, status: '', view: '', kind: '' }, params.platform === k)).join('')}</div>
         </div>
@@ -112,7 +115,7 @@ function chatPane(c, q) {
     const sep = day !== lastDay ? `<div class="day-sep">${esc(new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }))}</div>` : '';
     lastDay = day;
     if (m.direction === 'out' && ['draft', 'failed'].includes(m.status)) {
-      return `${sep}<div class="draft-card"><div class="dh">${icon(m.status === 'failed' ? 'alert' : 'sparkles', 'sm')}${m.status === 'failed' ? `Send failed${m.error ? ` — ${esc(m.error)}` : ''}` : m.delivery === 'private' ? 'AI draft — private reply to their inbox' : m.delivery === 'public' ? 'AI draft — public reply under the comment' : 'AI draft — check and send'}${m.confidence != null ? `<span class="spacer"></span><span class="hint">${Math.round(m.confidence * 100)}% sure</span>` : ''}</div>
+      return `${sep}<div class="draft-card"><div class="dh">${icon(m.status === 'failed' ? 'alert' : 'sparkles', 'sm')}${m.status === 'failed' ? `Send failed${m.error ? ` — ${esc(m.error)}` : ''}${m.retry_at ? ' · will retry automatically' : ''}` : m.delivery === 'private' ? 'AI draft — private reply to their inbox' : m.delivery === 'public' ? 'AI draft — public reply under the comment' : 'AI draft — check and send'}${m.confidence != null ? `<span class="spacer"></span><span class="hint">${Math.round(m.confidence * 100)}% sure</span>` : ''}</div>
         <textarea data-draft="${m.id}" rows="${Math.min(12, String(m.body).split('\n').length + 2)}" aria-label="Draft reply">${esc(m.body)}</textarea>
         ${m.guard?.length ? `<ul>${m.guard.map((g) => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
         <div class="row mt-s"><button class="btn sm primary" data-act="approve" data-id="${m.id}">${icon('send', 'sm')}Send</button><button class="btn sm ghost" data-act="reject" data-id="${m.id}">Discard</button></div></div>`;
@@ -120,18 +123,19 @@ function chatPane(c, q) {
     const out = m.direction === 'out';
     const src = `${{ ai: '<span class="ai">AI</span>', human: 'You', human_app: c.kind === 'comment' ? 'Page' : 'Staff (Meta inbox)' }[m.source] || ''}${m.delivery === 'private' ? ' · 📩 private reply' : m.delivery === 'public' ? ' · public reply' : ''}`;
     return `${sep}<div class="bubble-row ${out ? 'out' : 'in'}"><div class="bubble ${out ? `out ${m.source === 'ai' ? '' : 'staff'}` : 'in'}"><div class="bubble-t">${esc(m.body)}</div></div>
-      <div class="bubble-meta">${src}${src ? '·' : ''}<span>${esc(new Date(`${String(m.created_at).replace(' ', 'T')}Z`).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }))}</span></div></div>`;
+      <div class="bubble-meta">${src}${src ? '·' : ''}<span>${esc(new Date(`${String(m.created_at).replace(' ', 'T')}Z`).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }))}</span>${out ? `<span class="tick ${esc(m.delivery_status || '')}" title="${esc(m.delivery_status || 'sent')}">${m.delivery_status === 'read' ? '✓✓' : m.delivery_status === 'delivered' ? '✓✓' : m.delivery_status === 'failed' ? '⚠' : '✓'}</span>` : ''}</div></div>`;
   }).join('');
   return `
     <header class="chat-head"><a class="btn ghost icon-only chat-back" href="${q({ id: '' })}" aria-label="Back to chats">${icon('chevronLeft')}</a>${cav(c, 'sm')}
       <div class="who"><b>${esc(who(c))}</b><span>${plBadge(c.platform)} ${c.kind === 'comment' ? `Comment on a post${c.post_id && c.platform === 'messenger' ? ` · <a href="https://www.facebook.com/${encodeURIComponent(c.post_id)}" target="_blank" rel="noopener">open post</a>` : ''} · ` : ''}${esc(c.channel_name || '')} · ${esc(c.intent || c.summary || '')}</span></div>
       <button class="btn sm ${c.ai_paused ? 'primary' : ''}" data-act="pause" title="${c.ai_paused ? 'Let the AI answer again' : 'Stop the AI for this chat'}">${icon(c.ai_paused ? 'play' : 'userCheck', 'sm')}<span>${c.ai_paused ? 'Resume AI' : 'Take over'}</span></button>
+      <button class="btn sm ghost icon-only" data-act="snooze" title="${c.snoozed_until ? 'Unsnooze' : 'Snooze'}" aria-label="Snooze">${icon('clock', 'sm')}</button>
       <button class="btn sm ghost icon-only" data-act="close" title="${c.status === 'closed' ? 'Reopen' : 'Close chat'}" aria-label="${c.status === 'closed' ? 'Reopen' : 'Close chat'}">${icon(c.status === 'closed' ? 'undo' : 'archive', 'sm')}</button></header>
     ${c.status === 'needs_human' ? `<div class="callout warn chat-alert">${icon('alert')}<div><b>Needs you:</b> ${esc(c.handoff_reason || '')} <a href="#" data-act="resolve">Mark handled</a></div></div>` : ''}
     ${c.ai_paused ? `<div class="callout chat-alert">${icon('userCheck')}<div>You're handling this chat — the AI stays quiet until you resume it.</div></div>` : ''}
     <div class="bubbles" id="bubbles">${items || '<p class="hint">No messages.</p>'}</div>
-    ${c.can_reply || c.kind === 'comment' ? `<form class="composer" data-act="reply"><textarea name="body" rows="1" placeholder="${c.kind === 'comment' ? 'Reply publicly under the comment…' : 'Write a reply… (the AI pauses for 12 h)'}" aria-label="Reply"></textarea><button class="btn primary" type="submit" aria-label="Send">${icon('send')}</button></form>`
-    : `<div class="window-closed">${icon('clock')}<span>Meta's 24-hour reply window has closed — you can answer when the customer writes again.</span></div>`}`;
+    ${c.can_reply || c.kind === 'comment' ? `<form class="composer" data-act="reply"><textarea name="body" rows="1" placeholder="${c.kind === 'comment' ? 'Reply publicly under the comment…' : 'Write a reply… (the AI pauses for 12 h)'}" aria-label="Reply"></textarea><button class="btn primary" type="submit" aria-label="Send">${icon('send')}</button></form>${c.reply_tag === 'HUMAN_AGENT' ? `<div class="window-closed">${icon('clock')}<span>More than 24 hours since the customer wrote: only a person can answer now (up to 7 days) — the AI waits.</span></div>` : ''}`
+    : `<div class="window-closed">${icon('clock')}<span>${c.platform === 'whatsapp' ? 'WhatsApp\'s 24-hour window has closed — send a template from Broadcasts, or answer when the customer writes again.' : 'More than 7 days since the customer wrote — Meta allows a reply when they write again.'}</span></div>`}`;
 }
 
 function customerPane(c) {
@@ -150,6 +154,7 @@ function customerPane(c) {
       <textarea name="customer_address" placeholder="Address" rows="2" aria-label="Address" class="mt-s" style="min-height:70px">${esc(c.customer_address || '')}</textarea>
       <button class="btn sm mt-s" type="submit">Save</button></form>
     ${c.customer_phone ? '<div class="side-sec" id="fraud-side"></div>' : ''}
+    ${['owner', 'admin'].includes(c.myRole) ? `<div class="side-sec"><button class="btn sm ghost danger" data-act="erase">${icon('trash', 'sm')}Erase this customer's data</button></div>` : ''}
     <div class="side-sec"><div class="row nowrap"><h4 style="flex:1;margin:0">Orders</h4>${c.kind === 'comment' ? '' : '<button class="btn xs" data-act="neworder">+ Order</button>'}</div>${c.orders.map((o) => `<a class="order-mini" href="#orders?id=${o.id}" style="display:block;color:inherit;text-decoration:none"><div class="row nowrap"><b>#${o.id}</b><span class="spacer"></span><span class="badge">${esc(label(o.status))}</span></div>
       <div class="hint">${esc(o.items.map((l) => `${l.qty}× ${l.name}`).join(', '))}</div><b>${fmtMoney(o.total, o.currency)}</b></a>`).join('') || '<p class="hint">No orders yet.</p>'}</div>
   </aside>`;
@@ -168,6 +173,16 @@ function bindPane(ctx, c) {
     reply: async (form) => { await api(`/sales/conversations/${c.id}/reply`, { method: 'POST', body: formData(form) }); toast('Sent'); ctx.route(); },
     pause: async () => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { ai_paused: !c.ai_paused } }); ctx.route(); },
     close: async () => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { status: c.status === 'closed' ? 'open' : 'closed' } }); ctx.route(); },
+    snooze: async () => {
+      if (c.snoozed_until) { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { snooze: 0 } }); toast('Back in the inbox'); return ctx.route(); }
+      const h = await confirmBox('Snooze this chat', 'It leaves the inbox and comes back after this many hours — or as soon as the customer writes.', { ok: 'Snooze', input: 'Hours, e.g. 24' });
+      if (h) { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { snooze: Number(h) } }); toast('Snoozed'); location.hash = '#chats'; }
+    },
+    erase: async () => {
+      if (!(await confirmBox('Erase this customer?', 'Their chats, notes and what the assistant learned from them are deleted for good. Orders stay for your accounts, without name, phone or address.', { danger: true, ok: 'Erase' }))) return;
+      const r = await api('/sales/customers/erase', { method: 'POST', body: { conversations: [c.id], phone: c.customer_phone || '' } });
+      toast(`Erased ${r.chats} chat(s)`); location.hash = '#chats';
+    },
     resolve: async () => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { status: 'open' } }); ctx.route(); },
     saveCustomer: async (form) => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: formData(form) }); toast('Saved'); },
     assign: async (sel) => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { assigned_to: sel.value || null } }); toast('Assigned'); },
@@ -258,7 +273,9 @@ export async function channels(ctx, params = {}) {
     </div>
     <div class="grid g2">${list.map((c) => `<div class="card"><div class="row nowrap"><h3 style="margin:0;flex:1" class="truncate">${esc(c.name || PL[c.platform].name)}</h3>${plBadge(c.platform)}</div>
       <p class="hint mt-s">${c.managed ? `${icon('checkCircle', 'sm')} Connected with Facebook` : 'Connected manually'} · ID <code>${esc(c.external_id)}</code> · ${c.last_event_at ? `last message ${ago(c.last_event_at)}` : 'waiting for the first message…'}</p>
-      ${c.last_error ? `<div class="callout bad">${icon('alert')}<div>${esc(c.last_error)}${c.managed && meta.available ? ` <a href="/api/oauth/meta/connect?kind=${c.platform === 'whatsapp' ? 'whatsapp' : 'pages'}">Reconnect</a>` : ''}</div></div>` : ''}
+      ${c.health === 'token' ? `<div class="callout bad">${icon('alert')}<div><b>Disconnected:</b> Facebook no longer accepts ChatPilot's access to this ${c.platform === 'whatsapp' ? 'number' : 'page'} (password change, removed admin or expired permission). Replies can't be sent. ${meta.available ? `<a href="/api/oauth/meta/connect?kind=${c.platform === 'whatsapp' ? 'whatsapp' : 'pages'}"><b>Reconnect now</b></a>` : 'Paste a new token below.'}</div></div>`
+        : c.health === 'rate_limited' ? `<div class="callout warn">${icon('clock')}<div>Meta asked to slow down — replies are queued and sent automatically.</div></div>` : ''}
+      ${c.last_error && c.health !== 'token' ? `<div class="callout bad">${icon('alert')}<div>${esc(c.last_error)}${c.managed && meta.available ? ` <a href="/api/oauth/meta/connect?kind=${c.platform === 'whatsapp' ? 'whatsapp' : 'pages'}">Reconnect</a>` : ''}</div></div>` : ''}
       ${c.managed ? '' : `<details class="mb"><summary class="hint">Webhook details</summary><dl class="kv mt-s"><dt>Callback URL</dt><dd><code>${esc(c.webhook_url)}</code> <button class="btn sm ghost" data-act="copy" data-v="${esc(c.webhook_url)}">${icon('copy', 'sm')}</button></dd>
         <dt>Verify token</dt><dd><code>${esc(c.verify_token)}</code> <button class="btn sm ghost" data-act="copy" data-v="${esc(c.verify_token)}">${icon('copy', 'sm')}</button></dd></dl></details>`}
       <form data-act="save" data-id="${c.id}"><label>How should the assistant reply?</label>

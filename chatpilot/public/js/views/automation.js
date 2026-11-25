@@ -16,6 +16,8 @@ export function commentRules(ctx, c) {
       <label class="check"><input type="checkbox" name="hide_phones" ${r.hide_phones ? 'checked' : ''}> Comments with a phone number <span class="hint">(protects buyers; competitors can't call them)</span></label>
       <label class="check"><input type="checkbox" name="hide_links" ${r.hide_links ? 'checked' : ''}> Comments with links</label>
       <label>Comments with these words</label><input name="hide_words" value="${esc(r.hide_words.join(', '))}" placeholder="scam, fake, …">
+      <h3 class="mt">Live & post selling</h3>
+      <label class="check"><input type="checkbox" name="sku_replies" ${r.sku_replies ? 'checked' : ''}> Comments with a product code (SKU, e.g. "P12 L") get the price and how to order in their inbox instantly</label>
       <h3 class="mt">Keyword replies</h3><div id="trigs">${(r.triggers.length ? r.triggers : [{}]).map(trig).join('')}</div>
       <button type="button" class="btn sm mt-s" data-act="more">${icon('plus', 'sm')}Add keyword</button>
       <h3 class="mt">Which posts</h3>
@@ -30,7 +32,7 @@ export function commentRules(ctx, c) {
         const d = formData(f);
         const triggers = [];
         for (let i = 0; i < count; i++) if (split(d[`w${i}`]).length) triggers.push({ words: split(d[`w${i}`]), public: d[`p${i}`] || '', private: d[`m${i}`] || '' });
-        await api(`/sales/channels/${c.id}/rules`, { method: 'PUT', body: { hide_phones: Boolean(d.hide_phones), hide_links: Boolean(d.hide_links), hide_words: split(d.hide_words),
+        await api(`/sales/channels/${c.id}/rules`, { method: 'PUT', body: { sku_replies: Boolean(d.sku_replies), hide_phones: Boolean(d.hide_phones), hide_links: Boolean(d.hide_links), hide_words: split(d.hide_words),
           once_per_person: Boolean(d.once_per_person), only_posts: split(d.only_posts), skip_posts: split(d.skip_posts), triggers } });
         toast('Comment rules saved'); close(); ctx.route();
       },
@@ -88,7 +90,8 @@ export async function hours(ctx) {
 
 /** Broadcasts: one message to many customers, inside Meta's rules. */
 export async function broadcasts(ctx) {
-  const [list, chans] = await Promise.all([api('/sales/broadcasts'), api('/sales/channels')]);
+  const [list, chans, otpl] = await Promise.all([api('/sales/broadcasts'), api('/sales/channels'), api('/sales/order-templates').catch(() => ({}))]);
+  const waChans = chans.filter((c) => c.platform === 'whatsapp');
   const PL = { messenger: 'Messenger', instagram: 'Instagram', whatsapp: 'WhatsApp' };
   ctx.view.innerHTML = `
     <div class="page-h"><div><h1>Broadcasts</h1><p>Send news or an offer to many customers at once. Meta only allows this to people who wrote in the last 24 hours — on WhatsApp, everyone else needs an approved template (Meta charges per template message). Anyone who writes "stop" is never messaged again.</p></div></div>
@@ -105,7 +108,19 @@ export async function broadcasts(ctx) {
         <td class="truncate" style="max-width:320px">${esc(b.body || (b.template ? `Template: ${b.template.name}` : ''))}</td>
         <td>${b.sent}/${b.total}${b.failed ? ` <span class="badge bad">${b.failed} failed</span>` : ''}${b.skipped ? ` <span class="hint">· ${b.skipped} not allowed</span>` : ''}</td>
         <td>${b.status === 'sending' ? `<span class="badge warn">Sending</span> <button class="btn sm ghost" data-act="cancel" data-id="${b.id}">Stop</button>` : `<span class="badge ${b.status === 'done' ? 'ok' : ''}">${esc(b.status)}</span>`}</td></tr>`).join('')
-      || '<tr><td colspan="5" class="hint">No broadcasts yet.</td></tr>'}</tbody></table></div></div>`;
+      || '<tr><td colspan="5" class="hint">No broadcasts yet.</td></tr>'}</tbody></table></div></div>
+    ${waChans.length ? `<div class="grid g2 mt">
+      <form class="card" data-act="newtpl"><h3>${icon('plus')} New WhatsApp template</h3><p class="hint">Meta reviews it (usually minutes). <b>Utility</b> = order updates (cheaper, no offers allowed); <b>Marketing</b> = offers. Use {{1}}, {{2}} for values like the customer's name.</p>
+        <div class="grid g2"><div><label>Number</label><select name="channel">${waChans.map((c) => `<option value="${c.id}">${esc(c.name || '')}</option>`).join('')}</select></div>
+          <div><label>Category</label><select name="category"><option value="UTILITY">Utility (order updates)</option><option value="MARKETING">Marketing (offers)</option></select></div>
+          <div><label>Name</label><input name="name" placeholder="order_shipped" required></div><div><label>Language</label><select name="language"><option value="bn">Bangla</option><option value="en">English</option></select></div></div>
+        <label>Text</label><textarea name="body" rows="3" required placeholder="Hi {{1}}, your order #{{2}} has been shipped. Tracking: {{3}}"></textarea>
+        <label>Examples for {{1}}, {{2}}… <span class="hint">(comma separated)</span></label><input name="examples" placeholder="Rahim, 1024, SF12345">
+        <button class="btn primary mt" type="submit">Submit to Meta</button></form>
+      <form class="card" data-act="otpl"><h3>${icon('send')} Order updates after 24 hours</h3><p class="hint">Couriers take days — after 24 hours WhatsApp only allows approved templates. Name the template for each update; values: {{name}}, {{order}}, {{total}}, {{tracking}}, {{courier}}.</p>
+        ${['confirmed', 'shipped', 'delivered', 'cancelled'].map((st) => `<div class="grid g3"><div><label>${st[0].toUpperCase() + st.slice(1)}</label><input name="${st}_name" placeholder="order_${st}" value="${esc(otpl[st]?.name || '')}"></div>
+          <div><label>Language</label><input name="${st}_lang" value="${esc(otpl[st]?.language || 'bn')}"></div><div><label>Values in order</label><input name="${st}_params" placeholder="{{name}}, {{order}}${st === 'shipped' ? ', {{tracking}}' : ''}" value="${esc((otpl[st]?.params || []).join(', '))}"></div></div>`).join('')}
+        <button class="btn primary mt" type="submit">Save</button></form></div>` : ''}`;
   const form = ctx.view.querySelector('form');
   let templates = [];
   const body = () => {
@@ -129,6 +144,12 @@ export async function broadcasts(ctx) {
   bind({
     preview: async () => { const p = await api('/sales/broadcasts/preview', { method: 'POST', body: body() }); $('#pv', ctx.view).textContent = `${p.total} will get it${p.template ? ` (${p.template} by template)` : ''} · ${p.outside_window} outside 24 hours · ${p.opted_out} said stop`; },
     send: async () => { const r = await api('/sales/broadcasts', { method: 'POST', body: body() }); toast(`Sending to ${r.total} customers`); ctx.route(); },
+    newtpl: async (f) => { const d = formData(f); const r = await api(`/sales/channels/${d.channel}/templates`, { method: 'POST', body: d }); toast(`Submitted "${r.name}" — status: ${r.status}`); f.reset(); },
+    otpl: async (f) => {
+      const d = formData(f);
+      const body = Object.fromEntries(['confirmed', 'shipped', 'delivered', 'cancelled'].map((st) => [st, d[`${st}_name`] ? { name: d[`${st}_name`], language: d[`${st}_lang`] || 'bn', params: d[`${st}_params`] } : null]));
+      await api('/sales/order-templates', { method: 'PUT', body }); toast('Saved');
+    },
     cancel: async (b) => { await api(`/sales/broadcasts/${b.dataset.id}/cancel`, { method: 'POST' }); ctx.route(); },
   }, ctx.view);
 }

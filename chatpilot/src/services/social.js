@@ -1,6 +1,8 @@
 // Meta platform adapters: Facebook Messenger, Instagram Direct and the WhatsApp Business Cloud API all deliver
 // webhooks signed with the app secret (X-Hub-Signature-256) and send through the Graph API with a bearer token.
 import crypto from 'node:crypto';
+import { GraphError } from './graph-errors.js';
+import { getBool } from '../settings.js';
 
 export const PLATFORMS = {
   messenger: { label: 'Facebook Messenger', maxLen: 2000, webhookObject: 'page' },
@@ -14,9 +16,30 @@ export const WINDOW_MS = 24 * 3600_000;
 // SQLite datetime('now') values are UTC without a zone marker; never let them be parsed as local time.
 export const toMs = (d) => new Date(/^\d{4}-\d\d-\d\d \d\d:\d\d(:\d\d)?$/.test(String(d)) ? `${String(d).replace(' ', 'T')}Z` : d).getTime();
 export const insideWindow = (lastInboundAt, now = Date.now()) => Boolean(lastInboundAt) && now - toMs(lastInboundAt) < WINDOW_MS;
+const WEEK = 7 * 86400_000;
+/**
+ * Can we message this customer now, and how?
+ *  • 24 hours after their last message: anything.
+ *  • Messenger / Instagram chats that started from a click-to-message ad: 7 days of standard messaging.
+ *  • Messenger / Instagram, a person (not the AI) typing: up to 7 days with the HUMAN_AGENT tag.
+ *  • WhatsApp after 24 hours: only approved templates.
+ */
+export function replyWindow(platform, conv, { human = false, now = Date.now() } = {}) {
+  if (!conv?.last_inbound_at) return { open: false };
+  const age = now - toMs(conv.last_inbound_at);
+  if (age < WINDOW_MS) return { open: true, tag: null };
+  if (platform === 'whatsapp' || age >= WEEK) return { open: false };
+  let ref = null; try { ref = JSON.parse(conv.referral_json || 'null'); } catch { /* ignore */ }
+  if (ref && (String(ref.source || '').toUpperCase() === 'ADS' || ref.ad_id)) return { open: true, tag: null, adLead: true };
+  if (human && getBool('meta_human_agent')) return { open: true, tag: 'HUMAN_AGENT' };
+  return { open: false };
+}
+export const windowError = (platform) => (platform === 'whatsapp'
+  ? 'WhatsApp only allows free replies within 24 hours of the customer\'s last message — use a template.'
+  : `${PLATFORMS[platform].label} only allows replies within 24 hours of the customer's last message (7 days for a person replying, or for chats from ads).`);
 
 const graphBase = () => (process.env.META_GRAPH_URL || 'https://graph.facebook.com').replace(/\/$/, '');
-const graphVersion = () => process.env.META_GRAPH_VERSION || 'v21.0';
+const graphVersion = () => process.env.META_GRAPH_VERSION || 'v24.0';
 
 /** Constant-time check of Meta's X-Hub-Signature-256 header against the raw request body. */
 export function verifySignature(rawBody, header, appSecret) {
@@ -49,6 +72,9 @@ export function parseWebhook(payload) {
         }
       }
       for (const m of Array.isArray(entry.messaging) ? entry.messaging : []) {
+        // Delivery / read receipts (ticks in the inbox).
+        if (m.delivery?.mids?.length) { for (const mid of m.delivery.mids) events.push({ platform, type: 'status', externalId: String(entry.id), messageId: String(mid), status: 'delivered' }); continue; }
+        if (m.read?.watermark) { events.push({ platform, type: 'read', externalId: String(entry.id), customerId: String(m.sender?.id), watermark: Number(m.read.watermark) }); continue; }
         if (m.postback && !m.message) {
           // Tapped "Get Started", an ice breaker or a menu item: treat the button title as what the customer said.
           events.push({ platform, externalId: String(entry.id), customerId: String(m.sender?.id), text: String(m.postback.title || ''),
@@ -73,14 +99,23 @@ export function parseWebhook(payload) {
     } else if (object === 'whatsapp_business_account') {
       for (const ch of Array.isArray(entry.changes) ? entry.changes : []) {
         const v = ch.value || {};
+        if (ch.field === 'message_template_status_update' || ch.field === 'message_template_quality_update' || ch.field === 'phone_number_quality_update') {
+          events.push({ platform: 'whatsapp', type: 'account', externalId: String(entry.id), field: ch.field, value: v });
+          continue;
+        }
         if (ch.field !== 'messages' || !v.metadata?.phone_number_id) continue;
+        for (const st of v.statuses || []) {
+          events.push({ platform: 'whatsapp', type: 'status', externalId: String(v.metadata.phone_number_id), messageId: String(st.id), status: st.status,
+            error: st.errors?.[0] ? `${st.errors[0].title || st.errors[0].message || 'failed'} (code ${st.errors[0].code})` : null, errorCode: st.errors?.[0]?.code || null,
+            billing: st.pricing ? (st.pricing.billable === false || /free/.test(String(st.pricing.type || '')) ? 'free' : String(st.pricing.category || 'billed')) : null });
+        }
         const names = Object.fromEntries((v.contacts || []).map((c) => [c.wa_id, c.profile?.name]));
         for (const msg of v.messages || []) {
           const text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title
             || msg.image?.caption || '';
           events.push({
             platform: 'whatsapp', externalId: String(v.metadata.phone_number_id),
-            customerId: String(msg.from), customerName: names[msg.from] || null,
+            customerId: String(msg.from), customerName: names[msg.from] || null, waUserId: (v.contacts || []).find((c) => c.wa_id === msg.from)?.user_id || msg.from_user_id || null,
             messageId: msg.id ? String(msg.id) : null, text: String(text),
             attachments: ['image', 'audio', 'video', 'document', 'sticker', 'location'].filter((t) => msg.type === t).map((t) => ({ type: t === 'audio' && msg.audio?.voice ? 'audio' : t, mediaId: msg[t]?.id ? String(msg[t].id) : null })),
             referral: msg.referral || null,
@@ -116,10 +151,7 @@ async function graphPost(path, token, body) {
     signal: AbortSignal.timeout(15_000),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || json.error) {
-    const e = json.error || {};
-    throw new Error(`${e.message || `Graph API HTTP ${res.status}`}${e.code ? ` (code ${e.code})` : ''}`);
-  }
+  if (!res.ok || json.error) throw new GraphError(json.error || {}, res.status);
   return json;
 }
 
@@ -127,9 +159,11 @@ async function graphPost(path, token, body) {
  * Send a text message to a customer, optionally with tap-to-answer buttons (Messenger/Instagram quick replies,
  * WhatsApp reply buttons) on the last part. Returns the platform message ids.
  */
-export async function sendText(channel, token, customerId, text, { buttons = [] } = {}) {
+export async function sendText(channel, token, customerId, text, { buttons = [], tag = null } = {}) {
   const ids = [];
   const parts = splitText(text, PLATFORMS[channel.platform].maxLen);
+  try { return await sendParts(); } catch (e) { e.sentIds = ids.filter(Boolean); throw e; } // tell the caller which parts already went out
+  async function sendParts() {
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     const btns = i === parts.length - 1 ? buttons.slice(0, channel.platform === 'whatsapp' ? 3 : 13) : [];
@@ -142,11 +176,12 @@ export async function sendText(channel, token, customerId, text, { buttons = [] 
       ids.push(out.messages?.[0]?.id || null);
     } else {
       const message = { text: part, ...(btns.length ? { quick_replies: btns.map((b) => ({ content_type: 'text', title: b.slice(0, 20), payload: b.slice(0, 100) })) } : {}) };
-      out = await graphPost(`${encodeURIComponent(channel.send_id || channel.external_id)}/messages`, token, { recipient: { id: customerId }, messaging_type: 'RESPONSE', message });
+      out = await graphPost(`${encodeURIComponent(channel.send_id || channel.external_id)}/messages`, token, { recipient: { id: customerId }, ...(tag ? { messaging_type: 'MESSAGE_TAG', tag } : { messaging_type: 'RESPONSE' }), message });
       ids.push(out.message_id || null);
     }
   }
   return ids;
+  }
 }
 
 /** WhatsApp: send an approved message template (the only way to message someone outside the 24-hour window). */
@@ -158,13 +193,13 @@ export async function sendTemplate(channel, token, to, name, language, params = 
 }
 
 /** Send a photo (e.g. a product picture) by public https URL. */
-export async function sendImage(channel, token, customerId, url) {
+export async function sendImage(channel, token, customerId, url, { tag = null } = {}) {
   if (channel.platform === 'whatsapp') {
     const out = await graphPost(`${encodeURIComponent(channel.external_id)}/messages`, token, { messaging_product: 'whatsapp', recipient_type: 'individual', to: customerId, type: 'image', image: { link: url } });
     return out.messages?.[0]?.id || null;
   }
   const out = await graphPost(`${encodeURIComponent(channel.send_id || channel.external_id)}/messages`, token,
-    { recipient: { id: customerId }, messaging_type: 'RESPONSE', message: { attachment: { type: 'image', payload: { url, is_reusable: true } } } });
+    { recipient: { id: customerId }, ...(tag ? { messaging_type: 'MESSAGE_TAG', tag } : { messaging_type: 'RESPONSE' }), message: { attachment: { type: 'image', payload: { url, is_reusable: true } } } });
   return out.message_id || null;
 }
 

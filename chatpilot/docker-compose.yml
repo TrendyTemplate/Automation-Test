@@ -6,4 +6,6 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./data:/app/data
+      - chatpilot-data:/app/data   # named volume: writable by the app user (a ./data bind mount is created root-owned)
+volumes:
+  chatpilot-data:

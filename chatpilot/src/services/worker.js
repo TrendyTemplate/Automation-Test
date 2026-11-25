@@ -4,6 +4,8 @@ import { salesFollowUps } from './sales.js';
 import { checkLifecycle } from './lifecycle.js';
 import { maybeDistill, queueImport } from './learning.js';
 import { syncParcels } from './couriers.js';
+import { retryFailedSends } from './sales.js';
+import { checkConnections, backupNow } from './health.js';
 
 export const workerState = { startedAt: null, lastTickAt: null, lastTickMs: 0, ticks: 0, lastError: null };
 const TICK_SEC = Number(process.env.WORKER_INTERVAL_SEC || 300);
@@ -23,6 +25,10 @@ async function tick() {
   await salesFollowUps().catch((e) => console.error('[sales-followups]', e.message));
   await checkLifecycle().catch((e) => console.error('[lifecycle]', e.message));
   await syncParcels().catch((e) => console.error('[couriers]', e.message));
+  await retryFailedSends().catch((e) => console.error('[retry]', e.message));
+  try { (await import('../routes/sales.js')).replayWebhooks(); } catch (e) { console.error('[webhook-replay]', e.message); }
+  await checkConnections().catch((e) => console.error('[health]', e.message));
+  try { const f = backupNow(); if (f) console.log(`[backup] ${f}`); } catch (e) { console.error('[backup]', e.message); }
   // Continuous learning: re-distill pages with new examples; retry history imports that never finished.
   for (const c of all(`SELECT id FROM channels WHERE history_status IN ('pending', 'running') AND created_at < datetime('now', '-30 minutes')`)) queueImport(c.id);
   for (const w of all('SELECT DISTINCT workspace_id FROM learn_examples')) await maybeDistill(w.workspace_id).catch((e) => console.error('[learning]', e.message));

@@ -115,6 +115,13 @@ export function createApp() {
   }, appRoutes);
 
   app.get('/health', (req, res) => res.json({ ok: true }));
+  // Readiness for load balancers / uptime monitors: database, background worker, backups, stuck queues.
+  app.get('/health/ready', async (req, res) => {
+    const { readiness } = await import('./services/health.js');
+    const { workerState } = await import('./services/worker.js');
+    const r = readiness(workerState);
+    res.status(r.ok ? 200 : 503).json(r);
+  });
 
   // HTML pages are rendered with the brand and company details from Admin → Settings, so renaming the product
   // or filling in the legal entity updates every page (titles, landing, legal pages) without touching code.
@@ -159,5 +166,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (!aiEnabled()) console.warn('Anthropic API key not set: AI disabled (keyword fallback only). Set it in Admin → Settings.');
     if (!stripe()) console.warn('Stripe key not set: online payments disabled.');
   });
+  // Broadcasts that were sending when the app stopped are marked "interrupted" (sent ones are already in the chats).
+  import('./services/broadcasts.js').then((b) => { const n = b.markInterrupted(); if (n) console.log(`[broadcasts] ${n} interrupted by the restart`); }).catch(() => {});
   if (process.env.DISABLE_WORKER !== 'true') startWorker();
 }
