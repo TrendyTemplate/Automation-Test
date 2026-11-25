@@ -12,6 +12,7 @@ import { aiEnabled } from '../services/ai.js';
 import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings, validateDelivery } from '../services/orders.js';
 import { notifyOrderStatus } from '../services/notifications.js';
 import { subscribe, emit } from '../services/events.js';
+import * as webpush from '../services/webpush.js';
 import { commentRules, validateRules, validateProfile, applyProfile, saveProfile, businessHours, validateHours, isOpen } from '../services/automation.js';
 import { courierStatus, connectCourier, disconnectCourier, bookParcel, refreshStatus, fraudCheck, COURIERS } from '../services/couriers.js';
 import { learnFromReply, learnFromDraft, latestProfile, forgetFact, maybeDistill, queueImport } from '../services/learning.js';
@@ -466,6 +467,15 @@ r.post('/orders/:id/courier/status', async (req, res) => {
 r.get('/fraud-check', async (req, res) => {
   try { res.json(await fraudCheck(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), s(req.query.phone, 30))); } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
 });
+
+// ----- Web Push (phone / desktop notifications for this person)
+r.get('/push', (req, res) => res.json({ key: webpush.pushPublicKey(), devices: webpush.pushCount(req.user.id) }));
+r.post('/push', (req, res) => {
+  try { webpush.subscribe(req.user.id, wsId(req), req.body?.subscription, req.get('user-agent')); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+  res.json({ ok: true, devices: webpush.pushCount(req.user.id) });
+});
+r.delete('/push', (req, res) => { webpush.unsubscribe(req.user.id, req.body?.endpoint); res.json({ ok: true }); });
+r.post('/push/test', async (req, res) => res.json({ delivered: await webpush.pushToWorkspace(wsId(req), { title: 'ChatPilot AI', body: 'Notifications are on ✅', url: '#dashboard', tag: 'test' }, { userId: req.user.id }) }));
 
 // ----- rules that run without the AI
 r.put('/channels/:id/rules', manage, (req, res) => {

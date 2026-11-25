@@ -427,3 +427,10 @@ addColumn('channels', 'comment_rules', 'TEXT');   // JSON: hide phones/links/wor
 addColumn('channels', 'profile_json', 'TEXT');    // JSON: greeting, ice breakers, menu pushed to Meta
 addColumn('conversations', 'author_id', 'TEXT');  // comment threads: who wrote the first comment
 addColumn('workspaces', 'hours_json', 'TEXT');    // JSON: business hours + away message
+db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions (  -- Web Push: browsers / installed apps of the team
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, user_agent TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);

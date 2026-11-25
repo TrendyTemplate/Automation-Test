@@ -17,6 +17,8 @@ export const SETTINGS = [
   ['general', 'require_email_verification', 'Require email verification before connecting channels', 'bool', null, false, '0'],
 
   ['security', 'require_admin_2fa', 'Require 2FA for platform admins (production)', 'bool', null, false, '1'],
+  ['security', 'vapid_public', 'Web Push public key (created automatically)', 'text', 'VAPID_PUBLIC_KEY', false, ''],
+  ['security', 'vapid_private', 'Web Push private key (created automatically)', 'text', 'VAPID_PRIVATE_KEY', true, ''],
   ['security', 'new_device_alerts', 'Email users when their account is accessed from a new device', 'bool', null, false, '1'],
   ['security', 'impersonation_requires_consent', 'Admins can only "log in as" a customer who granted support access', 'bool', null, false, '1'],
   ['security', 'allowed_admin_ips', 'Restrict the admin panel to these IPs (comma separated, blank = any)', 'text', null, false, ''],

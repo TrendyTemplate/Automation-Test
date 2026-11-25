@@ -245,6 +245,7 @@ async function init() {
   window.addEventListener('hashchange', route);
   route();
   startLive();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {}); // installable app + notifications
   setInterval(refreshCounts, 60_000);
 }
 

@@ -1,5 +1,16 @@
 import { $, esc, icon, api, toast, bind, formData, badge, ago, fmtDate, fmtDay, money, num, empty, modal, confirmBox, switchEl, avatar, label } from '../ui.js';
 
+/** Ask for permission and register this browser for Web Push. */
+export async function enablePush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) throw new Error('This browser does not support notifications. On iPhone, add ChatPilot to your home screen first.');
+  if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications are blocked — allow them in your browser settings.');
+  const reg = await navigator.serviceWorker.register('/sw.js');
+  await navigator.serviceWorker.ready;
+  const { key } = await api('/sales/push');
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)) });
+  return api('/sales/push', { method: 'POST', body: { subscription: sub.toJSON() } });
+}
+
 export async function profile(ctx) {
   const p = await api('/auth/profile');
   const me = ctx.me;
@@ -12,6 +23,8 @@ export async function profile(ctx) {
         <label>Theme</label><select name="ui_theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${p.ui_theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
         <button class="btn primary mt" type="submit">Save profile</button></form>
       <div class="col" style="gap:16px">
+        <div class="card" id="push-card"><h3>${icon('bell')} Phone & desktop notifications</h3><p class="hint">Get a notification for a new order or when a customer needs a person — even when ChatPilot is closed. On a phone, first add ChatPilot to your home screen (browser menu → Install app / Add to Home Screen).</p>
+          <div class="row"><button class="btn" type="button" data-act="push">${icon('bell')}Turn on on this device</button><button class="btn ghost" type="button" data-act="pushtest">Send a test</button><span class="hint" id="push-st"></span></div></div>
         <form class="card" data-act="email"><h3>${icon('mail')} Sign-in email</h3>
           <p class="hint">Currently <b>${esc(p.email)}</b>${p.email_verified ? ' · verified' : ' · <span style="color:var(--warn)">not verified</span>'}. We'll send a confirmation link to the new address.</p>
           <label>New email</label><input name="email" type="email" required autocomplete="email">
@@ -24,6 +37,13 @@ export async function profile(ctx) {
             <dt>Member since</dt><dd>${fmtDay(p.created_at)}</dd></dl></div>
       </div>
     </div>`;
+  const pushSt = (t) => { const e = document.getElementById('push-st'); if (e) e.textContent = t; };
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) pushSt('This browser does not support notifications.');
+  else api('/sales/push').then((p) => pushSt(p.devices ? `On for ${p.devices} device${p.devices > 1 ? 's' : ''}` : 'Off')).catch(() => {});
+  ctx.view.querySelector('[data-act=push]')?.addEventListener('click', async () => {
+    try { pushSt(`On for ${(await enablePush()).devices} device(s)`); toast('Notifications are on'); } catch (e) { toast(e.message, true); }
+  });
+  ctx.view.querySelector('[data-act=pushtest]')?.addEventListener('click', async () => { const r = await api('/sales/push/test', { method: 'POST' }); toast(r.delivered ? 'Sent — check your notifications' : 'No device is subscribed yet', !r.delivered); });
   bind({
     save: async (f) => {
       const d = formData(f);

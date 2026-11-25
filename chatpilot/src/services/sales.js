@@ -13,6 +13,7 @@ import { priceOrder, orderSummary, createOrder, deliveryText } from './orders.js
 import { emit } from './events.js';
 import { moderateComment, hideComment, afterHours, hoursText } from './automation.js';
 import { sendTelegram, sendSlack } from './notify.js';
+import { pushToWorkspace } from './webpush.js';
 import { appUrl } from '../settings.js';
 
 export const STAGES = ['new', 'browsing', 'interested', 'negotiating', 'ordering', 'ordered', 'support', 'lost'];
@@ -170,8 +171,8 @@ export function autoAssign(ws, convId) {
   return next;
 }
 
-async function alert(ws, text) {
-  await Promise.allSettled([sendTelegram(ws.telegram_chat_id, text), sendSlack(ws.slack_webhook, text)]);
+async function alert(ws, text, push = null) {
+  await Promise.allSettled([sendTelegram(ws.telegram_chat_id, text), sendSlack(ws.slack_webhook, text), push && pushToWorkspace(ws.id, push)]);
 }
 
 /** Send a stored outbound chat message (AI draft approved, or a human reply). */
@@ -322,17 +323,20 @@ export async function respond(conversationId) {
       if (fc.total >= 3 && fc.ratio < 50) {
         run(`UPDATE orders SET note = TRIM(COALESCE(note, '') || ' ⚠ Risky: only ' || ? || '% of ' || ? || ' past parcels delivered — ask for advance payment') WHERE id = ?`, fc.ratio, fc.total, orderId);
         logActivity(ws.id, 'order_risk', { order: orderId, conversation: conv.id, error: `${fc.ratio}% delivered (${fc.total} parcels)` });
-        await alert(ws, `⚠ Order #${orderId} looks risky: only ${fc.ratio}% of ${fc.total} past parcels to this number were delivered.`);
+        await alert(ws, `⚠ Order #${orderId} looks risky: only ${fc.ratio}% of ${fc.total} past parcels to this number were delivered.`,
+          { title: `⚠ Risky order #${orderId}`, body: `Only ${fc.ratio}% of ${fc.total} past parcels delivered — ask for advance payment`, url: `#orders`, tag: `risk-${orderId}` });
       }
     } catch { /* fraud check is best effort */ }
     logActivity(ws.id, 'order_created', { conversation: conv.id, order: orderId, total: priced.total, currency: priced.currency, from: name });
-    await alert(ws, `🛒 New ${PLATFORMS[channel.platform].label} order #${orderId}: ${money(priced.total, priced.currency)} from ${name}\n${appUrl()}/app#orders`);
+    await alert(ws, `🛒 New ${PLATFORMS[channel.platform].label} order #${orderId}: ${money(priced.total, priced.currency)} from ${name}\n${appUrl()}/app#orders`,
+      { title: `🛒 New order #${orderId}`, body: `${money(priced.total, priced.currency)} · ${PLATFORMS[channel.platform].label}`, url: `#orders`, tag: `order-${orderId}` });
   }
   if (d.handoff || injection.flagged || sensitive) {
     logActivity(ws.id, 'chat_handoff', { conversation: conv.id, from: conv.customer_name || conv.customer_id, error: reasons[0] });
     autoAssign(ws, conv.id);
     emit(ws.id, 'handoff', { conversation: conv.id });
-    await alert(ws, `🙋 A ${PLATFORMS[channel.platform].label} customer needs a human: ${d.handoff_reason || reasons[0]}\n${appUrl()}/app#chat?id=${conv.id}`);
+    await alert(ws, `🙋 A ${PLATFORMS[channel.platform].label} customer needs a human: ${d.handoff_reason || reasons[0]}\n${appUrl()}/app#chat?id=${conv.id}`,
+      { title: '🙋 A customer needs you', body: `${PLATFORMS[channel.platform].label} · ${channel.name || ''}`.trim(), url: `#chat?id=${conv.id}`, tag: `chat-${conv.id}` });
   }
   if (!reply && !privateText) return { decision: d, orderId, sent: false };
 
