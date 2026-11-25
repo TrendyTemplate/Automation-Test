@@ -120,7 +120,7 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   assert.equal(sent.length, 1);
 
   // Every page renders; no console errors
-  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
+  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'customers', 'analytics', 'couriers', 'delivery', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('h1', { timeout: 5000 });
   }
@@ -198,7 +198,7 @@ test('phone layout: bottom tab bar, More sheet, chat opens full screen', { skip:
   assert.equal(await page.isVisible('.convo-list'), false, 'list hides while reading');
   await page.click('.chat-back');
   await page.waitForSelector('.convo:not(.reading) .convo-list');
-  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'catalog', 'saleslab', 'channels', 'brain', 'billing', 'security']) {
+  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'customers', 'analytics', 'couriers', 'catalog', 'saleslab', 'channels', 'brain', 'billing', 'security']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('h1');
     const w = await page.evaluate(() => document.documentElement.scrollWidth);

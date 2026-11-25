@@ -12,6 +12,7 @@ import { aiEnabled } from '../services/ai.js';
 import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings, validateDelivery } from '../services/orders.js';
 import { notifyOrderStatus } from '../services/notifications.js';
 import { subscribe, emit } from '../services/events.js';
+import { courierStatus, connectCourier, disconnectCourier, bookParcel, refreshStatus, fraudCheck, COURIERS } from '../services/couriers.js';
 import { learnFromReply, learnFromDraft, latestProfile, forgetFact, maybeDistill, queueImport } from '../services/learning.js';
 import { effectivePlan } from '../plans.js';
 
@@ -53,7 +54,9 @@ webhookRouter.post('/', express.raw({ type: '*/*', limit: '2mb' }), (req, res) =
 });
 
 // ---------------------------------------------------------------- dashboard API
+import insights from './insights.js';
 const r = Router();
+r.use(insights);
 const manage = requireRole('owner', 'admin');
 const wsId = (req) => req.workspace.id;
 const int = (v) => Number.parseInt(v, 10);
@@ -436,6 +439,32 @@ r.get('/orders.csv', (req, res) => {
       JSON.parse(o.items_json).map((l) => `${l.qty}x ${l.name}${l.variant ? ` (${l.variant})` : ''}`).join('; '), o.subtotal ?? o.total, o.delivery_zone, o.delivery_charge, o.discount, o.total, o.currency,
       o.payment_status, o.paid_amount, o.courier, o.tracking_code].map(q).join(','))].join('\n'));
 });
+// ----- couriers (Steadfast, Pathao, RedX) + fraud check
+r.get('/couriers', (req, res) => res.json({ ...courierStatus(one('SELECT * FROM workspaces WHERE id = ?', wsId(req))), webhook_base: `${appUrl()}/api/couriers/hook/` }));
+r.put('/couriers/:name', manage, async (req, res) => {
+  try { res.json(await connectCourier(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), req.params.name, req.body)); audit(req, 'courier.connect', req.params.name); }
+  catch (e) { res.status(400).json({ error: `${COURIERS[req.params.name]?.label || 'Courier'} rejected the keys: ${e.message}` }); }
+});
+r.delete('/couriers/:name', manage, (req, res) => { disconnectCourier(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), req.params.name); res.json({ ok: true }); });
+r.post('/orders/:id/courier', async (req, res) => {
+  const o = one('SELECT * FROM orders WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!o) return res.status(404).json({ error: 'Not found' });
+  try {
+    const out = await bookParcel(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), o, s(req.body?.courier, 20));
+    await notifyOrderStatus(o.id).catch(() => {});
+    emit(wsId(req), 'order', { order: o.id });
+    res.json(out);
+  } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+r.post('/orders/:id/courier/status', async (req, res) => {
+  const o = one('SELECT * FROM orders WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!o) return res.status(404).json({ error: 'Not found' });
+  try { res.json(await refreshStatus(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), o)); } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+r.get('/fraud-check', async (req, res) => {
+  try { res.json(await fraudCheck(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), s(req.query.phone, 30))); } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+
 r.get('/delivery', (req, res) => res.json(deliverySettings(req.workspace)));
 r.put('/delivery', manage, (req, res) => {
   let d; try { d = validateDelivery(req.body); } catch (e) { return bad(res, e.message); }
