@@ -3,6 +3,7 @@ import * as workspace from './views/workspace.js';
 import * as account from './views/account.js';
 import * as sales from './views/sales.js';
 import * as onboard from './views/onboard.js';
+import * as ordersView from './views/orders.js';
 
 const ctx = { me: null, view: $('#view'), counts: {} };
 const MANAGERS = ['owner', 'admin'];
@@ -26,17 +27,17 @@ const NAV = [
 const TABS = ['dashboard', 'chats', 'orders', 'catalog']; // phone bottom bar; everything else lives under "More"
 // Pages grouped under one sidebar entry, shown as tabs.
 const SECTIONS = {
-  brain: [['brain', 'Shop & safety', 'brain'], ['knowledge', 'Knowledge base', 'book']],
+  brain: [['brain', 'Shop & safety', 'brain'], ['knowledge', 'Knowledge base', 'book'], ['delivery', 'Delivery charges', 'send']],
   profile: [['profile', 'Profile', 'users'], ['team', 'Team', 'users'], ['billing', 'Plan & billing', 'card', MANAGERS], ['security', 'Security & privacy', 'lock'], ['referrals', 'Refer & earn', 'gift']],
 };
-const PARENT = { chat: 'chats', ticket: 'support' };
+const PARENT = { chat: 'chats', ticket: 'support', invoice: 'orders' };
 for (const [parent, tabs] of Object.entries(SECTIONS)) for (const [id] of tabs) PARENT[id] = parent;
-const ROLE_ONLY = { channels: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
+const ROLE_ONLY = { channels: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, delivery: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
 
 const ROUTES = {
   dashboard: workspace.dashboard, brain: workspace.brain, knowledge: workspace.knowledge, integrations: workspace.integrations,
   welcome: onboard.welcome, learning: onboard.learning,
-  chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: sales.orders, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
+  chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: ordersView.orders, invoice: ordersView.invoice, delivery: ordersView.delivery, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
   profile: account.profile, team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
 };
 const allowed = (roles) => !roles || roles.includes(ctx.me?.role);
@@ -237,8 +238,44 @@ async function init() {
   });
   window.addEventListener('hashchange', route);
   route();
+  startLive();
   setInterval(refreshCounts, 60_000);
 }
+
+// ---------- Live updates: new messages, drafts, orders appear without reloading ----------
+let liveTimer = null;
+function startLive() {
+  if (!window.EventSource) { setInterval(liveRefresh, 15_000); return; }
+  const es = new EventSource('/api/sales/stream');
+  const on = (type, fn) => es.addEventListener(type, (e) => { let d = {}; try { d = JSON.parse(e.data); } catch { /* ignore */ } fn(d); });
+  on('message', (d) => { if (d.direction === 'in') alertNew('New customer message'); liveRefresh(); });
+  on('handoff', () => { alertNew('A customer needs you'); liveRefresh(); });
+  on('order', () => { alertNew('New order 🛒'); liveRefresh(); });
+  for (const t of ['draft', 'conversation', 'note']) on(t, liveRefresh);
+}
+function liveRefresh() {
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => {
+    refreshCounts();
+    const { name } = currentRoute();
+    const typing = document.activeElement?.matches('textarea, input') && document.activeElement.value;
+    const modalOpen = document.querySelector('.modal-bg');
+    if (['chats', 'chat', 'orders', 'dashboard'].includes(name) && !typing && !modalOpen) route();
+  }, 400);
+}
+let audioCtx = null;
+function alertNew(text) {
+  if (!document.hidden) return;
+  try { // short "ding" (no audio file needed)
+    audioCtx ||= new AudioContext();
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.frequency.value = 880; g.gain.setValueAtTime(0.15, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+    o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.4);
+  } catch { /* autoplay blocked */ }
+  if (window.Notification?.permission === 'granted') { try { new Notification(text, { icon: '/favicon.svg', tag: 'chatpilot' }); } catch { /* not allowed */ } }
+  document.title = `● ${document.title.replace(/^● /, '')}`;
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) document.title = document.title.replace(/^● /, ''); });
 
 function setTheme(t) {
   applyTheme(t);

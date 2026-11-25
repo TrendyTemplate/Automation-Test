@@ -318,9 +318,22 @@ export const one = (sql, ...params) => db.prepare(sql).get(...norm(params));
 export const all = (sql, ...params) => db.prepare(sql).all(...norm(params));
 export const run = (sql, ...params) => db.prepare(sql).run(...norm(params));
 
+let txDepth = 0;
+/** Run fn in a transaction. Nested calls join the outer transaction (savepoints keep inner failures contained). */
 export function tx(fn) {
-  db.exec('BEGIN');
-  try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+  const sp = `sp${txDepth}`;
+  db.exec(txDepth ? `SAVEPOINT ${sp}` : 'BEGIN');
+  txDepth++;
+  try {
+    const r = fn();
+    txDepth--;
+    db.exec(txDepth ? `RELEASE ${sp}` : 'COMMIT');
+    return r;
+  } catch (e) {
+    txDepth--;
+    db.exec(txDepth ? `ROLLBACK TO ${sp}; RELEASE ${sp}` : 'ROLLBACK');
+    throw e;
+  }
 }
 
 export const period = () => new Date().toISOString().slice(0, 7);
@@ -373,3 +386,39 @@ export function securityEvent(req, type, detail, { userId, workspaceId } = {}) {
     detail == null ? null : (typeof detail === 'string' ? detail : JSON.stringify(detail)),
     req?.ip ?? null, String(req?.headers?.['user-agent'] || '').slice(0, 200) || null);
 }
+
+// ---------------------------------------------------------------------------
+// Migrations: columns added after the first release. Idempotent — safe on every boot and on old databases.
+// ---------------------------------------------------------------------------
+export function addColumn(table, col, def) {
+  if (!all(`PRAGMA table_info(${table})`).some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+// Orders: delivery charges by zone, payments, couriers, manual orders.
+for (const [c, d] of [['subtotal', 'REAL'], ['delivery_zone', 'TEXT'], ['delivery_charge', 'REAL NOT NULL DEFAULT 0'], ['discount', 'REAL NOT NULL DEFAULT 0'],
+  ['payment_status', "TEXT NOT NULL DEFAULT 'unpaid'"], ['paid_amount', 'REAL NOT NULL DEFAULT 0'], ['payment_method', 'TEXT'], ['source', "TEXT NOT NULL DEFAULT 'chat'"],
+  ['courier', 'TEXT'], ['consignment_id', 'TEXT'], ['tracking_code', 'TEXT'], ['courier_status', 'TEXT'], ['courier_updated_at', 'TEXT'], ['customer_id', 'INTEGER']]) addColumn('orders', c, d);
+// Workspaces: delivery zones (JSON) and order-status messages to customers.
+for (const [c, d] of [['delivery_json', 'TEXT'], ['notify_customers', 'INTEGER NOT NULL DEFAULT 1'], ['courier_json', 'TEXT']]) addColumn('workspaces', c, d);
+// Team inbox: saved replies, internal notes, labels, assignment.
+db.exec(`
+CREATE TABLE IF NOT EXISTS saved_replies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  shortcut TEXT NOT NULL, body TEXT NOT NULL, uses INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (workspace_id, shortcut)
+);
+CREATE TABLE IF NOT EXISTS conversation_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+addColumn('conversations', 'labels', 'TEXT');
+addColumn('conversations', 'referral_json', 'TEXT');          // Click-to-Messenger / WhatsApp ad that started the chat
+addColumn('workspaces', 'auto_assign', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('workspaces', 'assign_cursor', 'INTEGER NOT NULL DEFAULT 0');
+// Rich messages: customer photos / voice notes, product photos and tap-to-answer buttons we send.
+addColumn('chat_messages', 'attachments_json', 'TEXT');
+addColumn('chat_messages', 'buttons_json', 'TEXT');

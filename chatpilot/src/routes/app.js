@@ -74,7 +74,8 @@ for (const [path, table, fields] of [['knowledge', 'knowledge', ['title', 'conte
 
 // ---------- Assistant & workspace settings ----------
 const SETTINGS = ['name', 'business_name', 'business_description', 'reply_tone', 'default_language', 'auto_send_min_confidence',
-  'sensitive_topics', 'never_say', 'allowed_link_domains', 'privacy_shield', 'retention_days', 'timezone', 'telegram_chat_id', 'slack_webhook'];
+  'sensitive_topics', 'never_say', 'allowed_link_domains', 'privacy_shield', 'retention_days', 'timezone', 'telegram_chat_id', 'slack_webhook',
+  'auto_assign', 'notify_customers'];
 r.get('/settings', (req, res) => {
   const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId(req));
   res.json(Object.fromEntries(SETTINGS.map((k) => [k, ws[k]])));
@@ -82,8 +83,8 @@ r.get('/settings', (req, res) => {
 r.put('/settings', manage, (req, res) => {
   const ws = one('SELECT * FROM workspaces WHERE id = ?', wsId(req));
   const v = Object.fromEntries(SETTINGS.map((k) => [k, req.body[k] ?? ws[k]]));
-  for (const k of ['privacy_shield', 'retention_days']) v[k] = Math.max(0, Number.parseInt(v[k], 10) || 0);
-  v.privacy_shield = v.privacy_shield ? 1 : 0;
+  for (const k of ['privacy_shield', 'retention_days', 'auto_assign', 'notify_customers']) v[k] = Math.max(0, Number.parseInt(v[k] === true ? 1 : v[k], 10) || 0);
+  for (const k of ['privacy_shield', 'auto_assign', 'notify_customers']) v[k] = v[k] ? 1 : 0;
   if (v.slack_webhook && !/^https:\/\/hooks\.slack\.com\//.test(v.slack_webhook)) return res.status(400).json({ error: 'Slack webhook must start with https://hooks.slack.com/' });
   try { new Intl.DateTimeFormat('en', { timeZone: v.timezone || 'UTC' }); } catch { return res.status(400).json({ error: 'Unknown timezone' }); }
   v.timezone ||= 'UTC';

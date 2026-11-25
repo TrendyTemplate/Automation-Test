@@ -9,6 +9,9 @@ import { metaConnectAvailable } from '../services/meta.js';
 import { PLATFORMS, parseWebhook, verifySignature, insideWindow, testChannel } from '../services/social.js';
 import { handleEvents, deliver, storeOutbound, decide, priceOrder, orderSummary, decryptChat, STAGES } from '../services/sales.js';
 import { aiEnabled } from '../services/ai.js';
+import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings, validateDelivery } from '../services/orders.js';
+import { notifyOrderStatus } from '../services/notifications.js';
+import { subscribe, emit } from '../services/events.js';
 import { learnFromReply, learnFromDraft, latestProfile, forgetFact, maybeDistill, queueImport } from '../services/learning.js';
 import { effectivePlan } from '../plans.js';
 
@@ -184,6 +187,46 @@ r.post('/learning/refresh', manage, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ----- live updates (Server-Sent Events)
+r.get('/stream', (req, res) => {
+  res.set({ 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+  res.flushHeaders?.();
+  res.write('retry: 5000\nevent: hello\ndata: {}\n\n');
+  const off = subscribe(wsId(req), res);
+  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 25_000);
+  req.on('close', () => { clearInterval(ping); off(); });
+});
+
+// ----- saved replies (type "/" in the reply box)
+r.get('/saved-replies', (req, res) => res.json(all('SELECT * FROM saved_replies WHERE workspace_id = ? ORDER BY uses DESC, shortcut', wsId(req))));
+r.post('/saved-replies', (req, res) => {
+  const shortcut = s(req.body?.shortcut, 40).replace(/^\//, '').toLowerCase().replace(/\s+/g, '-');
+  const body = s(req.body?.body, 2000);
+  if (!/^[\p{L}\p{N}_-]{1,40}$/u.test(shortcut) || !body) return bad(res, 'Give it a short name (letters, numbers, -) and the reply text');
+  try { const id = run('INSERT INTO saved_replies (workspace_id, shortcut, body) VALUES (?,?,?)', wsId(req), shortcut, body).lastInsertRowid; res.json(one('SELECT * FROM saved_replies WHERE id = ?', id)); }
+  catch { res.status(409).json({ error: `/${shortcut} already exists` }); }
+});
+r.put('/saved-replies/:id', (req, res) => {
+  const body = s(req.body?.body, 2000);
+  if (!body) return bad(res, 'Reply text is required');
+  run('UPDATE saved_replies SET body = ? WHERE id = ? AND workspace_id = ?', body, int(req.params.id), wsId(req));
+  res.json({ ok: true });
+});
+r.post('/saved-replies/:id/used', (req, res) => { run('UPDATE saved_replies SET uses = uses + 1 WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req)); res.json({ ok: true }); });
+r.delete('/saved-replies/:id', (req, res) => { run('DELETE FROM saved_replies WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req)); res.json({ ok: true }); });
+
+// ----- internal notes on a conversation (never sent to the customer)
+r.post('/conversations/:id/notes', (req, res) => {
+  const v = one('SELECT id FROM conversations WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!v) return res.status(404).json({ error: 'Not found' });
+  const body = s(req.body?.body, 2000);
+  if (!body) return bad(res, 'Write a note');
+  run('INSERT INTO conversation_notes (workspace_id, conversation_id, user_id, body) VALUES (?,?,?,?)', wsId(req), v.id, req.user.id, seal(wsId(req), 'notes.body', body));
+  emit(wsId(req), 'note', { conversation: v.id });
+  res.json({ ok: true });
+});
+r.get('/team-members', (req, res) => res.json(all(`SELECT u.id, u.name, u.email FROM workspace_members m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = ? ORDER BY u.name`, wsId(req))));
+
 // ----- products (catalog)
 function productInput(b) {
   const p = {
@@ -245,17 +288,21 @@ r.get('/conversations', (req, res) => {
   if (PLATFORMS[req.query.platform]) { where.push('c.platform = ?'); p.push(req.query.platform); }
   if (int(req.query.channel)) { where.push('c.id = ?'); p.push(int(req.query.channel)); }
   if (['message', 'comment'].includes(req.query.kind)) { where.push('v.kind = ?'); p.push(req.query.kind); }
+  if (req.query.label) { where.push("(',' || v.labels || ',') LIKE ?"); p.push(`%,${s(req.query.label, 30).toLowerCase()},%`); }
+  if (req.query.view === 'mine') { where.push('v.assigned_to = ?'); p.push(req.user.id); }
+  if (req.query.view === 'unassigned') where.push("v.assigned_to IS NULL AND v.status = 'needs_human'");
   if (['open', 'needs_human', 'closed'].includes(req.query.status)) { where.push('v.status = ?'); p.push(req.query.status); }
   if (req.query.view === 'drafts') where.push(`EXISTS (SELECT 1 FROM chat_messages m WHERE m.conversation_id = v.id AND m.status = 'draft')`);
   if (STAGES.includes(req.query.stage)) { where.push('v.stage = ?'); p.push(req.query.stage); }
   if (req.query.q) { where.push('(v.customer_name LIKE ? OR v.customer_phone LIKE ? OR v.intent LIKE ?)'); const q = `%${s(req.query.q, 100)}%`; p.push(q, q, q); }
   const rows = all(`SELECT v.*, c.platform, c.name AS channel_name,
       (SELECT COUNT(*) FROM chat_messages m WHERE m.conversation_id = v.id AND m.status = 'draft') AS drafts,
-      (SELECT body FROM chat_messages m WHERE m.conversation_id = v.id ORDER BY id DESC LIMIT 1) AS last_body
+      (SELECT body FROM chat_messages m WHERE m.conversation_id = v.id ORDER BY id DESC LIMIT 1) AS last_body,
+      (SELECT COALESCE(u.name, u.email) FROM users u WHERE u.id = v.assigned_to) AS assignee
     FROM conversations v JOIN channels c ON c.id = v.channel_id WHERE ${where.join(' AND ')}
     ORDER BY COALESCE(v.last_inbound_at, v.created_at) DESC LIMIT ?`, ...p, Math.min(200, int(req.query.limit) || 100));
   res.json(rows.map((v) => ({ ...v, last_body: String(open(v.workspace_id, 'chat_messages.body', v.last_body) || '').slice(0, 140),
-    can_reply: insideWindow(v.last_inbound_at) })));
+    can_reply: insideWindow(v.last_inbound_at), labels: v.labels ? v.labels.split(',') : [] })));
 });
 
 const getConv = (req) => one(`SELECT v.*, c.platform, c.name AS channel_name, c.mode AS channel_mode FROM conversations v JOIN channels c ON c.id = v.channel_id
@@ -268,7 +315,9 @@ r.get('/conversations/:id', (req, res) => {
   const messages = all('SELECT * FROM chat_messages WHERE conversation_id = ? AND status != \'rejected\' ORDER BY id DESC LIMIT 200', v.id).reverse().map(decryptChat)
     .map((m) => ({ ...m, guard: m.guard_json ? JSON.parse(m.guard_json) : [] }));
   const orders = all('SELECT * FROM orders WHERE conversation_id = ? ORDER BY id DESC', v.id).map((o) => ({ ...o, items: JSON.parse(o.items_json) }));
-  res.json({ ...v, can_reply: insideWindow(v.last_inbound_at), messages, orders,
+  const notes = all(`SELECT n.id, n.body, n.created_at, u.name AS author, u.email AS author_email FROM conversation_notes n LEFT JOIN users u ON u.id = n.user_id WHERE n.conversation_id = ? ORDER BY n.id`, v.id)
+    .map((n) => ({ ...n, body: open(v.workspace_id, 'notes.body', n.body) }));
+  res.json({ ...v, can_reply: insideWindow(v.last_inbound_at), messages, orders, notes, labels: v.labels ? v.labels.split(',') : [], referral: v.referral_json ? JSON.parse(v.referral_json) : null,
     ai_paused: Boolean(v.ai_paused_until && new Date(`${v.ai_paused_until.replace(' ', 'T')}Z`) > new Date()) });
 });
 
@@ -319,31 +368,79 @@ r.put('/conversations/:id', (req, res) => {
   if (b.ai_paused === true) run(`UPDATE conversations SET ai_paused_until = datetime('now', '+30 days') WHERE id = ?`, v.id);
   if (b.ai_paused === false) run('UPDATE conversations SET ai_paused_until = NULL WHERE id = ?', v.id);
   for (const k of ['customer_name', 'customer_phone', 'customer_address']) if (b[k] !== undefined) run(`UPDATE conversations SET ${k} = ? WHERE id = ?`, s(b[k], 500) || null, v.id);
+  if (b.labels !== undefined) {
+    const labels = [...new Set((Array.isArray(b.labels) ? b.labels : String(b.labels).split(',')).map((x) => s(x, 30).trim().toLowerCase()).filter(Boolean))].slice(0, 10);
+    run('UPDATE conversations SET labels = ? WHERE id = ?', labels.join(',') || null, v.id);
+  }
+  if (b.assigned_to !== undefined) {
+    const uid = b.assigned_to ? int(b.assigned_to) : null;
+    if (uid && !one('SELECT 1 AS x FROM workspace_members WHERE workspace_id = ? AND user_id = ?', wsId(req), uid)) return bad(res, 'Not a member of this workspace');
+    run('UPDATE conversations SET assigned_to = ? WHERE id = ?', uid, v.id);
+  }
+  emit(wsId(req), 'conversation', { conversation: v.id });
   res.json({ ok: true });
 });
 
 // ----- orders
+const orderOut = (o) => ({ ...o, items: JSON.parse(o.items_json) });
 r.get('/orders', (req, res) => {
   const where = ['o.workspace_id = ?']; const p = [wsId(req)];
-  if (['new', 'confirmed', 'shipped', 'delivered', 'cancelled'].includes(req.query.status)) { where.push('o.status = ?'); p.push(req.query.status); }
-  res.json(all(`SELECT o.*, c.platform FROM orders o LEFT JOIN conversations v ON v.id = o.conversation_id LEFT JOIN channels c ON c.id = v.channel_id
-    WHERE ${where.join(' AND ')} ORDER BY o.id DESC LIMIT 300`, ...p).map((o) => ({ ...o, items: JSON.parse(o.items_json) })));
+  if (STATUSES.includes(req.query.status)) { where.push('o.status = ?'); p.push(req.query.status); }
+  if (req.query.q) { where.push('(o.customer_name LIKE ? OR o.customer_phone LIKE ? OR o.tracking_code LIKE ? OR CAST(o.id AS TEXT) = ?)'); const q = `%${s(req.query.q, 60)}%`; p.push(q, q, q, s(req.query.q, 20)); }
+  if (int(req.query.channel)) { where.push('v.channel_id = ?'); p.push(int(req.query.channel)); }
+  res.json(all(`SELECT o.*, c.platform, c.name AS channel_name FROM orders o LEFT JOIN conversations v ON v.id = o.conversation_id LEFT JOIN channels c ON c.id = v.channel_id
+    WHERE ${where.join(' AND ')} ORDER BY o.id DESC LIMIT 500`, ...p).map(orderOut));
 });
-r.put('/orders/:id', (req, res) => {
+r.get('/orders/:id', (req, res) => {
+  const o = one(`SELECT o.*, c.platform, c.name AS channel_name FROM orders o LEFT JOIN conversations v ON v.id = o.conversation_id LEFT JOIN channels c ON c.id = v.channel_id
+    WHERE o.id = ? AND o.workspace_id = ?`, int(req.params.id), wsId(req));
+  if (!o) return res.status(404).json({ error: 'Not found' });
+  res.json({ ...orderOut(o), shop: { name: req.workspace.business_name || req.workspace.name, description: req.workspace.business_description || '' } });
+});
+// Manual order (phone call, walk-in, or a chat the AI didn't handle).
+r.post('/orders', (req, res) => {
+  const b = req.body || {};
+  const name = s(b.customer_name, 120); const phone = s(b.customer_phone, 40); const address = s(b.customer_address, 500);
+  if (!name || !phone || !address) return bad(res, 'Name, phone and address are required');
+  const priced = priceOrder(wsId(req), b.items, { address, zone: b.delivery_zone, discount: b.discount });
+  if (!priced.lines.length || priced.problems.length) return bad(res, priced.problems.join('; ') || 'Add at least one product');
+  const convId = int(b.conversation_id) && one('SELECT id FROM conversations WHERE id = ? AND workspace_id = ?', int(b.conversation_id), wsId(req)) ? int(b.conversation_id) : null;
+  const id = createOrder(wsId(req), { conversationId: convId, priced, name, phone, address, note: b.note, source: 'manual',
+    paymentStatus: b.payment_status, paidAmount: b.paid_amount, paymentMethod: s(b.payment_method, 40) || null });
+  logActivity(wsId(req), 'order_created', { order: id, total: priced.total, currency: priced.currency, from: name, by: req.user.name || req.user.email });
+  res.json(orderOut(one('SELECT * FROM orders WHERE id = ?', id)));
+});
+r.put('/orders/:id', async (req, res) => {
   const o = one('SELECT * FROM orders WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   if (!o) return res.status(404).json({ error: 'Not found' });
-  const st = req.body?.status;
-  if (!['new', 'confirmed', 'shipped', 'delivered', 'cancelled'].includes(st)) return bad(res, 'Invalid status');
-  run(`UPDATE orders SET status = ?, note = COALESCE(?, note), updated_at = datetime('now') WHERE id = ?`, st, req.body.note != null ? s(req.body.note, 500) : null, o.id);
-  if (st === 'cancelled' && o.status !== 'cancelled') for (const l of JSON.parse(o.items_json)) run('UPDATE products SET stock = stock + ? WHERE id = ? AND stock IS NOT NULL', l.qty, l.product_id);
-  res.json({ ok: true });
+  const b = req.body || {};
+  try {
+    if (b.items !== undefined || b.delivery_zone !== undefined || b.discount !== undefined || b.customer_address !== undefined) {
+      editOrder(o, { items: b.items, address: b.customer_address !== undefined ? s(b.customer_address, 500) : undefined, zone: b.delivery_zone, discount: b.discount });
+    }
+    for (const k of ['customer_name', 'customer_phone', 'customer_address', 'note', 'payment_method']) if (b[k] !== undefined) run(`UPDATE orders SET ${k} = ? WHERE id = ?`, s(b[k], 500) || null, o.id);
+    if (b.payment_status !== undefined) { if (!PAYMENT.includes(b.payment_status)) return bad(res, 'Invalid payment status'); run('UPDATE orders SET payment_status = ? WHERE id = ?', b.payment_status, o.id); }
+    if (b.paid_amount !== undefined) run('UPDATE orders SET paid_amount = ? WHERE id = ?', Math.max(0, Number(b.paid_amount) || 0), o.id);
+    if (b.status !== undefined) {
+      if (!STATUSES.includes(b.status)) return bad(res, 'Invalid status');
+      if (setStatus(one('SELECT * FROM orders WHERE id = ?', o.id), b.status)) await notifyOrderStatus(o.id).catch(() => {});
+    }
+  } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+  res.json(orderOut(one('SELECT * FROM orders WHERE id = ?', o.id)));
 });
 r.get('/orders.csv', (req, res) => {
   const rows = all('SELECT * FROM orders WHERE workspace_id = ? ORDER BY id DESC', wsId(req));
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""').replace(/^[=+\-@]/, "'$&")}"`;
-  res.type('text/csv').attachment('orders.csv').send(['id,date,status,customer,phone,address,items,total,currency',
+  res.type('text/csv').attachment('orders.csv').send(['id,date,status,customer,phone,address,items,subtotal,delivery_zone,delivery_charge,discount,total,currency,payment_status,paid,courier,tracking',
     ...rows.map((o) => [o.id, o.created_at, o.status, o.customer_name, o.customer_phone, o.customer_address,
-      JSON.parse(o.items_json).map((l) => `${l.qty}x ${l.name}${l.variant ? ` (${l.variant})` : ''}`).join('; '), o.total, o.currency].map(q).join(','))].join('\n'));
+      JSON.parse(o.items_json).map((l) => `${l.qty}x ${l.name}${l.variant ? ` (${l.variant})` : ''}`).join('; '), o.subtotal ?? o.total, o.delivery_zone, o.delivery_charge, o.discount, o.total, o.currency,
+      o.payment_status, o.paid_amount, o.courier, o.tracking_code].map(q).join(','))].join('\n'));
+});
+r.get('/delivery', (req, res) => res.json(deliverySettings(req.workspace)));
+r.put('/delivery', manage, (req, res) => {
+  let d; try { d = validateDelivery(req.body); } catch (e) { return bad(res, e.message); }
+  run('UPDATE workspaces SET delivery_json = ? WHERE id = ?', JSON.stringify(d), wsId(req));
+  res.json(d);
 });
 
 // ----- test lab: chat with the assistant without sending anything
@@ -356,7 +453,7 @@ r.post('/simulate', async (req, res) => {
   const fakeConv = { id: 0, stage: 'browsing', customer_name: null, customer_phone: null, customer_address: null };
   try {
     const d = await decide(req.workspace, { platform, greeting: s(req.body.greeting, 500) }, fakeConv, turns);
-    const priced = priceOrder(wsId(req), d.order?.items);
+    const priced = priceOrder(wsId(req), d.order?.items, { address: d.order?.address, zone: d.order?.delivery_zone });
     let reply = d.reply;
     if (d.order_status === 'awaiting_confirmation' && priced.lines.length && !priced.problems.length) reply = `${reply}\n\n${orderSummary(priced, d.order)}`;
     res.json({ reply, decision: d, order: priced });

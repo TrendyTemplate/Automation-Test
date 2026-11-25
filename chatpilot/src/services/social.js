@@ -56,7 +56,8 @@ export function parseWebhook(payload) {
           customerId: String(echo ? m.recipient?.id : m.sender?.id),
           messageId: m.message.mid ? String(m.message.mid) : null,
           text: String(m.message.text || m.message.quick_reply?.payload || ''),
-          attachments: (m.message.attachments || []).map((a) => a.type).filter(Boolean),
+          attachments: (m.message.attachments || []).filter((a) => a?.type).map((a) => ({ type: a.type, url: a.payload?.url || null })),
+          referral: m.message.referral || m.referral || null,
           timestamp: m.timestamp ? new Date(Number(m.timestamp)).toISOString() : new Date().toISOString(),
           echo, appId: m.message.app_id ? String(m.message.app_id) : null,
         });
@@ -73,7 +74,8 @@ export function parseWebhook(payload) {
             platform: 'whatsapp', externalId: String(v.metadata.phone_number_id),
             customerId: String(msg.from), customerName: names[msg.from] || null,
             messageId: msg.id ? String(msg.id) : null, text: String(text),
-            attachments: ['image', 'audio', 'video', 'document', 'sticker', 'location'].filter((t) => msg.type === t),
+            attachments: ['image', 'audio', 'video', 'document', 'sticker', 'location'].filter((t) => msg.type === t).map((t) => ({ type: t === 'audio' && msg.audio?.voice ? 'audio' : t, mediaId: msg[t]?.id ? String(msg[t].id) : null })),
+            referral: msg.referral || null,
             timestamp: msg.timestamp ? new Date(Number(msg.timestamp) * 1000).toISOString() : new Date().toISOString(), echo: false,
           });
         }
@@ -114,21 +116,67 @@ async function graphPost(path, token, body) {
 }
 
 /** Send a text message to a customer. Returns the platform message ids. */
-export async function sendText(channel, token, customerId, text) {
+/**
+ * Send a text message to a customer, optionally with tap-to-answer buttons (Messenger/Instagram quick replies,
+ * WhatsApp reply buttons) on the last part. Returns the platform message ids.
+ */
+export async function sendText(channel, token, customerId, text, { buttons = [] } = {}) {
   const ids = [];
-  for (const part of splitText(text, PLATFORMS[channel.platform].maxLen)) {
+  const parts = splitText(text, PLATFORMS[channel.platform].maxLen);
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const btns = i === parts.length - 1 ? buttons.slice(0, channel.platform === 'whatsapp' ? 3 : 13) : [];
     let out;
     if (channel.platform === 'whatsapp') {
-      out = await graphPost(`${encodeURIComponent(channel.external_id)}/messages`, token,
-        { messaging_product: 'whatsapp', recipient_type: 'individual', to: customerId, type: 'text', text: { body: part, preview_url: false } });
+      const body = btns.length && part.length <= 1024
+        ? { type: 'interactive', interactive: { type: 'button', body: { text: part }, action: { buttons: btns.map((b, n) => ({ type: 'reply', reply: { id: `b${n}`, title: b.slice(0, 20) } })) } } }
+        : { type: 'text', text: { body: part, preview_url: false } };
+      out = await graphPost(`${encodeURIComponent(channel.external_id)}/messages`, token, { messaging_product: 'whatsapp', recipient_type: 'individual', to: customerId, ...body });
       ids.push(out.messages?.[0]?.id || null);
     } else {
-      out = await graphPost(`${encodeURIComponent(channel.send_id || channel.external_id)}/messages`, token,
-        { recipient: { id: customerId }, messaging_type: 'RESPONSE', message: { text: part } });
+      const message = { text: part, ...(btns.length ? { quick_replies: btns.map((b) => ({ content_type: 'text', title: b.slice(0, 20), payload: b.slice(0, 100) })) } : {}) };
+      out = await graphPost(`${encodeURIComponent(channel.send_id || channel.external_id)}/messages`, token, { recipient: { id: customerId }, messaging_type: 'RESPONSE', message });
       ids.push(out.message_id || null);
     }
   }
   return ids;
+}
+
+/** Send a photo (e.g. a product picture) by public https URL. */
+export async function sendImage(channel, token, customerId, url) {
+  if (channel.platform === 'whatsapp') {
+    const out = await graphPost(`${encodeURIComponent(channel.external_id)}/messages`, token, { messaging_product: 'whatsapp', recipient_type: 'individual', to: customerId, type: 'image', image: { link: url } });
+    return out.messages?.[0]?.id || null;
+  }
+  const out = await graphPost(`${encodeURIComponent(channel.send_id || channel.external_id)}/messages`, token,
+    { recipient: { id: customerId }, messaging_type: 'RESPONSE', message: { attachment: { type: 'image', payload: { url, is_reusable: true } } } });
+  return out.message_id || null;
+}
+
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+/**
+ * Download a customer's photo so the AI can look at it. Messenger/Instagram give a CDN URL; WhatsApp gives a
+ * media id that is resolved with the token. Returns {media_type, data(base64)} or null. Max 5 MB.
+ */
+export async function fetchCustomerImage(channel, token, att) {
+  try {
+    let url = att.url;
+    let auth = {};
+    if (!url && att.mediaId) {
+      const meta = await fetch(`${graphBase()}/${graphVersion()}/${encodeURIComponent(att.mediaId)}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) }).then((r) => r.json());
+      url = meta.url; auth = { authorization: `Bearer ${token}` };
+    }
+    if (!url || !/^https?:\/\//.test(url)) return null;
+    // Only Meta's own media hosts (or the configured Graph host) — never an arbitrary URL from a payload.
+    const host = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
+    if (!url.startsWith(graphBase()) && !(/^https:\/\//.test(url) && /(^|\.)(fbcdn\.net|fbsbx\.com|cdninstagram\.com|whatsapp\.net|facebook\.com)$/.test(host))) return null;
+    const res = await fetch(url, { headers: auth, signal: AbortSignal.timeout(20_000) });
+    const type = String(res.headers.get('content-type') || '').split(';')[0].trim();
+    if (!res.ok || !IMAGE_TYPES.has(type)) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 5 * 1024 * 1024) return null;
+    return { media_type: type, data: buf.toString('base64') };
+  } catch { return null; }
 }
 
 /** Check that a token can reach the account (used when connecting a channel). */

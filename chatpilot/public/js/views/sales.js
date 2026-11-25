@@ -1,5 +1,6 @@
 // ChatPilot: conversations (chat-first, three panes), orders, products, channels (Connect with Facebook) and test chat.
 import { $, $$, esc, icon, api, toast, bind, formData, modal, confirmBox, ago, fmtDate, num, empty, label, lead, csvDownload, switchEl } from '../ui.js';
+import { orderForm, fraudBadge } from './orders.js';
 
 const PL = { messenger: { name: 'Messenger' }, instagram: { name: 'Instagram' }, whatsapp: { name: 'WhatsApp' } };
 const plBadge = (p) => `<span class="pf ${esc(p)}">${esc(PL[p]?.name || p)}</span>`;
@@ -11,13 +12,56 @@ const initials = (c) => (c.customer_name ? c.customer_name.split(/\s+/).map((w) 
 const HUES = [160, 15, 200, 280, 35, 330, 100];
 const cav = (c, cls = '') => `<span class="cav ${esc(c.platform)} ${cls}" style="background:hsl(${HUES[(Number(c.id) || 0) % HUES.length]} 55% 42%)" aria-hidden="true">${esc(initials(c))}</span>`;
 const canManage = (ctx) => ['owner', 'admin'].includes(ctx.me.role);
+/** "/" in a reply box opens your saved replies; {{name}}, {{phone}}, {{address}} are filled in. */
+let SR = null;
+function savedReplies(ta, c) {
+  const fill = (t) => t.replace(/\{\{\s*name\s*\}\}/gi, c.customer_name || '').replace(/\{\{\s*phone\s*\}\}/gi, c.customer_phone || '').replace(/\{\{\s*address\s*\}\}/gi, c.customer_address || '');
+  let pop = null; let idx = 0; let items = [];
+  const hide = () => { if (pop) { pop.parentElement?.removeChild(pop); pop = null; } };
+  const pick = (r) => { ta.value = ta.value.replace(/(^|\s)\/[^\s]*$/, `$1${fill(r.body)}`); hide(); ta.focus(); ta.dispatchEvent(new Event('input')); api(`/sales/saved-replies/${r.id}/used`, { method: 'POST' }).catch(() => {}); };
+  const draw = () => {
+    if (!pop) { pop = document.createElement('div'); pop.className = 'sr-pop menu'; ta.parentElement.style.position = 'relative'; ta.parentElement.appendChild(pop); }
+    pop.innerHTML = items.length ? items.map((r, i) => `<button type="button" class="${i === idx ? 'on' : ''}" data-i="${i}"><b>/${esc(r.shortcut)}</b><span class="hint truncate">${esc(r.body)}</span></button>`).join('')
+      : '<div class="hint" style="padding:8px">No saved reply yet — <a href="#" data-new>create one</a></div>';
+    $$('button[data-i]', pop).forEach((b) => b.addEventListener('mousedown', (e) => { e.preventDefault(); pick(items[Number(b.dataset.i)]); }));
+    pop.querySelector('[data-new]')?.addEventListener('mousedown', (e) => { e.preventDefault(); hide(); manageSavedReplies(); });
+  };
+  ta.addEventListener('input', async () => {
+    const m = ta.value.match(/(?:^|\s)\/([^\s]*)$/);
+    if (!m) { hide(); return; }
+    SR ||= await api('/sales/saved-replies');
+    const q = m[1].toLowerCase();
+    items = SR.filter((r) => r.shortcut.includes(q) || r.body.toLowerCase().includes(q)).slice(0, 8); idx = 0; draw();
+  });
+  ta.addEventListener('keydown', (e) => {
+    if (!pop || !items.length) return;
+    if (e.key === 'ArrowDown') { idx = (idx + 1) % items.length; draw(); e.preventDefault(); }
+    if (e.key === 'ArrowUp') { idx = (idx - 1 + items.length) % items.length; draw(); e.preventDefault(); }
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pick(items[idx]); }
+    if (e.key === 'Escape') hide();
+  });
+  ta.addEventListener('blur', () => setTimeout(hide, 150));
+}
+export async function manageSavedReplies() {
+  const list = await api('/sales/saved-replies');
+  SR = list;
+  modal(`<h2>Saved replies</h2><p class="hint">Type <b>/</b> in any reply box to insert one. Use {{name}}, {{phone}} or {{address}} to fill in the customer's details.</p>
+    ${list.map((r) => `<form class="card mb" data-act="upd" data-id="${r.id}" style="padding:12px"><div class="row nowrap"><b style="flex:1">/${esc(r.shortcut)}</b><span class="hint">used ${num(r.uses)}×</span><button type="button" class="btn xs ghost danger" data-act="del" data-id="${r.id}">${icon('trash', 'sm')}</button></div>
+      <textarea name="body" rows="2" style="min-height:60px">${esc(r.body)}</textarea><button class="btn sm mt-s" type="submit">Save</button></form>`).join('')}
+    <form data-act="add" class="card" style="padding:12px"><div class="row nowrap"><input name="shortcut" placeholder="name, e.g. bkash" required style="max-width:180px"><input name="body" placeholder="bKash number 01XXXXXXXXX (Merchant). Send money and share the TrxID." required></div><button class="btn primary sm mt-s" type="submit">Add saved reply</button></form>`, (el, done) => bind({
+    add: async (f) => { await api('/sales/saved-replies', { method: 'POST', body: formData(f) }); done(); manageSavedReplies(); },
+    upd: async (f) => { await api(`/sales/saved-replies/${f.dataset.id}`, { method: 'PUT', body: formData(f) }); toast('Saved'); SR = null; },
+    del: async (b) => { await api(`/sales/saved-replies/${b.dataset.id}`, { method: 'DELETE' }); done(); manageSavedReplies(); },
+  }, el), { wide: true, onClose: () => { SR = null; } });
+}
 const shortAgo = (d) => ago(d).replace(' ago', '').replace('just now', 'now');
 
 // ---------------------------------------------------------------- conversations
 export async function chats(ctx, params) {
-  const filters = Object.fromEntries(Object.entries({ channel: params.channel, kind: params.kind, platform: params.platform, status: params.status, view: params.view, q: params.q }).filter(([, v]) => v));
+  const filters = Object.fromEntries(Object.entries({ channel: params.channel, kind: params.kind, label: params.label, platform: params.platform, status: params.status, view: params.view, q: params.q }).filter(([, v]) => v));
   const sel = params.id ? await api(`/sales/conversations/${Number(params.id)}`).catch(() => null) : null; // first, so it is marked read
-  const [ov, list, pages] = await Promise.all([api('/sales/overview'), api(`/sales/conversations?${new URLSearchParams(filters)}`), api('/sales/pages')]);
+  const [ov, list, pages, team] = await Promise.all([api('/sales/overview'), api(`/sales/conversations?${new URLSearchParams(filters)}`), api('/sales/pages'), api('/sales/team-members')]);
+  if (sel) sel.team = team;
   const many = pages.length > 1;
   const q = (over) => `#chats?${new URLSearchParams(Object.fromEntries(Object.entries({ ...filters, ...over }).filter(([, v]) => v)))}`;
   const f = (text, over, on) => `<a class="${on ? 'on' : ''}" href="${q({ ...over, id: '' })}">${text}</a>`;
@@ -26,13 +70,15 @@ export async function chats(ctx, params) {
     <div class="convo ${sel ? 'reading' : ''}" id="convo">
       <section class="convo-list" aria-label="Conversations">
         <div class="convo-head">
-          <div class="row nowrap"><h1>Chats</h1><span class="spacer"></span><a class="btn sm" href="#saleslab">${icon('flask', 'sm')}Test</a></div>
+          <div class="row nowrap"><h1>Chats</h1><span class="spacer"></span><button class="btn sm ghost" data-act="saved" title="Saved replies" aria-label="Saved replies">${icon('file', 'sm')}</button><a class="btn sm" href="#saleslab">${icon('flask', 'sm')}Test</a></div>
           ${many ? `<select id="page-pick" aria-label="Page"><option value="">All pages (${pages.length})</option>${pages.map((p) => `<option value="${p.id}" ${String(p.id) === String(params.channel || '') ? 'selected' : ''}>${esc(p.name || PL[p.platform].name)} · ${esc(PL[p.platform].name)}</option>`).join('')}</select>` : ''}
           <form data-act="search" class="input-icon">${icon('search')}<input name="q" placeholder="Search name, phone, intent" value="${esc(params.q || '')}" aria-label="Search conversations"></form>
           <div class="filters">${f('All', { platform: '', status: '', view: '', kind: '' }, noFilter)}
             ${f(`Needs you <span class="n">${ov.needsHuman || ''}</span>`, { status: 'needs_human', view: '', platform: '' }, params.status === 'needs_human')}
             ${f(`Drafts <span class="n">${ov.drafts || ''}</span>`, { view: 'drafts', status: '', platform: '', kind: '' }, params.view === 'drafts')}
+            ${team.length > 1 ? f('Mine', { view: 'mine', status: '', platform: '', kind: '' }, params.view === 'mine') : ''}
             ${f('Comments', { kind: 'comment', view: '', status: '', platform: '' }, params.kind === 'comment')}
+            ${params.label ? f(`#${esc(params.label)} ✕`, { label: '' }, true) : ''}
             ${many ? '' : Object.entries(PL).map(([k, v]) => f(v.name, { platform: k, status: '', view: '', kind: '' }, params.platform === k)).join('')}</div>
         </div>
         ${setupHint(ov, ctx)}
@@ -40,13 +86,13 @@ export async function chats(ctx, params) {
             ${cav(c)}<div class="body"><div class="top"><span class="name">${esc(who(c))}</span><span class="time">${shortAgo(c.last_inbound_at || c.created_at)}</span></div>
             <div class="row nowrap" style="gap:8px"><div class="last" style="flex:1">${esc(c.last_body || c.intent || '')}</div>${c.unread ? `<span class="count">${c.unread}</span>` : ''}</div>
             <div class="tags">${c.kind === 'comment' ? `<span class="tag">${icon('chat', 'sm')} Comment</span>` : ''}${many ? `<span class="tag page">${esc(c.channel_name || '')}</span>` : ''}${c.status === 'needs_human' ? '<span class="tag human">Needs you</span>' : ''}${c.drafts ? '<span class="tag draft">Draft ready</span>' : ''}
-              ${c.stage && !['new', 'browsing'].includes(c.stage) ? `<span class="tag stage">${esc(label(c.stage))}</span>` : ''}${c.lead_score >= 70 && c.stage !== 'ordered' ? `<span class="tag hot">${icon('flame', 'sm')} Hot</span>` : ''}</div></div></a>`).join('')
+              ${c.stage && !['new', 'browsing'].includes(c.stage) ? `<span class="tag stage">${esc(label(c.stage))}</span>` : ''}${c.lead_score >= 70 && c.stage !== 'ordered' ? `<span class="tag hot">${icon('flame', 'sm')} Hot</span>` : ''}${(c.labels || []).map((l) => `<span class="tag lbl">#${esc(l)}</span>`).join('')}${c.assignee ? `<span class="tag">${icon('userCheck', 'sm')} ${esc(c.assignee.split(' ')[0])}</span>` : ''}</div></div></a>`).join('')
           || `<div class="convo-empty"><div><div class="art">${icon('chat')}</div><h3>No conversations yet</h3><p>Customer messages appear here as soon as a channel is connected.</p></div></div>`}</div>
       </section>
       <section class="convo-chat" aria-label="Chat">${sel ? chatPane(sel, q) : `<div class="convo-empty"><div><div class="art">${icon('chat')}</div><h3>Pick a conversation</h3><p>See the chat, approve AI drafts and step in when a customer needs you.</p></div></div>`}</section>
       ${sel ? customerPane(sel) : '<aside class="convo-side"></aside>'}
     </div>`;
-  bind({ search: (form) => { location.hash = q({ q: formData(form).q, id: '' }).slice(1); } }, ctx.view);
+  bind({ search: (form) => { location.hash = q({ q: formData(form).q, id: '' }).slice(1); }, saved: () => manageSavedReplies() }, ctx.view);
   $('#page-pick')?.addEventListener('change', (e) => { location.hash = q({ channel: e.target.value, id: '' }).slice(1); });
   if (sel) bindPane(ctx, sel);
 }
@@ -92,13 +138,19 @@ function customerPane(c) {
     <div class="side-sec"><h4>Buying intent</h4><div class="score"><div class="bar"><i style="width:${Math.max(4, c.lead_score || 0)}%"></i></div><b>${c.lead_score ?? '—'}</b></div>
       <div class="row mt-s">${stageBadge(c.stage)}${c.language ? `<span class="badge">${esc(c.language)}</span>` : ''}</div>
       ${c.summary ? `<p class="hint mt-s">${esc(c.summary)}</p>` : ''}</div>
+    <div class="side-sec"><h4>Assigned to</h4><select data-act="assign" aria-label="Assign">${['<option value="">Nobody</option>', ...(c.team || []).map((u) => `<option value="${u.id}" ${c.assigned_to === u.id ? 'selected' : ''}>${esc(u.name || u.email)}</option>`)].join('')}</select></div>
+    <div class="side-sec"><h4>Labels</h4><div class="chips">${(c.labels || []).map((l) => `<a class="chip" href="#chats?label=${encodeURIComponent(l)}">#${esc(l)}</a><button class="chip" data-act="unlabel" data-l="${esc(l)}" aria-label="Remove label ${esc(l)}">✕</button>`).join('')}</div>
+      <form class="row nowrap mt-s" data-act="label"><input name="label" placeholder="vip, wholesale, follow-up…" aria-label="New label"><button class="btn sm" type="submit">Add</button></form></div>
+    <div class="side-sec"><h4>Team notes <span class="hint">(customer never sees these)</span></h4>${(c.notes || []).map((n) => `<div class="note-i"><b>${esc((n.author || n.author_email || '').split(' ')[0])}</b> <span class="hint">${ago(n.created_at)}</span><div>${esc(n.body)}</div></div>`).join('')}
+      <form class="mt-s" data-act="note"><textarea name="body" rows="2" placeholder="Add a note for your team" style="min-height:60px"></textarea><button class="btn sm mt-s" type="submit">Save note</button></form></div>
     <form class="side-sec" data-act="saveCustomer"><h4>Delivery details</h4>
       <input name="customer_name" placeholder="Name" value="${esc(c.customer_name || '')}" aria-label="Name">
       <input name="customer_phone" placeholder="Phone" value="${esc(c.customer_phone || '')}" aria-label="Phone" class="mt-s">
       <textarea name="customer_address" placeholder="Address" rows="2" aria-label="Address" class="mt-s" style="min-height:70px">${esc(c.customer_address || '')}</textarea>
       <button class="btn sm mt-s" type="submit">Save</button></form>
-    <div class="side-sec"><h4>Orders</h4>${c.orders.map((o) => `<div class="order-mini"><div class="row nowrap"><b>#${o.id}</b><span class="spacer"></span><span class="badge">${esc(label(o.status))}</span></div>
-      <div class="hint">${esc(o.items.map((l) => `${l.qty}× ${l.name}`).join(', '))}</div><b>${fmtMoney(o.total, o.currency)}</b></div>`).join('') || '<p class="hint">No orders yet.</p>'}</div>
+    ${c.customer_phone ? '<div class="side-sec" id="fraud-side"></div>' : ''}
+    <div class="side-sec"><div class="row nowrap"><h4 style="flex:1;margin:0">Orders</h4>${c.kind === 'comment' ? '' : '<button class="btn xs" data-act="neworder">+ Order</button>'}</div>${c.orders.map((o) => `<a class="order-mini" href="#orders?id=${o.id}" style="display:block;color:inherit;text-decoration:none"><div class="row nowrap"><b>#${o.id}</b><span class="spacer"></span><span class="badge">${esc(label(o.status))}</span></div>
+      <div class="hint">${esc(o.items.map((l) => `${l.qty}× ${l.name}`).join(', '))}</div><b>${fmtMoney(o.total, o.currency)}</b></a>`).join('') || '<p class="hint">No orders yet.</p>'}</div>
   </aside>`;
 }
 
@@ -107,7 +159,8 @@ function bindPane(ctx, c) {
   if (el) el.scrollTop = el.scrollHeight;
   const ta = $('.composer textarea');
   ta?.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(160, ta.scrollHeight)}px`; });
-  ta?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); ta.form.requestSubmit(); } });
+  ta?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !document.querySelector('.sr-pop')) { e.preventDefault(); ta.form.requestSubmit(); } });
+  if (ta) savedReplies(ta, c);
   bind({
     approve: async (b) => { await api(`/sales/messages/${b.dataset.id}/approve`, { method: 'POST', body: { body: $(`[data-draft="${b.dataset.id}"]`).value } }); toast('Sent'); ctx.route(); },
     reject: async (b) => { await api(`/sales/messages/${b.dataset.id}/reject`, { method: 'POST' }); ctx.route(); },
@@ -116,31 +169,13 @@ function bindPane(ctx, c) {
     close: async () => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { status: c.status === 'closed' ? 'open' : 'closed' } }); ctx.route(); },
     resolve: async () => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { status: 'open' } }); ctx.route(); },
     saveCustomer: async (form) => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: formData(form) }); toast('Saved'); },
+    assign: async (sel) => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { assigned_to: sel.value || null } }); toast('Assigned'); },
+    label: async (form) => { const l = formData(form).label.trim(); if (!l) return; await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { labels: [...(c.labels || []), l] } }); ctx.route(); },
+    unlabel: async (b) => { await api(`/sales/conversations/${c.id}`, { method: 'PUT', body: { labels: (c.labels || []).filter((x) => x !== b.dataset.l) } }); ctx.route(); },
+    note: async (form) => { await api(`/sales/conversations/${c.id}/notes`, { method: 'POST', body: formData(form) }); ctx.route(); },
+    neworder: () => orderForm(ctx, { conversation_id: c.id, customer_name: c.customer_name, customer_phone: c.customer_phone, customer_address: c.customer_address }),
   }, ctx.view);
-}
-
-// ---------------------------------------------------------------- orders
-const ORDER_STATUSES = ['new', 'confirmed', 'shipped', 'delivered', 'cancelled'];
-export async function orders(ctx, params) {
-  const list = await api(`/sales/orders${params.status ? `?status=${encodeURIComponent(params.status)}` : ''}`);
-  ctx.view.innerHTML = `
-    <div class="page-h"><div><h1>Orders</h1><p>Orders the assistant took in chat. Totals are always calculated from your catalog prices, never by the AI.</p></div>
-      <div class="actions"><div class="seg">${['', ...ORDER_STATUSES].map((s) => `<a href="#orders${s ? `?status=${s}` : ''}" class="${(params.status || '') === s ? 'on' : ''}">${s ? esc(label(s)) : 'All'}</a>`).join('')}</div>
-        <button class="btn" data-act="csv">${icon('download')}Export CSV</button></div></div>
-    <div class="card pad-0"><div class="table-wrap"><table><thead><tr><th>#</th><th>Customer</th><th>Items</th><th>Total</th><th>Channel</th><th>Status</th><th>Date</th></tr></thead><tbody>
-      ${list.map((o) => `<tr><td><b>${o.id}</b></td><td><b>${esc(o.customer_name || '—')}</b><div class="hint">${esc(o.customer_phone || '')}</div><div class="hint" style="max-width:260px;white-space:normal">${esc(o.customer_address || '')}</div></td>
-        <td>${o.items.map((l) => `<div>${l.qty}× ${esc(l.name)}${l.variant ? ` <span class="hint">(${esc(l.variant)})</span>` : ''}</div>`).join('')}${o.note ? `<div class="hint">${esc(o.note)}</div>` : ''}</td>
-        <td class="nowrap"><b>${fmtMoney(o.total, o.currency)}</b></td><td>${o.platform ? plBadge(o.platform) : ''}${o.conversation_id ? `<div><a class="hint" href="#chats?id=${o.conversation_id}">Open chat</a></div>` : ''}</td>
-        <td><select data-act="status" data-id="${o.id}" style="width:auto">${ORDER_STATUSES.map((s) => `<option value="${s}" ${o.status === s ? 'selected' : ''}>${esc(label(s))}</option>`).join('')}</select></td>
-        <td class="hint nowrap">${ago(o.created_at)}</td></tr>`).join('') || `<tr><td colspan="7">${empty('card', 'No orders yet', 'When a customer confirms an order in chat it appears here, and you get a Telegram/Slack alert if alerts are on.')}</td></tr>`}
-    </tbody></table></div></div>`;
-  bind({
-    csv: () => csvDownload('/sales/orders.csv'),
-    status: async (s) => {
-      if (s.value === 'cancelled' && !(await confirmBox('Cancel this order?', 'Stock for its items is added back to your catalog.', { danger: true, ok: 'Cancel order' }))) { ctx.route(); return; }
-      await api(`/sales/orders/${s.dataset.id}`, { method: 'PUT', body: { status: s.value } }); toast('Order updated');
-    },
-  }, ctx.view);
+  if (c.customer_phone) fraudBadge($('#fraud-side'), c.customer_phone);
 }
 
 // ---------------------------------------------------------------- catalog

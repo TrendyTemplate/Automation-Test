@@ -150,14 +150,20 @@ test('WhatsApp order: summary priced from the catalog, confirmed order recorded,
   const sent = graph.sent[0].body;
   assert.equal(sent.messaging_product, 'whatsapp');
   assert.equal(sent.to, '8801711000000');
-  assert.match(sent.text.body, /Black Hoodie \(L\) × 2 = BDT 2,400/);
-  assert.match(sent.text.body, /Subtotal: BDT 2,400/);
+  assert.equal(sent.type, 'interactive', 'confirmation comes with tap-to-answer buttons');
+  assert.deepEqual(sent.interactive.action.buttons.map((b) => b.reply.title), ['✅ Confirm', '✏️ Change']);
+  assert.match(sent.interactive.body.text, /Black Hoodie \(L\) × 2 = BDT 2,400/);
+  assert.match(sent.interactive.body.text, /Subtotal: BDT 2,400/);
+  assert.match(sent.interactive.body.text, /Delivery \(Inside Dhaka\): BDT 70/);
+  assert.match(sent.interactive.body.text, /Total: BDT 2,470/);
 
   nextReply = decision({ reply: 'অর্ডার কনফার্ম হয়েছে! ধন্যবাদ 🙏', stage: 'ordered', order_status: 'confirmed', order });
   await hook(whatsapp('200000004', '8801711000000', 'ji confirm', 'wamid.b'));
   const orders = (await c.call('GET', '/api/sales/orders')).body;
   assert.equal(orders.length, 1);
-  assert.equal(orders[0].total, 2400);
+  assert.equal(orders[0].subtotal, 2400);
+  assert.equal(orders[0].delivery_charge, 70, 'Dhanmondi, Dhaka → inside-Dhaka delivery');
+  assert.equal(orders[0].total, 2470);
   assert.equal(orders[0].customer_phone, '01711000000');
   assert.equal(orders[0].platform, 'whatsapp');
   assert.equal(one('SELECT stock FROM products WHERE id = ?', product.id).stock, 3);

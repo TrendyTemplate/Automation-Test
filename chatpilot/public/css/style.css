@@ -481,3 +481,22 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--surface-2); 
 .tag.page { background: var(--surface-2); color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
 .page-card { display: flex; flex-direction: column; gap: 6px; }
 @media (max-width: 860px) { .welcome-steps, .learn-grid { grid-template-columns: 1fr; } }
+
+/* ---------- Orders, invoice ---------- */
+.item-row { margin-bottom: 8px; } .item-row select { flex: 3; } .zone-row { margin-bottom: 8px; }
+.order-totals { display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: flex-end; margin-top: 14px; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); font-size: 14px; }
+.invoice { max-width: 760px; margin: 0 auto; background: #fff; color: #111; border-radius: 16px; padding: 36px; border: 1px solid var(--border); }
+.invoice header { display: flex; justify-content: space-between; gap: 20px; border-bottom: 2px solid #111; padding-bottom: 14px; margin-bottom: 18px; }
+.invoice h1, .invoice h2 { color: #111; margin: 0; } .invoice .hint { color: #555; }
+.invoice table th { background: #f3f3f3; color: #333; } .invoice td, .invoice th { color: #111; border-color: #ddd; }
+.invoice tfoot td { text-align: right; } .invoice tfoot td:first-child { text-align: right; } .invoice .due td { font-size: 17px; border-top: 2px solid #111; }
+.invoice footer { margin-top: 20px; text-align: center; }
+@media print {
+  body { background: #fff; } .rail, .tabbar, .topbar, .banner-zone, .no-print, .tabs, .toast-stack { display: none !important; }
+  .shell { display: block; } .content { padding: 0; max-width: none; } .invoice { border: 0; border-radius: 0; padding: 0; }
+}
+
+.sr-pop { bottom: calc(100% + 6px); left: 12px; right: 70px; max-height: 260px; overflow-y: auto; }
+.sr-pop button { flex-direction: column; align-items: flex-start; gap: 0; } .sr-pop button.on { background: var(--primary-soft); }
+.note-i { background: var(--warn-soft); border-radius: 12px; padding: 8px 10px; margin-bottom: 6px; font-size: 13.5px; }
+.tag.lbl { background: var(--info-soft); color: var(--info); }

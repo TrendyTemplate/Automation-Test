@@ -49,7 +49,7 @@ for (const c of CASES) {
     const isLast = m === c.msgs[c.msgs.length - 1];
     const d = await decide(ws, { platform: 'messenger', greeting: '' }, { id: 0, stage: 'browsing' }, turns);
     let reply = d.reply;
-    const priced = priceOrder(wsId, d.order?.items);
+    const priced = priceOrder(wsId, d.order?.items, { address: d.order?.address, zone: d.order?.delivery_zone });
     if (d.order_status === 'awaiting_confirmation' && priced.lines.length && !priced.problems.length) reply = `${reply}\n\n${orderSummary(priced, d.order)}`;
     turns.push({ direction: 'out', source: 'ai', body: reply });
     if (isLast) last = { ...d, reply, guard: checkOutbound(reply, { knowledge: `${kb}\n${orderSummary(priced, {})}`, original: c.msgs.join('\n') }) };
