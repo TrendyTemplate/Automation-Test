@@ -12,6 +12,7 @@ import { replyToComment, privateReply, fetchCustomerName } from './meta.js';
 import { priceOrder, orderSummary, createOrder, deliveryText } from './orders.js';
 import { emit } from './events.js';
 import { moderateComment, hideComment, afterHours, hoursText } from './automation.js';
+import { paymentText, recordClaim } from './payments.js';
 import { sendTelegram, sendSlack } from './notify.js';
 import { pushToWorkspace } from './webpush.js';
 import { appUrl } from '../settings.js';
@@ -22,7 +23,7 @@ const MAX_AI_PER_HOUR = 20; // loop protection per conversation
 const str = (description) => ({ type: 'string', description });
 const SALES_SCHEMA = {
   type: 'object', additionalProperties: false,
-  required: ['reply', 'product_photos', 'private_reply', 'language', 'intent', 'stage', 'lead_score', 'summary', 'order_status', 'order', 'handoff', 'handoff_reason', 'confidence', 'unsupported_claims'],
+  required: ['reply', 'product_photos', 'private_reply', 'language', 'intent', 'stage', 'lead_score', 'summary', 'order_status', 'order', 'payment', 'handoff', 'handoff_reason', 'confidence', 'unsupported_claims'],
   properties: {
     reply: str('The chat message to send to the customer now (plain text, short, chat style). Empty only if no answer is needed (e.g. "ok", a sticker, "thanks" after closing).'),
     product_photos: { type: 'array', items: { type: 'integer' }, description: 'Catalog product ids whose photo to send with this reply (max 3) — only when the customer asks to see a product or a photo clearly helps; otherwise empty' },
@@ -48,6 +49,11 @@ const SALES_SCHEMA = {
         address: str('Full delivery address, or empty'), delivery_zone: str('Name of the delivery zone the address falls in (from the delivery charges list), or empty'),
         note: str('Delivery note / special request, or empty'),
       },
+    },
+    payment: {
+      type: 'object', additionalProperties: false, required: ['method', 'trx_id', 'amount'],
+      description: 'A bKash / Nagad / Rocket payment the customer says they made (from their messages), else all empty / 0',
+      properties: { method: { type: 'string', enum: ['', 'bkash', 'nagad', 'rocket', 'upay', 'other'] }, trx_id: str('Transaction ID exactly as the customer wrote it, or empty'), amount: { type: 'number', description: 'Amount they say they sent, or 0' } },
     },
     handoff: { type: 'boolean', description: 'True when a human must take over: complaints, refunds/returns beyond policy, bargaining below listed prices, questions the catalog/knowledge cannot answer, angry or abusive customers, or the customer asks for a human.' },
     handoff_reason: str('Why a human is needed, else empty'),
@@ -83,6 +89,7 @@ ${catalogText(ws.id)}
 Knowledge base (delivery charges, payment methods, return policy, shop hours …):
 ${knowledgeText(ws.id) || '(No knowledge base entries yet.)'}
 ${deliveryText(ws)}
+${paymentText(ws)}
 ${hoursText(ws)}
 ${learnedBlock(ws.id, channel.id)}${channel.greeting ? `\nGreeting to use for a brand-new conversation: ${channel.greeting}\n` : ''}
 How to chat:
@@ -330,6 +337,13 @@ export async function respond(conversationId) {
     logActivity(ws.id, 'order_created', { conversation: conv.id, order: orderId, total: priced.total, currency: priced.currency, from: name });
     await alert(ws, `🛒 New ${PLATFORMS[channel.platform].label} order #${orderId}: ${money(priced.total, priced.currency)} from ${name}\n${appUrl()}/app#orders`,
       { title: `🛒 New order #${orderId}`, body: `${money(priced.total, priced.currency)} · ${PLATFORMS[channel.platform].label}`, url: `#orders`, tag: `order-${orderId}` });
+  }
+  // A TrxID in the chat: attach it to the order for a person to verify (never marked paid automatically).
+  const claim = injection.flagged ? null : recordClaim(ws.id, conv.id, orderId, d.payment);
+  if (claim) {
+    emit(ws.id, 'order', { order: claim.orderId });
+    await alert(ws, `💳 Payment to verify on order #${claim.orderId}: TrxID ${claim.trx}${claim.amount ? ` (${claim.amount})` : ''}${claim.reused ? ` — ⚠ already used on order #${claim.reused}` : ''}\n${appUrl()}/app#orders?id=${claim.orderId}`,
+      { title: claim.reused ? `⚠ Reused TrxID on order #${claim.orderId}` : `💳 Payment to verify · order #${claim.orderId}`, body: `TrxID ${claim.trx}${claim.amount ? ` · ${claim.amount}` : ''}`, url: `#orders?id=${claim.orderId}`, tag: `pay-${claim.orderId}` });
   }
   if (d.handoff || injection.flagged || sensitive) {
     logActivity(ws.id, 'chat_handoff', { conversation: conv.id, from: conv.customer_name || conv.customer_id, error: reasons[0] });

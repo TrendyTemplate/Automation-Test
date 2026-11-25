@@ -13,6 +13,7 @@ import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings,
 import { notifyOrderStatus } from '../services/notifications.js';
 import { subscribe, emit } from '../services/events.js';
 import * as webpush from '../services/webpush.js';
+import { paymentSettings, validatePayment, verifyClaim, METHODS } from '../services/payments.js';
 import { commentRules, validateRules, validateProfile, applyProfile, saveProfile, businessHours, validateHours, isOpen } from '../services/automation.js';
 import { courierStatus, connectCourier, disconnectCourier, bookParcel, refreshStatus, fraudCheck, COURIERS } from '../services/couriers.js';
 import { learnFromReply, learnFromDraft, latestProfile, forgetFact, maybeDistill, queueImport } from '../services/learning.js';
@@ -501,6 +502,22 @@ r.put('/hours', manage, (req, res) => {
   run('UPDATE workspaces SET hours_json = ? WHERE id = ?', JSON.stringify(h), wsId(req));
   const w = one('SELECT * FROM workspaces WHERE id = ?', wsId(req));
   res.json({ ...businessHours(w), open_now: isOpen(w) });
+});
+
+r.get('/payments', (req, res) => res.json({ ...paymentSettings(one('SELECT * FROM workspaces WHERE id = ?', wsId(req))), available: METHODS }));
+r.put('/payments', manage, (req, res) => {
+  let p;
+  try { p = validatePayment(req.body || {}); } catch (e) { return bad(res, e.message); }
+  run('UPDATE workspaces SET payment_json = ? WHERE id = ?', JSON.stringify(p), wsId(req));
+  res.json({ ...p, available: METHODS });
+});
+r.post('/orders/:id/payment', (req, res) => {
+  const o = one('SELECT * FROM orders WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!o) return res.status(404).json({ error: 'Not found' });
+  try { verifyClaim(o, Boolean(req.body?.ok), req.body?.amount); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+  audit(req, req.body?.ok ? 'payment.verify' : 'payment.reject', o.id);
+  emit(wsId(req), 'order', { order: o.id });
+  res.json(orderOut(one('SELECT * FROM orders WHERE id = ?', o.id)));
 });
 
 r.get('/delivery', (req, res) => res.json(deliverySettings(req.workspace)));

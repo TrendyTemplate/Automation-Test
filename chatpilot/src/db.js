@@ -434,3 +434,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions (  -- Web Push: browsers 
   endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, user_agent TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );`);
+addColumn('workspaces', 'payment_json', 'TEXT');     // JSON: bKash / Nagad numbers, advance-payment rule
+addColumn('orders', 'payment_trx', 'TEXT');            // TrxID the customer sent
+addColumn('orders', 'payment_claim', 'REAL');          // amount the customer says they paid
+addColumn('orders', 'payment_check', 'TEXT');          // pending | verified | rejected | reused

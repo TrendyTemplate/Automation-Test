@@ -91,6 +91,11 @@ async function orderDetail(ctx, id, couriers = { connected: [] }) {
       ${o.courier ? `<div class="callout ok mt">${icon('send')}<div><b>${esc(label(o.courier))}</b> · consignment ${esc(o.consignment_id || '—')} · tracking <b>${esc(o.tracking_code || '—')}</b>${o.courier_status ? ` · ${esc(o.courier_status)}` : ''} <a href="#" data-act="track">Refresh status</a></div></div>`
         : couriers.connected?.length ? `<div class="row mt"><span class="hint">Send to courier:</span>${couriers.connected.map((c) => `<button type="button" class="btn sm" data-act="book" data-c="${esc(c)}">${icon('send', 'sm')}${esc(label(c))}</button>`).join('')}</div>`
         : manager(ctx) ? '<p class="hint mt">Connect Steadfast, Pathao or RedX in <a href="#couriers">Couriers</a> to book parcels with one click.</p>' : ''}
+      ${o.payment_trx ? `<div class="callout ${o.payment_check === 'verified' ? 'ok' : o.payment_check === 'pending' ? 'warn' : 'bad'} mt">${icon('card')}<div>
+        <b>${esc(o.payment_method || 'Mobile banking')} TrxID <code>${esc(o.payment_trx)}</code></b>${o.payment_claim ? ` · customer says ${money(o.payment_claim, o.currency)}` : ''}
+        · ${{ pending: 'check it in your app, then verify', verified: 'verified ✓', rejected: 'rejected', reused: '⚠ this TrxID was already used on another order' }[o.payment_check] || ''}
+        ${['pending', 'reused'].includes(o.payment_check) ? `<div class="row mt-s"><input type="number" min="1" id="pay-amt" value="${o.payment_claim || ''}" placeholder="Amount received" style="max-width:160px" aria-label="Amount received">
+          <button type="button" class="btn sm primary" data-act="payok">Verify</button><button type="button" class="btn sm ghost danger" data-act="payno">Not received</button></div>` : ''}</div></div>` : ''}
       ${o.customer_phone ? `<div id="fraud" class="mt"></div>` : ''}
       <div class="row mt"><button class="btn primary" type="submit">Save changes</button><a class="btn" href="#invoice?id=${o.id}">${icon('file')}Invoice</a></div></form>`, (el, close) => {
     const wire = () => $$('[data-x]', el).forEach((b) => { b.onclick = () => { if ($$('.item-row', el).length > 1) b.closest('.item-row').remove(); }; });
@@ -105,6 +110,8 @@ async function orderDetail(ctx, id, couriers = { connected: [] }) {
         await api(`/sales/orders/${o.id}`, { method: 'PUT', body }); close(); toast('Order saved'); ctx.route();
       },
       book: async (b) => { const r = await api(`/sales/orders/${o.id}/courier`, { method: 'POST', body: { courier: b.dataset.c } }); close(); toast(`Booked with ${label(r.courier)} — tracking ${r.tracking_code || r.consignment_id}`); ctx.route(); },
+      payok: async () => { await api(`/sales/orders/${o.id}/payment`, { method: 'POST', body: { ok: true, amount: Number($('#pay-amt', el).value) } }); toast('Payment verified'); close(); ctx.route(); },
+      payno: async () => { await api(`/sales/orders/${o.id}/payment`, { method: 'POST', body: { ok: false } }); toast('Marked as not received'); close(); ctx.route(); },
       track: async () => { const r = await api(`/sales/orders/${o.id}/courier/status`, { method: 'POST' }); toast(`Courier status: ${r.courier_status}`); close(); ctx.route(); },
     }, el);
   }, { wide: true, onClose: () => { if (location.hash.includes('id=')) history.replaceState(null, '', '#orders'); } });
@@ -152,5 +159,22 @@ export async function delivery(ctx) {
   bind({ save: async (f) => {
     const zones = $$('.zone-row', f).map((r) => ({ name: $('[name=name]', r).value, charge: Number($('[name=charge]', r).value), match: $('[name=match]', r).value })).filter((z) => z.name);
     await api('/sales/delivery', { method: 'PUT', body: { enabled: f.enabled.checked, zones, free_over: Number(f.free_over.value) } }); toast('Saved');
+  } }, ctx.view);
+}
+
+/** bKash / Nagad numbers and when to ask for advance payment. */
+export async function payments(ctx) {
+  const p = await api('/sales/payments');
+  ctx.view.innerHTML = `<div class="page-h"><div><h1>Payments</h1><p>Cash on delivery is always on. Add your bKash / Nagad numbers and the assistant tells customers where to pay, collects the Transaction ID (TrxID), and the order waits for you to verify it — nothing is marked paid automatically.</p></div></div>
+    <form class="card" data-act="save" style="max-width:720px">
+      <div class="grid g2">${Object.entries(p.available).map(([k, l]) => `<div><label>${esc(l)} number</label><input name="m_${k}" inputmode="tel" placeholder="01XXXXXXXXX" value="${esc(p.methods[k] || '')}"></div>`).join('')}</div>
+      <label>Account type</label><select name="account_type">${[['personal', 'Personal (customers use Send Money)'], ['merchant', 'Merchant (customers use Payment)'], ['agent', 'Agent (Cash In)']].map(([v, l]) => `<option value="${v}" ${p.account_type === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <label>Advance payment</label><select name="advance">${[['none', 'Not required — cash on delivery'], ['delivery', 'Delivery charge in advance'], ['full', 'Full payment in advance'], ['risky', 'Only for risky customers (many returns)']].map(([v, l]) => `<option value="${v}" ${p.advance === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <label>Extra note for customers <span class="hint">(optional)</span></label><input name="note" maxlength="400" value="${esc(p.note)}" placeholder="e.g. Reference e order number likhben">
+      <button class="btn primary mt" type="submit">Save</button></form>`;
+  bind({ save: async (f) => {
+    const d = formData(f);
+    const methods = Object.fromEntries(Object.keys(p.available).map((k) => [k, d[`m_${k}`] || '']));
+    await api('/sales/payments', { method: 'PUT', body: { methods, account_type: d.account_type, advance: d.advance, note: d.note } }); toast('Saved');
   } }, ctx.view);
 }

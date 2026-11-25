@@ -33,17 +33,17 @@ const NAV = [
 const TABS = ['dashboard', 'chats', 'orders', 'catalog']; // phone bottom bar; everything else lives under "More"
 // Pages grouped under one sidebar entry, shown as tabs.
 const SECTIONS = {
-  brain: [['brain', 'Shop & safety', 'brain'], ['knowledge', 'Knowledge base', 'book'], ['delivery', 'Delivery charges', 'send'], ['hours', 'Business hours', 'clock']],
+  brain: [['brain', 'Shop & safety', 'brain'], ['knowledge', 'Knowledge base', 'book'], ['delivery', 'Delivery charges', 'send'], ['payments', 'Payments', 'card'], ['hours', 'Business hours', 'clock']],
   profile: [['profile', 'Profile', 'users'], ['team', 'Team', 'users'], ['billing', 'Plan & billing', 'card', MANAGERS], ['security', 'Security & privacy', 'lock'], ['referrals', 'Refer & earn', 'gift']],
 };
 const PARENT = { chat: 'chats', ticket: 'support', invoice: 'orders' };
 for (const [parent, tabs] of Object.entries(SECTIONS)) for (const [id] of tabs) PARENT[id] = parent;
-const ROLE_ONLY = { channels: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, delivery: MANAGERS, hours: MANAGERS, couriers: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
+const ROLE_ONLY = { channels: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, delivery: MANAGERS, hours: MANAGERS, payments: MANAGERS, couriers: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
 
 const ROUTES = {
   dashboard: workspace.dashboard, brain: workspace.brain, knowledge: workspace.knowledge, integrations: workspace.integrations,
   welcome: onboard.welcome, learning: onboard.learning,
-  chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: ordersView.orders, invoice: ordersView.invoice, delivery: ordersView.delivery, couriers: couriersView.couriers, customers: insights.customers, hours: automation.hours, analytics: insights.analytics, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
+  chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: ordersView.orders, invoice: ordersView.invoice, delivery: ordersView.delivery, payments: ordersView.payments, couriers: couriersView.couriers, customers: insights.customers, hours: automation.hours, analytics: insights.analytics, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
   profile: account.profile, team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
 };
 const allowed = (roles) => !roles || roles.includes(ctx.me?.role);
