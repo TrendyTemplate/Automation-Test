@@ -1,5 +1,5 @@
 // Rules that work without the AI: comment rules, chat menu (Get Started / ice breakers / menu), business hours.
-import { $, esc, icon, api, toast, bind, formData, modal } from '../ui.js';
+import { $, esc, icon, api, toast, bind, formData, modal, ago } from '../ui.js';
 
 const lines = (a) => (a || []).join('\n');
 const split = (t) => String(t || '').split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
@@ -83,5 +83,52 @@ export async function hours(ctx) {
       await api('/sales/hours', { method: 'PUT', body: { enabled: Boolean(d.enabled), tz: d.tz, days, away: d.away, ai_after_hours: Boolean(d.ai_after_hours) } });
       toast('Saved'); ctx.route();
     },
+  }, ctx.view);
+}
+
+/** Broadcasts: one message to many customers, inside Meta's rules. */
+export async function broadcasts(ctx) {
+  const [list, chans] = await Promise.all([api('/sales/broadcasts'), api('/sales/channels')]);
+  const PL = { messenger: 'Messenger', instagram: 'Instagram', whatsapp: 'WhatsApp' };
+  ctx.view.innerHTML = `
+    <div class="page-h"><div><h1>Broadcasts</h1><p>Send news or an offer to many customers at once. Meta only allows this to people who wrote in the last 24 hours — on WhatsApp, everyone else needs an approved template (Meta charges per template message). Anyone who writes "stop" is never messaged again.</p></div></div>
+    <form class="card" data-act="send" style="max-width:820px">
+      <div class="grid g3"><div><label>From</label><select name="channel_id">${chans.map((c) => `<option value="${c.id}" data-p="${c.platform}">${esc(c.name || '')} · ${PL[c.platform]}</option>`).join('')}</select></div>
+        <div><label>To</label><select name="segment"><option value="all">Everyone</option><option value="buyers">Buyers</option><option value="not_bought">Haven't bought yet</option></select></div>
+        <div><label>With label <span class="hint">(optional)</span></label><input name="label" placeholder="vip"></div></div>
+      <label>Message <span class="hint">({{name}} = first name)</span></label><textarea name="text" rows="3" maxlength="2000" placeholder="আসসালামু আলাইকুম {{name}}! নতুন কালেকশন এসেছে…"></textarea>
+      <div id="tpl"></div>
+      <label class="check"><input type="checkbox" name="confirm_optin"> These customers agreed to get messages from my shop</label>
+      <div class="row mt"><button type="button" class="btn" data-act="preview">${icon('users')}Who gets it?</button><span class="hint" id="pv"></span><span class="spacer"></span><button class="btn primary" type="submit">${icon('send')}Send</button></div></form>
+    <div class="card pad-0 mt"><div class="table-wrap"><table><thead><tr><th>When</th><th>From</th><th>Message</th><th>Sent</th><th>Status</th></tr></thead><tbody>
+      ${list.map((b) => `<tr><td class="nowrap hint">${ago(b.created_at)}</td><td>${esc(b.channel_name || '')} <span class="pf ${esc(b.platform)}">${PL[b.platform] || ''}</span></td>
+        <td class="truncate" style="max-width:320px">${esc(b.body || (b.template ? `Template: ${b.template.name}` : ''))}</td>
+        <td>${b.sent}/${b.total}${b.failed ? ` <span class="badge bad">${b.failed} failed</span>` : ''}${b.skipped ? ` <span class="hint">· ${b.skipped} not allowed</span>` : ''}</td>
+        <td>${b.status === 'sending' ? `<span class="badge warn">Sending</span> <button class="btn sm ghost" data-act="cancel" data-id="${b.id}">Stop</button>` : `<span class="badge ${b.status === 'done' ? 'ok' : ''}">${esc(b.status)}</span>`}</td></tr>`).join('')
+      || '<tr><td colspan="5" class="hint">No broadcasts yet.</td></tr>'}</tbody></table></div></div>`;
+  const form = ctx.view.querySelector('form');
+  let templates = [];
+  const body = () => {
+    const d = formData(form); const t = templates.find((x) => x.name === d.template);
+    return { channel_id: Number(d.channel_id), segment: d.segment, label: d.label || '', text: d.text || '', confirm_optin: Boolean(d.confirm_optin),
+      template: t ? { name: t.name, language: t.language, params: Array.from({ length: t.params }, (_, i) => d[`tp${i}`] || '') } : null };
+  };
+  const loadTpl = async () => {
+    const sel = form.channel_id.selectedOptions[0];
+    const box = $('#tpl', ctx.view);
+    if (sel?.dataset.p !== 'whatsapp') { box.innerHTML = ''; templates = []; return; }
+    templates = await api(`/sales/channels/${sel.value}/templates`).catch(() => []);
+    box.innerHTML = `<label>WhatsApp template for people outside 24 hours <span class="hint">(approved in WhatsApp Manager)</span></label><select name="template"><option value="">— none: only people inside 24 hours —</option>${templates.map((t) => `<option value="${esc(t.name)}">${esc(t.name)} (${esc(t.language)}) — ${esc(t.body.slice(0, 60))}</option>`).join('')}</select><div id="tparams"></div>`;
+    box.querySelector('select').addEventListener('change', (e) => {
+      const t = templates.find((x) => x.name === e.target.value);
+      $('#tparams', box).innerHTML = t ? Array.from({ length: t.params }, (_, i) => `<input name="tp${i}" placeholder="{{${i + 1}}} e.g. {{name}}" class="mt-s">`).join('') : '';
+    });
+  };
+  if (chans.length) loadTpl();
+  form.channel_id?.addEventListener('change', loadTpl);
+  bind({
+    preview: async () => { const p = await api('/sales/broadcasts/preview', { method: 'POST', body: body() }); $('#pv', ctx.view).textContent = `${p.total} will get it${p.template ? ` (${p.template} by template)` : ''} · ${p.outside_window} outside 24 hours · ${p.opted_out} said stop`; },
+    send: async () => { const r = await api('/sales/broadcasts', { method: 'POST', body: body() }); toast(`Sending to ${r.total} customers`); ctx.route(); },
+    cancel: async (b) => { await api(`/sales/broadcasts/${b.dataset.id}/cancel`, { method: 'POST' }); ctx.route(); },
   }, ctx.view);
 }

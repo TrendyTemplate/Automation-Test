@@ -23,6 +23,7 @@ const NAV = [
   { id: 'saleslab', label: 'Test chat', icon: 'flask' },
   { sep: true, roles: MANAGERS },
   { id: 'channels', label: 'Channels', icon: 'plug', roles: MANAGERS },
+  { id: 'broadcasts', label: 'Broadcasts', icon: 'megaphone', roles: MANAGERS },
   { id: 'couriers', label: 'Couriers', icon: 'send', roles: MANAGERS },
   { id: 'brain', label: 'Assistant', icon: 'brain', roles: MANAGERS },
   { id: 'integrations', label: 'Alerts', icon: 'bell', roles: MANAGERS },
@@ -38,12 +39,12 @@ const SECTIONS = {
 };
 const PARENT = { chat: 'chats', ticket: 'support', invoice: 'orders' };
 for (const [parent, tabs] of Object.entries(SECTIONS)) for (const [id] of tabs) PARENT[id] = parent;
-const ROLE_ONLY = { channels: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, delivery: MANAGERS, hours: MANAGERS, payments: MANAGERS, couriers: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
+const ROLE_ONLY = { channels: MANAGERS, brain: MANAGERS, knowledge: MANAGERS, delivery: MANAGERS, hours: MANAGERS, payments: MANAGERS, couriers: MANAGERS, broadcasts: MANAGERS, integrations: MANAGERS, billing: MANAGERS };
 
 const ROUTES = {
   dashboard: workspace.dashboard, brain: workspace.brain, knowledge: workspace.knowledge, integrations: workspace.integrations,
   welcome: onboard.welcome, learning: onboard.learning,
-  chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: ordersView.orders, invoice: ordersView.invoice, delivery: ordersView.delivery, payments: ordersView.payments, couriers: couriersView.couriers, customers: insights.customers, hours: automation.hours, analytics: insights.analytics, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
+  chats: sales.chats, chat: (c, p) => sales.chats(c, p), orders: ordersView.orders, invoice: ordersView.invoice, delivery: ordersView.delivery, payments: ordersView.payments, couriers: couriersView.couriers, customers: insights.customers, hours: automation.hours, broadcasts: automation.broadcasts, analytics: insights.analytics, catalog: sales.catalog, channels: sales.channels, saleslab: sales.saleslab,
   profile: account.profile, team: account.team, billing: account.billing, security: account.security, referrals: account.referrals, support: account.support, ticket: account.ticket,
 };
 const allowed = (roles) => !roles || roles.includes(ctx.me?.role);

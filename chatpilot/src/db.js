@@ -438,3 +438,14 @@ addColumn('workspaces', 'payment_json', 'TEXT');     // JSON: bKash / Nagad numb
 addColumn('orders', 'payment_trx', 'TEXT');            // TrxID the customer sent
 addColumn('orders', 'payment_claim', 'REAL');          // amount the customer says they paid
 addColumn('orders', 'payment_check', 'TEXT');          // pending | verified | rejected | reused
+db.exec(`CREATE TABLE IF NOT EXISTS broadcasts (  -- one message to many customers (inside Meta's rules)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  segment TEXT, label TEXT, body TEXT, template_json TEXT,
+  total INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'sending', error TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')), finished_at TEXT
+);`);
+addColumn('conversations', 'opted_out', 'INTEGER NOT NULL DEFAULT 0'); // wrote "stop": no broadcasts

@@ -129,7 +129,7 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   assert.equal(sent.length, 1);
 
   // Every page renders; no console errors
-  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'customers', 'analytics', 'couriers', 'delivery', 'hours', 'payments', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
+  for (const v of ['dashboard', 'welcome', 'learning', 'chats', 'orders', 'customers', 'analytics', 'couriers', 'delivery', 'hours', 'payments', 'broadcasts', 'catalog', 'saleslab', 'channels', 'brain', 'knowledge', 'integrations', 'profile', 'team', 'billing', 'security', 'referrals', 'support']) {
     await page.goto(`${base}/app#${v}`);
     await page.waitForSelector('h1', { timeout: 5000 });
   }

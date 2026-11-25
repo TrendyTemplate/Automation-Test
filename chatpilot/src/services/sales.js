@@ -425,6 +425,8 @@ export function ingest(channel, ev) {
   run(`INSERT INTO chat_messages (workspace_id, conversation_id, direction, source, external_id, body, status, created_at, attachments_json) VALUES (?,?,?,?,?,?,?,?,?)`,
     conv.workspace_id, conv.id, 'in', 'customer', ev.messageId, seal(conv.workspace_id, 'chat_messages.body', body), 'received',
     new Date(ev.timestamp).toISOString().replace('T', ' ').slice(0, 19), atts.length ? JSON.stringify(atts.slice(0, 5)) : null);
+  if (/^\s*(stop|unsubscribe|বন্ধ|বন্ধ করুন|message diben na)\s*[.!]*\s*$/i.test(ev.text || '')) run('UPDATE conversations SET opted_out = 1 WHERE id = ?', conv.id);
+  else if (/^\s*(start|subscribe)\s*$/i.test(ev.text || '')) run('UPDATE conversations SET opted_out = 0 WHERE id = ?', conv.id);
   // A newer customer message makes older unsent AI drafts obsolete.
   run(`UPDATE chat_messages SET status = 'rejected' WHERE conversation_id = ? AND status = 'draft' AND source = 'ai'`, conv.id);
   run(`UPDATE conversations SET last_inbound_at = datetime('now'), unread = unread + 1, status = CASE WHEN status = 'closed' THEN 'open' ELSE status END,

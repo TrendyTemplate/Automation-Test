@@ -123,7 +123,6 @@ async function graphPost(path, token, body) {
   return json;
 }
 
-/** Send a text message to a customer. Returns the platform message ids. */
 /**
  * Send a text message to a customer, optionally with tap-to-answer buttons (Messenger/Instagram quick replies,
  * WhatsApp reply buttons) on the last part. Returns the platform message ids.
@@ -148,6 +147,14 @@ export async function sendText(channel, token, customerId, text, { buttons = [] 
     }
   }
   return ids;
+}
+
+/** WhatsApp: send an approved message template (the only way to message someone outside the 24-hour window). */
+export async function sendTemplate(channel, token, to, name, language, params = []) {
+  if (channel.platform !== 'whatsapp') throw new Error('Templates are WhatsApp only');
+  const out = await graphPost(`${encodeURIComponent(channel.external_id)}/messages`, token, { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'template',
+    template: { name, language: { code: language }, ...(params.length ? { components: [{ type: 'body', parameters: params.map((text) => ({ type: 'text', text })) }] } : {}) } });
+  return out.messages?.[0]?.id || null;
 }
 
 /** Send a photo (e.g. a product picture) by public https URL. */

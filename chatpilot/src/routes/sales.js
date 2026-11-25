@@ -13,6 +13,7 @@ import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings,
 import { notifyOrderStatus } from '../services/notifications.js';
 import { subscribe, emit } from '../services/events.js';
 import * as webpush from '../services/webpush.js';
+import { preview as broadcastPreview, createBroadcast, listBroadcasts, listTemplates } from '../services/broadcasts.js';
 import { paymentSettings, validatePayment, verifyClaim, METHODS } from '../services/payments.js';
 import { commentRules, validateRules, validateProfile, applyProfile, saveProfile, businessHours, validateHours, isOpen } from '../services/automation.js';
 import { courierStatus, connectCourier, disconnectCourier, bookParcel, refreshStatus, fraudCheck, COURIERS } from '../services/couriers.js';
@@ -477,6 +478,23 @@ r.post('/push', (req, res) => {
 });
 r.delete('/push', (req, res) => { webpush.unsubscribe(req.user.id, req.body?.endpoint); res.json({ ok: true }); });
 r.post('/push/test', async (req, res) => res.json({ delivered: await webpush.pushToWorkspace(wsId(req), { title: 'ChatPilot AI', body: 'Notifications are on ✅', url: '#dashboard', tag: 'test' }, { userId: req.user.id }) }));
+
+// ----- broadcasts (24-hour window / WhatsApp templates)
+r.get('/broadcasts', manage, (req, res) => res.json(listBroadcasts(wsId(req))));
+r.post('/broadcasts/preview', manage, (req, res) => { try { res.json(broadcastPreview(wsId(req), req.body || {})); } catch (e) { res.status(e.status || 400).json({ error: e.message }); } });
+r.post('/broadcasts', manage, (req, res) => {
+  try {
+    const b = createBroadcast(wsId(req), req.user.id, req.body || {});
+    audit(req, 'broadcast.create', b.id, { total: b.total });
+    res.json({ id: b.id, total: b.total });
+  } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+r.post('/broadcasts/:id/cancel', manage, (req, res) => { run(`UPDATE broadcasts SET status = 'cancelled' WHERE id = ? AND workspace_id = ? AND status = 'sending'`, int(req.params.id), wsId(req)); res.json({ ok: true }); });
+r.get('/channels/:id/templates', manage, async (req, res) => {
+  const ch = one('SELECT * FROM channels WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!ch) return res.status(404).json({ error: 'Not found' });
+  try { res.json(await listTemplates(ch)); } catch (e) { res.status(502).json({ error: e.message }); }
+});
 
 // ----- rules that run without the AI
 r.put('/channels/:id/rules', manage, (req, res) => {
