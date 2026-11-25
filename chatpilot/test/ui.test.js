@@ -156,6 +156,17 @@ test('full customer journey in the browser', { skip: !chromium && 'playwright no
   await page.click('.menu button:has-text("Dark")');
   assert.equal(await page.evaluate(() => document.documentElement.getAttribute('data-theme')), 'dark');
 
+  // Bangla interface: menu and headings change, customer messages don't
+  await page.goto(`${base}/app#profile`);
+  await page.selectOption('#ui-lang', 'bn');
+  await page.waitForSelector('#nav a:has-text("অর্ডার")');
+  await page.goto(`${base}/app#orders`);
+  await page.waitForSelector('h1:has-text("অর্ডার")');
+  await page.goto(`${base}/app#chats`);
+  await page.waitForSelector('.convo-list');
+  assert.match(await page.textContent('.convo-list'), /The Black Hoodie is BDT 1,200/, 'chat text untouched');
+  await page.evaluate(() => localStorage.setItem('mp:lang', 'en'));
+
   assert.equal(await page.evaluate(() => window.__xss), undefined);
   assert.deepEqual(errors, []);
 });

@@ -7,6 +7,7 @@ import * as ordersView from './views/orders.js';
 import * as couriersView from './views/couriers.js';
 import * as insights from './views/insights.js';
 import * as automation from './views/automation.js';
+import { startI18n } from './i18n.js';
 
 const ctx = { me: null, view: $('#view'), counts: {} };
 const MANAGERS = ['owner', 'admin'];
@@ -154,6 +155,7 @@ function themeIcon() {
 
 async function init() {
   applyTheme();
+  startI18n();
   $('#brand-mark').innerHTML = icon('logo');
   $('#search-icon').innerHTML = icon('search');
   $('#help-btn').innerHTML = icon('help');

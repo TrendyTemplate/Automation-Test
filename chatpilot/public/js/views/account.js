@@ -1,3 +1,4 @@
+import { getLang, setLang } from '../i18n.js';
 import { $, esc, icon, api, toast, bind, formData, badge, ago, fmtDate, fmtDay, money, num, empty, modal, confirmBox, switchEl, avatar, label } from '../ui.js';
 
 /** Ask for permission and register this browser for Web Push. */
@@ -21,6 +22,7 @@ export async function profile(ctx) {
         <div class="row nowrap mb">${avatar(p.name, p.email, 'lg')}<div><b>${esc(p.name || p.email)}</b><div class="hint">${esc(p.email)} · ${esc(label(me.role))} of ${esc(me.workspace.name)}</div></div></div>
         <label>Full name</label><input name="name" value="${esc(p.name)}" autocomplete="name">
         <label>Theme</label><select name="ui_theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${p.ui_theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <label>Language</label><select id="ui-lang" data-no-i18n><option value="en" ${getLang() === 'en' ? 'selected' : ''}>English</option><option value="bn" ${getLang() === 'bn' ? 'selected' : ''}>বাংলা</option></select>
         <button class="btn primary mt" type="submit">Save profile</button></form>
       <div class="col" style="gap:16px">
         <div class="card" id="push-card"><h3>${icon('bell')} Phone & desktop notifications</h3><p class="hint">Get a notification for a new order or when a customer needs a person — even when ChatPilot is closed. On a phone, first add ChatPilot to your home screen (browser menu → Install app / Add to Home Screen).</p>
@@ -37,6 +39,7 @@ export async function profile(ctx) {
             <dt>Member since</dt><dd>${fmtDay(p.created_at)}</dd></dl></div>
       </div>
     </div>`;
+  ctx.view.querySelector('#ui-lang')?.addEventListener('change', (e) => setLang(e.target.value));
   const pushSt = (t) => { const e = document.getElementById('push-st'); if (e) e.textContent = t; };
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) pushSt('This browser does not support notifications.');
   else api('/sales/push').then((p) => pushSt(p.devices ? `On for ${p.devices} device${p.devices > 1 ? 's' : ''}` : 'Off')).catch(() => {});
