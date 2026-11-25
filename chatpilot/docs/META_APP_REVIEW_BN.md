@@ -50,6 +50,11 @@ ChatPilot একটাই **Meta অ্যাপ** ব্যবহার কর�
 **App use-case বর্ণনা (English):**
 > ChatPilot is a customer-service and sales inbox for small online shops. Owners sign up with "Continue with Facebook", which creates their account and connects the Pages they select in one step. Shop owners connect their Facebook Page, Instagram professional account and WhatsApp Business number. When a customer asks about a product (price, size, stock, delivery), ChatPilot's assistant drafts a reply using only the shop's own product catalog and policies. The shop owner approves each reply (Draft mode) or allows automatic replies for routine questions (Auto-pilot). Complaints, refunds and anything uncertain are always handed to a human. Replies are only sent within Meta's 24-hour messaging window, in response to the customer's message. It learns the business's own reply style and facts from the Page's conversations and comment replies; this data stays in that business's workspace and is deleted when the Page is disconnected. It also replies to comments on the business's posts. Owners can disconnect at any time, which deletes the conversations and everything learned from them.
 
+### নতুন যা লাগবে (রাউন্ড ২)
+- **Human Agent** feature — শপের মানুষ ২৪ ঘণ্টা পরে ৭ দিন পর্যন্ত উত্তর দিতে পারে। ফর্মে লিখুন: *"Only messages typed by a human agent in our inbox are sent with the HUMAN_AGENT tag; AI and automated messages are never tagged."* না পেলে Admin → Settings-এ `meta_human_agent` বন্ধ করুন।
+- Webhook fields (Messenger): `messages, message_echoes, messaging_postbacks, message_deliveries, message_reads, feed`; WhatsApp: `messages, message_template_status_update, message_template_quality_update, phone_number_quality_update`।
+- Graph API ভার্সন v24.0 (`META_GRAPH_VERSION`); App Dashboard-এর webhook ভার্সনও একই রাখুন।
+
 ## ধাপ ৪ — Screencast (প্রতিটা permission-এর জন্য দেখাতে হবে)
 একটা ৩–৫ মিনিটের ভিডিও (ইংরেজি UI, স্ক্রিনে কী হচ্ছে লেখা থাকলে ভালো), টেস্ট Page আর টেস্ট WhatsApp নম্বর দিয়ে:
 1. `https://আপনার-ডোমেইন/signup` → **Continue with Facebook** → Facebook ডায়ালগ (permission স্ক্রিন স্পষ্ট দেখান) → Page বেছে নিন → সরাসরি ChatPilot-এ "You're live" পেজ।

@@ -71,6 +71,16 @@ Assistant → **Business hours**: দিনভিত্তিক সময় (�
 - Settings → **Phone & desktop notifications → Turn on**: নতুন অর্ডার, রিস্কি অর্ডার, পেমেন্ট যাচাই আর "কাস্টমার আপনাকে চাইছে" — অ্যাপ বন্ধ থাকলেও নোটিফিকেশন আসে (iPhone-এ আগে Home Screen-এ যোগ করতে হয়)।
 - Settings → **Language → বাংলা**: মেনু, শিরোনাম, বাটন বাংলায়। কাস্টমারের মেসেজ কখনো বদলায় না।
 
+## SMS, bKash লিংক, ওয়েবসাইট থেকে প্রোডাক্ট
+- Assistant → **Payments**: SMS প্রোভাইডার (BulkSMSBD / SSL Wireless / Alpha SMS) — কোন কোন আপডেটে SMS যাবে বেছে নিন; রিস্কি COD অর্ডারে কাস্টমার এক ট্যাপে কনফার্ম করে (অর্ডারে ✅ বা ❌ দেখায়)। **bKash** মার্চেন্ট key দিলে অর্ডার থেকে "Send bKash link" — পেমেন্ট হলেই অর্ডার Paid।
+- Products → **From website**: WooCommerce বা Shopify key দিন — সব প্রোডাক্ট আসে, প্রতিদিন আপডেট হয়।
+- ভয়েস মেসেজ: Admin → Settings → transcription key দিলে AI ভয়েস শুনে (লেখায় রূপান্তর করে) উত্তর দেয়।
+- Assistant → Customers & team: অর্ডার আপডেট মেসেজ, টিমে পালা করে চ্যাট ভাগ, "আমি AI" বলা, Overdue সময়, চ্যাট বন্ধ হলে রেটিং চাওয়া।
+
+## নিরাপত্তা ও রক্ষণাবেক্ষণ
+- প্রতিদিন ব্যাকআপ: `data/backups/` (Docker-এ `chatpilot-data` ভলিউমে), `BACKUP_KEEP` (ডিফল্ট ১৪)। ফেরত আনতে: অ্যাপ বন্ধ করে ব্যাকআপ ফাইলটা `chatpilot.db` নামে কপি করুন।
+- মনিটরিং: `GET /health/ready` — ডেটাবেস, worker, ব্যাকআপ, আটকে থাকা webhook/মেসেজ, ডিসকানেক্টেড পেজ। UptimeRobot-এর মতো সার্ভিসে যোগ করুন।
+
 ## টেকনিক্যাল
 - Webhook: `GET/POST /api/social/webhook` — প্রতিটি POST-এর `X-Hub-Signature-256` অ্যাপ সিক্রেট দিয়ে যাচাই হয়; ভুল সিগনেচার = 403। একই মেসেজ Meta আবার পাঠালে ডুপ্লিকেট হয় না।
 - টোকেন, অ্যাপ সিক্রেট ও সব চ্যাট মেসেজ workspace-ভিত্তিক AES-256-GCM এনক্রিপশনে সংরক্ষিত।
