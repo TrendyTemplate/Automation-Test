@@ -164,15 +164,29 @@ export async function delivery(ctx) {
 
 /** bKash / Nagad numbers and when to ask for advance payment. */
 export async function payments(ctx) {
-  const p = await api('/sales/payments');
+  const [p, coupons] = await Promise.all([api('/sales/payments'), api('/sales/coupons')]);
   ctx.view.innerHTML = `<div class="page-h"><div><h1>Payments</h1><p>Cash on delivery is always on. Add your bKash / Nagad numbers and the assistant tells customers where to pay, collects the Transaction ID (TrxID), and the order waits for you to verify it — nothing is marked paid automatically.</p></div></div>
     <form class="card" data-act="save" style="max-width:720px">
       <div class="grid g2">${Object.entries(p.available).map(([k, l]) => `<div><label>${esc(l)} number</label><input name="m_${k}" inputmode="tel" placeholder="01XXXXXXXXX" value="${esc(p.methods[k] || '')}"></div>`).join('')}</div>
       <label>Account type</label><select name="account_type">${[['personal', 'Personal (customers use Send Money)'], ['merchant', 'Merchant (customers use Payment)'], ['agent', 'Agent (Cash In)']].map(([v, l]) => `<option value="${v}" ${p.account_type === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <label>Advance payment</label><select name="advance">${[['none', 'Not required — cash on delivery'], ['delivery', 'Delivery charge in advance'], ['full', 'Full payment in advance'], ['risky', 'Only for risky customers (many returns)']].map(([v, l]) => `<option value="${v}" ${p.advance === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <label>Extra note for customers <span class="hint">(optional)</span></label><input name="note" maxlength="400" value="${esc(p.note)}" placeholder="e.g. Reference e order number likhben">
-      <button class="btn primary mt" type="submit">Save</button></form>`;
-  bind({ save: async (f) => {
+      <button class="btn primary mt" type="submit">Save</button></form>
+    <div class="card mt" style="max-width:720px"><h3>${icon('gift')} Coupon codes</h3><p class="hint">When a customer gives a code in chat, the discount is checked and applied by ChatPilot — the AI never invents discounts.</p>
+      <div class="table-wrap"><table><thead><tr><th>Code</th><th>Discount</th><th>Min. order</th><th>Used</th><th>Expires</th><th></th></tr></thead><tbody>
+        ${coupons.map((c) => `<tr><td><b>${esc(c.code)}</b></td><td>${c.kind === 'percent' ? `${c.value}%` : c.kind === 'fixed' ? esc(String(c.value)) : 'Free delivery'}</td><td>${c.min_order || '—'}</td>
+          <td>${c.used}${c.max_uses ? ` / ${c.max_uses}` : ''}</td><td>${esc(c.expires_at || '—')}</td>
+          <td class="nowrap"><label class="check" style="margin:0"><input type="checkbox" data-cp="${c.id}" ${c.active ? 'checked' : ''}> On</label> <button type="button" class="btn sm ghost danger" data-act="cpdel" data-id="${c.id}" aria-label="Delete">${icon('trash', 'sm')}</button></td></tr>`).join('') || '<tr><td colspan="6" class="hint">No coupons yet.</td></tr>'}</tbody></table></div>
+      <form data-act="cpadd" class="grid g3 mt"><div><label>Code</label><input name="code" required placeholder="EID20"></div>
+        <div><label>Type</label><select name="kind"><option value="percent">Percent off</option><option value="fixed">Amount off</option><option value="free_delivery">Free delivery</option></select></div>
+        <div><label>Value</label><input name="value" type="number" min="0" placeholder="20"></div>
+        <div><label>Minimum order</label><input name="min_order" type="number" min="0" placeholder="0"></div><div><label>Max uses</label><input name="max_uses" type="number" min="1" placeholder="unlimited"></div>
+        <div><label>Expires</label><input name="expires_at" type="date"></div>
+        <div><button class="btn primary" type="submit">${icon('plus')}Add coupon</button></div></form></div>`;
+  ctx.view.querySelectorAll('[data-cp]').forEach((x) => x.addEventListener('change', () => api(`/sales/coupons/${x.dataset.cp}`, { method: 'PUT', body: { active: x.checked } }).then(() => toast('Saved'))));
+  bind({ cpadd: async (f) => { await api('/sales/coupons', { method: 'POST', body: formData(f) }); toast('Coupon added'); ctx.route(); },
+    cpdel: async (b) => { await api(`/sales/coupons/${b.dataset.id}`, { method: 'DELETE' }); ctx.route(); },
+    save: async (f) => {
     const d = formData(f);
     const methods = Object.fromEntries(Object.keys(p.available).map((k) => [k, d[`m_${k}`] || '']));
     await api('/sales/payments', { method: 'PUT', body: { methods, account_type: d.account_type, advance: d.advance, note: d.note } }); toast('Saved');

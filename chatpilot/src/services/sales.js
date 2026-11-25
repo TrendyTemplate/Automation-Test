@@ -13,6 +13,7 @@ import { priceOrder, orderSummary, createOrder, deliveryText } from './orders.js
 import { emit } from './events.js';
 import { moderateComment, hideComment, afterHours, hoursText } from './automation.js';
 import { paymentText, recordClaim } from './payments.js';
+import { sendPurchase } from './capi.js';
 import { sendTelegram, sendSlack } from './notify.js';
 import { pushToWorkspace } from './webpush.js';
 import { appUrl } from '../settings.js';
@@ -38,7 +39,7 @@ const SALES_SCHEMA = {
       description: 'none = no order yet; collecting = customer wants to buy, details still missing; awaiting_confirmation = items + name + phone + address are known and you are asking the customer to confirm; confirmed = in their LATEST message the customer clearly confirmed the order summary you showed them',
     },
     order: {
-      type: 'object', additionalProperties: false, required: ['items', 'customer_name', 'phone', 'address', 'delivery_zone', 'note'],
+      type: 'object', additionalProperties: false, required: ['items', 'customer_name', 'phone', 'address', 'delivery_zone', 'coupon', 'note'],
       properties: {
         items: {
           type: 'array', description: 'Products the customer wants to order (catalog ids only)',
@@ -47,6 +48,7 @@ const SALES_SCHEMA = {
         },
         customer_name: str('Name for delivery, or empty'), phone: str('Phone number, or empty'),
         address: str('Full delivery address, or empty'), delivery_zone: str('Name of the delivery zone the address falls in (from the delivery charges list), or empty'),
+        coupon: str('Coupon / promo code the customer gave, exactly as written, or empty. The system checks it — never promise a discount yourself.'),
         note: str('Delivery note / special request, or empty'),
       },
     },
@@ -68,7 +70,8 @@ export function catalogText(wsId) {
   const items = all('SELECT * FROM products WHERE workspace_id = ? AND active = 1 ORDER BY id', wsId);
   if (!items.length) return '(No products in the catalog yet.)';
   return items.map((p) => [`[id ${p.id}] ${p.name}${p.sku ? ` (SKU ${p.sku})` : ''} — ${money(p.price, p.currency)}`,
-    p.stock == null ? '' : p.stock > 0 ? `in stock: ${p.stock}` : 'OUT OF STOCK',
+    p.variant_stock ? `stock by option (order.items.variant must be one of these exactly): ${Object.entries(JSON.parse(p.variant_stock)).map(([k, v]) => `${k} ${v > 0 ? v : 'OUT'}`).join(', ')}`
+      : p.stock == null ? '' : p.stock > 0 ? `in stock: ${p.stock}` : 'OUT OF STOCK',
     p.variants ? `options: ${p.variants}` : '', p.description ? `details: ${p.description}` : '', p.image_url ? `photo: ${p.image_url}` : '']
     .filter(Boolean).join(' | ')).join('\n');
 }
@@ -280,7 +283,7 @@ export async function respond(conversationId) {
   const name = String(o.customer_name || conv.customer_name || '').slice(0, 120);
   const phone = String(o.phone || conv.customer_phone || '').slice(0, 40);
   const address = String(o.address || conv.customer_address || '').slice(0, 500);
-  const priced = priceOrder(ws.id, o.items, { address, zone: o.delivery_zone });
+  const priced = priceOrder(ws.id, o.items, { address, zone: o.delivery_zone, coupon: o.coupon });
   let reply = String(d.reply || '').trim();
   let orderId = null;
   const orderReady = priced.lines.length && !priced.problems.length && name && phone && address;
@@ -335,6 +338,7 @@ export async function respond(conversationId) {
       }
     } catch { /* fraud check is best effort */ }
     logActivity(ws.id, 'order_created', { conversation: conv.id, order: orderId, total: priced.total, currency: priced.currency, from: name });
+    await sendPurchase(orderId); // tell Meta Ads (when the shop set up the Conversions API)
     await alert(ws, `🛒 New ${PLATFORMS[channel.platform].label} order #${orderId}: ${money(priced.total, priced.currency)} from ${name}\n${appUrl()}/app#orders`,
       { title: `🛒 New order #${orderId}`, body: `${money(priced.total, priced.currency)} · ${PLATFORMS[channel.platform].label}`, url: `#orders`, tag: `order-${orderId}` });
   }

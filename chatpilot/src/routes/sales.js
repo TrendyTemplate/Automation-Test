@@ -13,6 +13,7 @@ import { STATUSES, PAYMENT, createOrder, setStatus, editOrder, deliverySettings,
 import { notifyOrderStatus } from '../services/notifications.js';
 import { subscribe, emit } from '../services/events.js';
 import * as webpush from '../services/webpush.js';
+import { capiSettings, saveCapi } from '../services/capi.js';
 import { preview as broadcastPreview, createBroadcast, listBroadcasts, listTemplates } from '../services/broadcasts.js';
 import { paymentSettings, validatePayment, verifyClaim, METHODS } from '../services/payments.js';
 import { commentRules, validateRules, validateProfile, applyProfile, saveProfile, businessHours, validateHours, isOpen } from '../services/automation.js';
@@ -247,6 +248,13 @@ function productInput(b) {
   if (!/^[A-Z]{3}$/.test(p.currency)) throw new Error('Currency must be a 3-letter code like BDT or USD');
   if (p.stock != null && !(p.stock >= 0)) throw new Error('Stock must be 0 or more (leave empty if not tracked)');
   if (p.image_url && !/^https:\/\//.test(p.image_url)) throw new Error('Image URL must start with https://');
+  // "M:5, L:0, XL:3" or {"M":5} → per-option stock; the total stock follows it.
+  const vs = typeof b.variant_stock === 'object' && b.variant_stock ? Object.entries(b.variant_stock)
+    : String(b.variant_stock || '').split(/[,\n]/).map((x) => x.split(':')).filter((x) => x.length === 2);
+  const clean = vs.slice(0, 60).map(([k, v]) => [s(k, 60), int(v)]).filter(([k]) => k);
+  for (const [k, v] of clean) if (!(v >= 0)) throw new Error(`Stock for "${k}" must be 0 or more`);
+  p.variant_stock = clean.length ? JSON.stringify(Object.fromEntries(clean)) : null;
+  if (p.variant_stock) p.stock = clean.reduce((a, [, v]) => a + v, 0);
   return p;
 }
 r.get('/products', (req, res) => res.json(all('SELECT * FROM products WHERE workspace_id = ? ORDER BY active DESC, name', wsId(req))));
@@ -254,8 +262,8 @@ const productRoom = (req) => effectivePlan(req.workspace).products - one('SELECT
 r.post('/products', manage, (req, res) => {
   if (productRoom(req) <= 0) return res.status(402).json({ error: `Your plan's product limit is reached (${effectivePlan(req.workspace).products}). Upgrade or remove old products.` });
   let p; try { p = productInput(req.body || {}); } catch (e) { return bad(res, e.message); }
-  const id = run(`INSERT INTO products (workspace_id, name, sku, description, variants, price, currency, stock, image_url, active) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    wsId(req), p.name, p.sku, p.description, p.variants, p.price, p.currency, p.stock, p.image_url, p.active).lastInsertRowid;
+  const id = run(`INSERT INTO products (workspace_id, name, sku, description, variants, price, currency, stock, image_url, active, variant_stock) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    wsId(req), p.name, p.sku, p.description, p.variants, p.price, p.currency, p.stock, p.image_url, p.active, p.variant_stock).lastInsertRowid;
   res.json(one('SELECT * FROM products WHERE id = ?', id));
 });
 r.post('/products/import', manage, (req, res) => {
@@ -281,8 +289,8 @@ r.put('/products/:id', manage, (req, res) => {
   const ex = one('SELECT id FROM products WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
   if (!ex) return res.status(404).json({ error: 'Not found' });
   let p; try { p = productInput(req.body || {}); } catch (e) { return bad(res, e.message); }
-  run('UPDATE products SET name=?, sku=?, description=?, variants=?, price=?, currency=?, stock=?, image_url=?, active=? WHERE id=?',
-    p.name, p.sku, p.description, p.variants, p.price, p.currency, p.stock, p.image_url, p.active, ex.id);
+  run('UPDATE products SET name=?, sku=?, description=?, variants=?, price=?, currency=?, stock=?, image_url=?, active=?, variant_stock=? WHERE id=?',
+    p.name, p.sku, p.description, p.variants, p.price, p.currency, p.stock, p.image_url, p.active, p.variant_stock, ex.id);
   res.json(one('SELECT * FROM products WHERE id = ?', ex.id));
 });
 r.delete('/products/:id', manage, (req, res) => {
@@ -410,7 +418,7 @@ r.post('/orders', (req, res) => {
   const b = req.body || {};
   const name = s(b.customer_name, 120); const phone = s(b.customer_phone, 40); const address = s(b.customer_address, 500);
   if (!name || !phone || !address) return bad(res, 'Name, phone and address are required');
-  const priced = priceOrder(wsId(req), b.items, { address, zone: b.delivery_zone, discount: b.discount });
+  const priced = priceOrder(wsId(req), b.items, { address, zone: b.delivery_zone, discount: b.discount, coupon: b.coupon });
   if (!priced.lines.length || priced.problems.length) return bad(res, priced.problems.join('; ') || 'Add at least one product');
   const convId = int(b.conversation_id) && one('SELECT id FROM conversations WHERE id = ? AND workspace_id = ?', int(b.conversation_id), wsId(req)) ? int(b.conversation_id) : null;
   const id = createOrder(wsId(req), { conversationId: convId, priced, name, phone, address, note: b.note, source: 'manual',
@@ -496,6 +504,39 @@ r.get('/channels/:id/templates', manage, async (req, res) => {
   try { res.json(await listTemplates(ch)); } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// ----- Meta Conversions API
+r.get('/capi', manage, (req, res) => res.json(capiSettings(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)))));
+r.put('/capi', manage, (req, res) => {
+  try { res.json(saveCapi(one('SELECT * FROM workspaces WHERE id = ?', wsId(req)), req.body || {})); audit(req, 'capi.update', wsId(req)); } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+
+// ----- coupon codes
+const couponIn = (b) => {
+  const code = s(b.code, 40).toUpperCase().replace(/\s/g, '');
+  if (!/^[A-Z0-9_-]{3,40}$/.test(code)) throw new Error('Code: 3-40 letters or numbers');
+  if (!['percent', 'fixed', 'free_delivery'].includes(b.kind)) throw new Error('Choose percent, fixed amount or free delivery');
+  const value = Number(b.value) || 0;
+  if (b.kind === 'percent' && !(value > 0 && value <= 100)) throw new Error('Percent must be 1-100');
+  if (b.kind === 'fixed' && !(value > 0)) throw new Error('Enter the discount amount');
+  if (b.expires_at && !/^\d{4}-\d{2}-\d{2}$/.test(b.expires_at)) throw new Error('Expiry date: YYYY-MM-DD');
+  return { code, kind: b.kind, value, min_order: Math.max(0, Number(b.min_order) || 0), max_uses: b.max_uses ? Math.max(1, int(b.max_uses)) : null, expires_at: b.expires_at || null, active: b.active === false ? 0 : 1 };
+};
+r.get('/coupons', (req, res) => res.json(all('SELECT * FROM coupons WHERE workspace_id = ? ORDER BY id DESC', wsId(req))));
+r.post('/coupons', manage, (req, res) => {
+  let c; try { c = couponIn(req.body || {}); } catch (e) { return bad(res, e.message); }
+  if (one('SELECT 1 FROM coupons WHERE workspace_id = ? AND code = ?', wsId(req), c.code)) return bad(res, 'That code already exists');
+  const id = Number(run('INSERT INTO coupons (workspace_id, code, kind, value, min_order, max_uses, expires_at, active) VALUES (?,?,?,?,?,?,?,?)',
+    wsId(req), c.code, c.kind, c.value, c.min_order, c.max_uses, c.expires_at, c.active).lastInsertRowid);
+  res.json(one('SELECT * FROM coupons WHERE id = ?', id));
+});
+r.put('/coupons/:id', manage, (req, res) => {
+  const row = one('SELECT * FROM coupons WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  run('UPDATE coupons SET active = ? WHERE id = ?', req.body?.active ? 1 : 0, row.id);
+  res.json(one('SELECT * FROM coupons WHERE id = ?', row.id));
+});
+r.delete('/coupons/:id', manage, (req, res) => { run('DELETE FROM coupons WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req)); res.json({ ok: true }); });
+
 // ----- rules that run without the AI
 r.put('/channels/:id/rules', manage, (req, res) => {
   const ch = one('SELECT id FROM channels WHERE id = ? AND workspace_id = ?', int(req.params.id), wsId(req));
@@ -555,7 +596,7 @@ r.post('/simulate', async (req, res) => {
   const fakeConv = { id: 0, stage: 'browsing', customer_name: null, customer_phone: null, customer_address: null };
   try {
     const d = await decide(req.workspace, { platform, greeting: s(req.body.greeting, 500) }, fakeConv, turns);
-    const priced = priceOrder(wsId(req), d.order?.items, { address: d.order?.address, zone: d.order?.delivery_zone });
+    const priced = priceOrder(wsId(req), d.order?.items, { address: d.order?.address, zone: d.order?.delivery_zone, coupon: d.order?.coupon });
     let reply = d.reply;
     if (d.order_status === 'awaiting_confirmation' && priced.lines.length && !priced.problems.length) reply = `${reply}\n\n${orderSummary(priced, d.order)}`;
     res.json({ reply, decision: d, order: priced });

@@ -86,13 +86,20 @@ r.get('/analytics', (req, res) => {
       (SELECT COUNT(*) FROM orders o WHERE o.workspace_id = ? AND substr(o.created_at, 1, 10) = d.day) AS orders
     FROM (SELECT DISTINCT substr(created_at, 1, 10) AS day FROM chat_messages WHERE workspace_id = ? AND created_at > datetime('now', ?)
           UNION SELECT DISTINCT substr(created_at, 1, 10) FROM orders WHERE workspace_id = ? AND created_at > datetime('now', ?)) d ORDER BY d.day`, id, id, id, since, id, since);
+  // Team: what each person did (typed replies, AI drafts they approved, chats they own and the orders from them).
+  const team = all(`SELECT u.id, COALESCE(NULLIF(u.name, ''), u.email) AS name,
+      (SELECT COUNT(*) FROM chat_messages m WHERE m.workspace_id = w.workspace_id AND m.sent_by = u.id AND m.status = 'sent' AND m.source = 'human' AND m.created_at > datetime('now', ?)) AS typed,
+      (SELECT COUNT(*) FROM chat_messages m WHERE m.workspace_id = w.workspace_id AND m.sent_by = u.id AND m.status = 'sent' AND m.source = 'ai' AND m.created_at > datetime('now', ?)) AS approved,
+      (SELECT COUNT(*) FROM conversations v WHERE v.workspace_id = w.workspace_id AND v.assigned_to = u.id) AS assigned,
+      (SELECT COUNT(*) FROM orders o JOIN conversations v ON v.id = o.conversation_id WHERE o.workspace_id = w.workspace_id AND v.assigned_to = u.id AND o.created_at > datetime('now', ?)) AS orders
+    FROM workspace_members w JOIN users u ON u.id = w.user_id WHERE w.workspace_id = ? ORDER BY typed + approved DESC`, since, since, since, id);
   const sentTotal = (msgs.sent || 0);
   res.json({
     days, messages: msgs, conversations: convs, converted, conversion: convs ? Math.round((converted / convs) * 1000) / 10 : 0,
     automation: sentTotal ? Math.round(((msgs.ai_auto || 0) / sentTotal) * 100) : 0, firstResponseSec: median,
     handoffs: n(`SELECT COUNT(*) AS n FROM activity WHERE workspace_id = ? AND type = 'chat_handoff' AND created_at > datetime('now', ?)`, id, since),
     orders, deliveryRate: (orders.delivered || 0) + (orders.lost || 0) ? Math.round(((orders.delivered || 0) / ((orders.delivered || 0) + (orders.lost || 0))) * 100) : null,
-    byPage, byAd, topProducts: Object.values(products).sort((a, b) => b.value - a.value).slice(0, 10), daily,
+    byPage, byAd, team, topProducts: Object.values(products).sort((a, b) => b.value - a.value).slice(0, 10), daily,
     learned: n('SELECT COUNT(*) AS n FROM learn_examples WHERE workspace_id = ? AND weight > 0', id),
   });
 });

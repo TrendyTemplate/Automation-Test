@@ -449,3 +449,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS broadcasts (  -- one message to many custome
   created_at TEXT NOT NULL DEFAULT (datetime('now')), finished_at TEXT
 );`);
 addColumn('conversations', 'opted_out', 'INTEGER NOT NULL DEFAULT 0'); // wrote "stop": no broadcasts
+db.exec(`CREATE TABLE IF NOT EXISTS coupons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  code TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'percent',   -- percent | fixed | free_delivery
+  value REAL NOT NULL DEFAULT 0, min_order REAL NOT NULL DEFAULT 0, max_uses INTEGER, used INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (workspace_id, code)
+);`);
+addColumn('orders', 'coupon', 'TEXT');
+addColumn('workspaces', 'capi_json', 'TEXT');   // Meta Conversions API: dataset id + encrypted token
+addColumn('orders', 'capi_sent_at', 'TEXT');
+addColumn('products', 'variant_stock', 'TEXT'); // JSON {"M": 5, "L / Black": 0}: stock per size/colour; total stock = sum

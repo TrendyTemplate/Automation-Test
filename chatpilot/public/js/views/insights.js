@@ -1,5 +1,5 @@
 // Customers (everyone who chatted or ordered, merged by phone) and Analytics.
-import { esc, icon, api, bind, formData, ago, num, empty, csvDownload, bars, hbars, modal } from '../ui.js';
+import { esc, icon, api, toast, bind, formData, ago, num, empty, csvDownload, bars, hbars, modal } from '../ui.js';
 
 const PL = { messenger: 'Messenger', instagram: 'Instagram', whatsapp: 'WhatsApp' };
 const money = (n, cur = 'BDT') => `${esc(cur)} ${Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
@@ -46,7 +46,7 @@ async function detail(c) {
 
 export async function analytics(ctx, params) {
   const days = [7, 30, 90].includes(Number(params.days)) ? Number(params.days) : 30;
-  const a = await api(`/sales/analytics?days=${days}`);
+  const [a, capi] = await Promise.all([api(`/sales/analytics?days=${days}`), ['owner', 'admin'].includes(ctx.me.role) ? api('/sales/capi').catch(() => null) : null]);
   const cur = a.orders.currency || 'BDT';
   const frt = a.firstResponseSec == null ? '—' : a.firstResponseSec < 60 ? `${a.firstResponseSec}s` : a.firstResponseSec < 3600 ? `${Math.round(a.firstResponseSec / 60)} min` : `${Math.round(a.firstResponseSec / 3600)} h`;
   ctx.view.innerHTML = `
@@ -71,6 +71,13 @@ export async function analytics(ctx, params) {
         ${a.byPage.map((p) => `<tr><td><span class="pf ${esc(p.platform)}">${PL[p.platform] || ''}</span> ${esc(p.name)}</td><td>${num(p.chats)}</td><td>${num(p.orders)}</td><td class="nowrap">${money(p.value, cur)}</td></tr>`).join('') || '<tr><td colspan="4" class="hint">No pages connected</td></tr>'}</tbody></table></div></div>
       <div class="card"><h3>By ad</h3><p class="hint">Chats that started from a click-to-message ad.</p><div class="table-wrap"><table><thead><tr><th>Ad</th><th>Chats</th><th>Orders</th><th>Value</th></tr></thead><tbody>
         ${a.byAd.map((p) => `<tr><td>${esc(p.ad_title || p.ad_id || 'Ad')}</td><td>${num(p.chats)}</td><td>${num(p.orders)}</td><td class="nowrap">${money(p.value, cur)}</td></tr>`).join('') || '<tr><td colspan="4" class="hint">No ad chats yet</td></tr>'}</tbody></table></div></div>
+      ${['owner', 'admin'].includes(ctx.me.role) ? `<form class="card" data-act="capi"><h3>${icon('send')} Send sales to Meta Ads</h3><p class="hint">With the Conversions API, every order from a chat is reported to Meta as a "Purchase", so your click-to-message ads find more real buyers. Events Manager → your dataset → Settings → Conversions API → Generate access token.</p>
+        <div class="grid g2"><div><label>Dataset / Pixel ID</label><input name="dataset_id" inputmode="numeric" value="${esc(capi?.dataset_id || '')}"></div><div><label>Access token</label><input name="token" type="password" autocomplete="off" placeholder="${capi?.enabled ? '•••• saved — leave blank to keep' : ''}"></div></div>
+        <label>Test event code <span class="hint">(optional, from Events Manager → Test events)</span></label><input name="test_code" value="${esc(capi?.test_code || '')}">
+        <div class="row mt"><button class="btn primary" type="submit">Save</button>${capi?.enabled ? '<span class="badge ok">On</span>' : ''}</div></form>` : ''}
+      <div class="card"><h3>Team</h3><div class="table-wrap"><table><thead><tr><th>Person</th><th>Typed</th><th>AI drafts approved</th><th>Chats assigned</th><th>Orders</th></tr></thead><tbody>
+        ${a.team.map((u) => `<tr><td>${esc(u.name)}</td><td>${num(u.typed)}</td><td>${num(u.approved)}</td><td>${num(u.assigned)}</td><td>${num(u.orders)}</td></tr>`).join('')}</tbody></table></div></div>
     </div>
     <p class="hint mt">${icon('sparkles', 'sm')} The assistant has learned from ${num(a.learned)} of your own replies so far.</p>`;
+  bind({ capi: async (f) => { const d = formData(f); if (!d.token) delete d.token; await api('/sales/capi', { method: 'PUT', body: d }); toast('Saved'); ctx.route(); } }, ctx.view);
 }

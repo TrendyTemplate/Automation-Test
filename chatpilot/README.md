@@ -35,7 +35,7 @@ AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp 
 cd chatpilot
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test             # 80 tests: unit, API, security, webhook→AI→Graph pipeline, learning, comments & rules, orders, couriers, payments, broadcasts, push, Meta connect & deletion callbacks, browser + phone layout + Bangla UI (Playwright)
+npm test             # 84 tests: unit, API, security, webhook→AI→Graph pipeline, learning, comments & rules, orders, couriers, payments, broadcasts, push, Meta connect & deletion callbacks, browser + phone layout + Bangla UI (Playwright)
 ANTHROPIC_API_KEY=sk-ant-… npm run check:ai   # 10 real conversations against the live Claude API (quality check, nothing is sent)
 ```
 Without an Anthropic key, customer messages are stored but not answered. Keys can be entered in **Admin → Settings** instead of `.env`.
