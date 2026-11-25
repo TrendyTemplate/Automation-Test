@@ -14,6 +14,7 @@ import adminRoutes from './routes/admin.js';
 import oauthRoutes from './routes/oauth.js';
 import { webhookRouter as socialWebhook } from './routes/sales.js';
 import metaCallbacks, { deletionStatusPage } from './routes/meta.js';
+import { handleCourierWebhook } from './services/couriers.js';
 import { appUrl, appName, getSetting, getBool } from './settings.js';
 import { metaConnectAvailable } from './services/meta.js';
 import fs from 'node:fs';
@@ -62,6 +63,11 @@ export function createApp() {
   // Messenger / Instagram / WhatsApp webhooks: raw body is needed to verify Meta's X-Hub-Signature-256.
   app.use('/api/social/webhook', rateLimit({ windowMs: 60_000, limit: 3000 }), socialWebhook);
   app.use('/api/meta', rateLimit({ windowMs: 60_000, limit: 120 }), metaCallbacks); // Meta data-deletion / deauthorize callbacks
+  // Courier status webhooks (Steadfast / Pathao / RedX). The URL carries a per-shop secret.
+  app.post('/api/couriers/hook/:token', rateLimit({ windowMs: 60_000, limit: 600 }), express.json({ limit: '200kb' }), async (req, res) => {
+    try { const r = await handleCourierWebhook(req.params.token, req.body); res.status(r.status).json({ status: r.status === 200 ? 'success' : 'not found' }); }
+    catch (e) { console.error('[courier-hook]', e.message); res.status(200).json({ status: 'success' }); }
+  });
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
 
@@ -69,7 +75,7 @@ export function createApp() {
   // own origin. Uses Fetch Metadata where available and the Origin header otherwise.
   app.use('/api', (req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-    if (req.path.startsWith('/billing/webhook') || req.path.startsWith('/social/webhook') || req.path.startsWith('/meta/')) return next();
+    if (req.path.startsWith('/billing/webhook') || req.path.startsWith('/social/webhook') || req.path.startsWith('/meta/') || req.path.startsWith('/couriers/hook/')) return next();
     const site = req.headers['sec-fetch-site'];
     if (site && !['same-origin', 'none'].includes(site)) return res.status(403).json({ error: 'Cross-site request blocked' });
     const origin = req.headers.origin;

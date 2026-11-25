@@ -422,3 +422,4 @@ addColumn('workspaces', 'assign_cursor', 'INTEGER NOT NULL DEFAULT 0');
 // Rich messages: customer photos / voice notes, product photos and tap-to-answer buttons we send.
 addColumn('chat_messages', 'attachments_json', 'TEXT');
 addColumn('chat_messages', 'buttons_json', 'TEXT');
+addColumn('workspaces', 'courier_hook', 'TEXT'); // random secret in the courier webhook URL

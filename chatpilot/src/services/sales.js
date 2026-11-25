@@ -304,6 +304,16 @@ export async function respond(conversationId) {
 
   if (orderId) {
     emit(ws.id, 'order', { order: orderId, conversation: conv.id });
+    // Fake-order guard: flag COD orders from numbers that often refuse parcels.
+    try {
+      const { fraudCheck } = await import('./couriers.js');
+      const fc = await fraudCheck(ws, phone);
+      if (fc.total >= 3 && fc.ratio < 50) {
+        run(`UPDATE orders SET note = TRIM(COALESCE(note, '') || ' ⚠ Risky: only ' || ? || '% of ' || ? || ' past parcels delivered — ask for advance payment') WHERE id = ?`, fc.ratio, fc.total, orderId);
+        logActivity(ws.id, 'order_risk', { order: orderId, conversation: conv.id, error: `${fc.ratio}% delivered (${fc.total} parcels)` });
+        await alert(ws, `⚠ Order #${orderId} looks risky: only ${fc.ratio}% of ${fc.total} past parcels to this number were delivered.`);
+      }
+    } catch { /* fraud check is best effort */ }
     logActivity(ws.id, 'order_created', { conversation: conv.id, order: orderId, total: priced.total, currency: priced.currency, from: name });
     await alert(ws, `🛒 New ${PLATFORMS[channel.platform].label} order #${orderId}: ${money(priced.total, priced.currency)} from ${name}\n${appUrl()}/app#orders`);
   }
