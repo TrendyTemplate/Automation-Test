@@ -2,7 +2,7 @@
 
 AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp Business**. Shops connect their Page / Instagram account / WhatsApp number, add their products, and the assistant (Anthropic Claude) answers customers 24/7 in their own language, recommends products from the catalog, collects name, phone and address, and records confirmed orders — prices always come from the catalog, never from the AI.
 
-> 🇧🇩 বাংলা: **[সেটআপ গাইড](docs/SETUP_BN.md)** · **[Meta App Review গাইড](docs/META_APP_REVIEW_BN.md)** · 🔒 **[Security architecture](docs/SECURITY.md)**
+> 🇧🇩 বাংলা: **[সেটআপ গাইড](docs/SETUP_BN.md)** · **[Meta App Review গাইড](docs/META_APP_REVIEW_BN.md)** · **[A–Z রোডম্যাপ](docs/ROADMAP_BN.md)** · 🔒 **[Security architecture](docs/SECURITY.md)**
 >
 > ChatPilot is a separate product from MailPilot AI (the email assistant at the repository root). It shares the same account, billing, admin and security foundation, but has its own database, plans, pages and deployment.
 
@@ -16,6 +16,14 @@ AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp 
 - **Safe by design** — invented prices or discounts, unknown links, "never say" phrases, low confidence, complaints/refunds and prompt-injection attempts are held as drafts for a person. Even on Auto-pilot.
 - **Hands off to you** — "Needs human" queue with Telegram/Slack alerts; when anyone replies (in ChatPilot or in Meta's own inbox) the AI stays quiet for 12 hours.
 - **Meta-compliant** — signed webhooks (X-Hub-Signature-256), 24-hour messaging window enforced in code, retries de-duplicated, message bursts debounced into one answer.
+- **Comment rules without AI** — hide comments with phone numbers / links / blocked words, instant keyword replies (public + inbox), per-post on/off, one answer per person per post.
+- **Chat menu** — Messenger Get Started, greeting, ice breakers and persistent menu; Instagram ice breakers; WhatsApp conversation starters. Story replies and mentions reach the assistant.
+- **Business hours** — away message (once per 12h) or the assistant keeps selling and says a person will confirm when you open.
+- **Delivery charges & payments** — zones by address words, free-delivery threshold; bKash / Nagad / Rocket numbers with an advance-payment rule; the assistant collects the TrxID, a person verifies it, reused TrxIDs are flagged.
+- **Couriers** — Steadfast, Pathao, RedX booking from an order, tracking code sent to the customer, status sync by webhook or polling; delivery-history fraud check (BDCourier / Steadfast / own orders).
+- **Customers & analytics** — customers merged by phone across channels (orders, spend, return rate, segments, CSV); first-response time, AI share, chat→order conversion, delivery rate, revenue by page / click-to-message ad / product.
+- **Broadcasts inside Meta's rules** — 24-hour window on Messenger/Instagram, approved templates on WhatsApp, "stop" opt-out, daily cap.
+- **Installable app + push** — PWA with Web Push (VAPID, RFC 8291, no extra dependency) for new orders, risky orders, payments to verify and hand-offs. Bangla interface.
 - **Brings buyers back** — optional one-time follow-up for quiet buyers inside the 24-hour window.
 - **One-click "Connect with Facebook"** — shops connect their Page, Instagram and WhatsApp (Embedded Signup) through the platform's Meta app; webhooks are subscribed automatically. Manual token entry remains as an advanced option. Meta's data-deletion and deauthorize callbacks are built in.
 - **Draft → Auto-pilot** — every channel starts in Draft mode (one-click approve/edit); switch to Auto-pilot when you trust it.
@@ -27,7 +35,7 @@ AI sales assistant SaaS for **Facebook Messenger, Instagram Direct and WhatsApp 
 cd chatpilot
 npm install
 npm start            # http://localhost:3000 — works with zero config in dev
-npm test             # 46 tests (learning engine, comments and one-step Facebook sign-up included): unit, API, security, webhook→AI→Graph pipeline, Meta connect & deletion callbacks, browser + phone layout (Playwright)
+npm test             # 80 tests: unit, API, security, webhook→AI→Graph pipeline, learning, comments & rules, orders, couriers, payments, broadcasts, push, Meta connect & deletion callbacks, browser + phone layout + Bangla UI (Playwright)
 ANTHROPIC_API_KEY=sk-ant-… npm run check:ai   # 10 real conversations against the live Claude API (quality check, nothing is sent)
 ```
 Without an Anthropic key, customer messages are stored but not answered. Keys can be entered in **Admin → Settings** instead of `.env`.
